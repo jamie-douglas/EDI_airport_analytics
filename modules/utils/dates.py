@@ -1,5 +1,5 @@
 #modules/utils/dates.py
-from ast import List
+from typing import Union, List
 
 import pandas as pd
 
@@ -20,12 +20,12 @@ def to_datetime(df: pd.DataFrame, columns: Union[str, List[str]]) -> pd.DataFram
         The input DataFrame with specified columns converted to datetime.
     """
     x = df.copy()
-    cols = [columns] if isinstance(columns, str) else columns = list(columns)
+    cols = [columns] if isinstance(columns, str) else list(columns)
     for col in cols:
         x[col] = pd.to_datetime(x[col], errors='coerce')
     return x
 
-def add_date_parts(df: pf.DataFrame, col: str) -> pd.DataFrame:
+def add_date_parts(df: pd.DataFrame, col: str) -> pd.DataFrame:
     """
     Adds date components derived from datetime column.
     

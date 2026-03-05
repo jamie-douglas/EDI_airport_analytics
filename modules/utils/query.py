@@ -63,7 +63,7 @@ def query(
     engine = get_engine()
 
     #SELECT
-    select_clause = "SELECT DISTINCT" if distinct else "SELECT"
+    select_clause = "SELECT DISTINCT " if distinct else "SELECT "
     select_clause += ", ".join(columns)
 
     sql = f"{select_clause} FROM {table} WHERE 1=1"
