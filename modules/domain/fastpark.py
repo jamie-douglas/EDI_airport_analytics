@@ -136,7 +136,7 @@ def entry_exit_diffs_stats(fp_df: pd.DataFrame) -> pd.DataFrame:
     df = fp_df.copy()
 
     #Parse datetimes
-    for c in ["CheckInStarted", "ExpectedArrivalDate" "ActualCheckedOutDate", "ExpectedReturnDate"]:
+    for c in ["CheckInStarted", "ExpectedArrivalDate", "ActualCheckedOutDate", "ExpectedReturnDate"]:
         df[c] = pd.to_datetime(df[c], errors = "coerce")
 
     #Differences in minutes
@@ -377,7 +377,7 @@ def flight_info(flight_df: pd.DataFrame, fp_df: pd.DataFrame):
 
     # Top 3 airlines
     top_airlines = (
-        merged.groupby("Airline Description")["BookingReference"]
+        merged.groupby("Airline_Description")["BookingReference"]
         .nunique().sort_values(ascending=False)
         .reset_index().rename(columns={"BookingReference":"Count"})
         .head(3)
