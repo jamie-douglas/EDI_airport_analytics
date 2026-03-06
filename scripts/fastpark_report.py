@@ -6,10 +6,12 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 import argparse
 import time
 import pandas as pd
+import os
 
 from modules.utils.query import query
 from modules.utils.excel import write_once_then_update
 from modules.utils.progress import step
+from modules.viz.fastpark import plot_distribution
 
 from modules.domain.fastpark import (
     monthly_movements_and_validations,
@@ -21,7 +23,6 @@ from modules.domain.fastpark import (
     flight_info,
 )
 
-from modules.viz.fastpark import plot_distribution
 
 def load_fastpark(start: str, end: str, overlap: bool = True) -> pd.DataFrame:
     """
@@ -155,7 +156,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
 
     # 3) Monthly movements
     print("[3/7] Monthly movements & validation…")
-    monthly_df, base_summary = monthly_movements_and_validations(fp)
+    monthly_df, base_summary = monthly_movements_and_validations(fp, start, end)
     t3 = step(t2, "Monthly movements computed")
 
     # 4) Duration validation
@@ -165,7 +166,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
 
     # 5) Peaks + diffs + histogram
     print("[5/7] Peaks + entry/exit stats…")
-    peaks = peak_days_table(fp)
+    peaks = peak_days_table(fp, start, end)
     central, desc, avg_e, med_e, avg_x, med_x = entry_exit_diffs_stats(fp)
     hist = entry_exit_histogram(fp, avg_e, med_e, avg_x, med_x)
     t5 = step(t4, "Peaks/stats/hist computed")
@@ -190,11 +191,11 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
 
     # 6) LOS + flights
     print("[6/7] LOS + flight info…")
-    avg_los, top3, bot3, los_bins = length_of_stay(fp)
+    avg_los, top3, bot3, los_bins = length_of_stay(fp, start, end)
     top_airlines, sectors = flight_info(fl, fp)
 
     # Tidy flight info tables
-    top_airlines = top_airlines.rename(columns={"Airline Description": "Name"})
+    top_airlines = top_airlines.rename(columns={"Airline_Description": "Name"})
     sectors = sectors.rename(columns={"Sector": "Name"})
     top_airlines["Category"] = "Airline"
     sectors["Category"] = "Sector"

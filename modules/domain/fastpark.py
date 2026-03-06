@@ -5,9 +5,8 @@ from typing import Tuple, Optional, Sequence
 
 from modules.analytics.peaks import peak_day
 from modules.analytics.bins import histogram_counts
-from modules.analytics.durations import duration_validation_summary
 
-def monthly_movements_and_validations(fp_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def monthly_movements_and_validations(fp_df: pd.DataFrame, start: str, end: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Computes monthtly entry/exit counts and a validation summary
     
@@ -15,6 +14,10 @@ def monthly_movements_and_validations(fp_df: pd.DataFrame) -> Tuple[pd.DataFrame
     ----------
     fp_df: pd.DataFrame
         Input DataFrame
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
 
     Returns
     ----------
@@ -26,21 +29,31 @@ def monthly_movements_and_validations(fp_df: pd.DataFrame) -> Tuple[pd.DataFrame
     """
 
     df = fp_df.copy()
+    start_ts, end_ts = pd.to_datetime(start), pd.to_datetime(end)
 
-    #Split into vali entry/exit subsets
-    entries = df.dropna(subset=["CheckInEnded"]).copy()
+    #Filer entries within window using CheckInEnded
+    entries = df.dropna(subset=["CheckInEnded"])
+    entries = entries[
+        (pd.to_datetime(entries["CheckInEnded"]) >= start_ts) &
+        (pd.to_datetime(entries["CheckInEnded"]) < end_ts)
+    ]
+
+    #Filer exits within window using ActualCheckedOutDate
     exits = df.dropna(subset=["ActualCheckedOutDate"]).copy()
+    exits = exits[
+        (pd.to_datetime(exits["ActualCheckedOutDate"]) >= start_ts) &
+        (pd.to_datetime(exits["ActualCheckedOutDate"]) < end_ts)
+    ]
 
-    #Monthly Entries
+    #Monthly buckets using Period YYY-MM (no timestamp in Excel)
     if not entries.empty:
-        entries["Month"]= pd.to_datetime(entries["CheckInEnded"]).dt.to_period("M").dt.to_timestamp()
+        entries["Month"]= pd.to_datetime(entries["CheckInEnded"]).dt.to_period("M")
         monthly_entries = entries.groupby("Month")["BookingReference"].nunique()
     else:
         monthly_entries = pd.Series(dtype = "float64")
 
-    #Monthly exits
     if not exits.empty:
-        exits["Month"]= pd.to_datetime(exits["ActualCheckedOutDate"]).dt.to_period("M").dt.to_timestamp()
+        exits["Month"]= pd.to_datetime(exits["ActualCheckedOutDate"]).dt.to_period("M")
         monthly_exits = exits.groupby("Month")["BookingReference"].nunique()
     else:
         monthly_exits = pd.Series(dtype = "float64")
@@ -55,10 +68,15 @@ def monthly_movements_and_validations(fp_df: pd.DataFrame) -> Tuple[pd.DataFrame
         "Exits": monthly_exits.reindex(idx, fill_value = 0)
     }).reset_index()
 
-    #Validation summary
+    
+    # Convert Month to "YYYY-MM"
+    monthly_df["Month"] = monthly_df["Month"].astype(str)
+
+    #Total distinct transactions: A transaction is a booking that had an entry or exit in the window
+    valid_refs = pd.unique(pd.concat([entries["BookingReference"], exits["BookingReference"]]), ignore_index=True)
+    total_transactions = df[df["BookingReference"].isin(valid_refs)]["BookingReference"].nunique()
     total_entries = entries["BookingReference"].nunique()
     total_exits = exits["BookingReference"].nunique()
-    total_transactions = df["BookingReference"].nunique()
 
     summary_df = pd.DataFrame({
         "Metric": [
@@ -79,7 +97,7 @@ def monthly_movements_and_validations(fp_df: pd.DataFrame) -> Tuple[pd.DataFrame
 
     return monthly_df, summary_df
 
-def peak_days_table(fp_df: pd.DataFrame) -> pd.DataFrame:
+def peak_days_table(fp_df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
     """
     Identify peak days for entries, exits and total movements
     
@@ -87,18 +105,34 @@ def peak_days_table(fp_df: pd.DataFrame) -> pd.DataFrame:
     ----------
     fp_df: pd.DataFrame
         Input DataFrame
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
 
     Returns
     ----------
     pd.DataFrame
         Columns ['Peak Type', 'Date', 'Total']
+        Rows: Peak Entries Day, Peak Exits Day, Peak Movements Day
     """
 
     df = fp_df.copy()
+    start_ts, end_ts = pd.to_datetime(start), pd.to_datetime(end)
 
-    #Valid entry/exit rows
+    #Filter entries and exits within the window
     entries = df.dropna(subset=["CheckInEnded"])
+    entries = entries[
+        (pd.to_datetime(entries["CheckInEnded"]) >= start_ts) &
+        (pd.to_datetime(entries["CheckInEnded"]) < end_ts)
+    ]
+
     exits = df.dropna(subset=["ActualCheckedOutDate"])
+    exits = exits[
+        (pd.to_datetime(exits["ActualCheckedOutDate"]) >= start_ts) &
+        (pd.to_datetime(exits["ActualCheckedOutDate"]) < end_ts)
+    ]
+
 
     #Daily distint counts per group
     daily_entries = entries.groupby(pd.to_datetime(entries["CheckInEnded"]).dt.date)["BookingReference"].nunique()
@@ -266,17 +300,30 @@ def checkin_duration_validation(fp_df: pd.DataFrame) -> pd.DataFrame:
     Returns
     ----------
     pd.DataFrame
+        Kiosk duration summary
 
     """
-    return duration_validation_summary(
-        df=fp_df.copy(),
-        start_col="CheckInStarted",
-        end_col="CheckInEnded",
-        recorded_secs_col="CheckInDurationSecs"
-    )
+    for c in ["CheckInStarted", "CheckInEnded"]:
+        fp_df[c] = pd.to_datetime(fp_df[c], errors="coerce")
 
+    #Compute actual duration in seconds
+    fp_df["ActualDurationSecs"] = (fp_df["CheckInEnded"] - fp_df["CheckInStarted"]).dt.total_seconds()
+    fp_df["DurationMatch"] = fp_df["ActualDurationSecs"] == fp_df["CheckInDurationSecs"]
 
-def length_of_stay(fp_df: pd.DataFrame, bins: Optional[Sequence[int]] = None, max_days: int = 90):
+    return pd.DataFrame({
+        "Metric": [
+            "Average Kiosk Transaction Time (secs)",
+            "Invaild Duration Count",
+            "Total Transactions"
+        ],
+        "Value": [
+            float(fp_df["ActualDurationSecs"].mean()) if len(fp_df) > 0 else 0.0,
+            int((~fp_df["DurationMatch"]).sum()),
+            int(len(fp_df))
+        ]
+    })
+
+def length_of_stay(fp_df: pd.DataFrame, start: str, end: str, bins: Optional[Sequence[int]] = None, max_days: int = 90):
     """
     Compute LOS (length of stay) metrics and distribution.
 
@@ -284,12 +331,28 @@ def length_of_stay(fp_df: pd.DataFrame, bins: Optional[Sequence[int]] = None, ma
     ----------
     fp_df: pd.DataFrame
         Input DataFrame with columns 'CheckInEnded' and 'ActualCheckedOutDate'
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
     bins: Optional[Sequence[int]]
         Bin edges for LOS distribution (in days). If None, defaults to [1,2,3,7,10,14,21,30,60,90]
     max_days: int
         Maximum LOS in days to include in analysis (default 90). Records with LOS above this will be filtered out as likely data quality issues.
+
+    Returns
+    ----------
+    avg_df: pd.DataFrame
+        DataFrame with average LOS
+    top3: pd.DataFrame
+        Top 3 longest LOS records with columns ['BookingReference', 'Length of Stay Days']
+    bottom3: pd.DataFrame
+        Bottom 3 shortest LOS records with columns ['BookingReference', 'Length of Stay Days']
+    bins_df: pd.DataFrame
+        LOS distribution with columns ['Bin', 'Count'] where 'Bin' is a human-friendly label for the LOS range (e.g. "0-1", "1-2", "2-3", "3-6", etc.)
     """
     df = fp_df.copy()
+    start_ts, end_ts = pd.to_datetime(start), pd.to_datetime(end)
 
     # Parse datetimes
     for c in ["CheckInEnded", "ActualCheckedOutDate"]:
@@ -300,6 +363,14 @@ def length_of_stay(fp_df: pd.DataFrame, bins: Optional[Sequence[int]] = None, ma
         "CheckInEnded": "min",
         "ActualCheckedOutDate": "max"
     }).reset_index()
+
+    
+    # Include only stays whose checkout is inside window
+    stays = stays[
+        (stays["ActualCheckedOutDate"] >= start_ts) &
+        (stays["ActualCheckedOutDate"] <  end_ts)
+    ]
+
 
     # LOS in days
     stays["Length of Stay Days"] = (
@@ -350,7 +421,7 @@ def flight_info(flight_df: pd.DataFrame, fp_df: pd.DataFrame):
     Parameters
     ----------
     flight_df: pd.DataFrame
-        Flight schedule DataFrame with columns 'Combined Flight Code', 'Scheduled DateTime', 'Airline Description', 'Sector'
+        Flight schedule DataFrame with columns 'Combined Flight Code', 'Scheduled DateTime', 'Airline_Description', 'Sector'
     fp_df: pd.DataFrame
         FastPark DataFrame with columns 'BookingReference', 'ExpectedReturnDate', 'ReturnFlight'
     

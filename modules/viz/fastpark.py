@@ -6,8 +6,33 @@ import matplotlib.pyplot as plt
 
 def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> None:
     """
-    Plot entry/exit histogram with average/median overlays.
-    """
+        Plot the FastPark entry/exit distribution histogram with average and median overlays.
+
+        This function takes the histogram dataframe produced by `entry_exit_histogram`
+        and generates a clean vertical-bar plot with:
+            - Bars showing entry/exit counts per bin
+            - Vertical lines for: On-time (0 mins), average, and median
+            - HH:MM tick labels at -180, -120, -60, 0, 60, 120, 180 mins
+
+        Parameters
+        ----------
+        hist_df : pd.DataFrame
+            The histogram output including:
+                ['Bin Start', 'Bin End', 'Bin Midpoint',
+                'Entry Count', 'Exit Count',
+                'Zero Line', 'Avg Entry Line', 'Median Entry Line',
+                'Avg Exit Line',  'Median Exit Line']
+        mode : str
+            Either "entry" or "exit" — selects which counts and which overlay lines to plot.
+        output_path : str
+            File path (PNG) to save the generated chart.
+
+        Returns
+        -------
+        None
+            Saves a PNG file to the given path.
+        """
+
     df = hist_df.copy()
 
     # Series + colors per mode
