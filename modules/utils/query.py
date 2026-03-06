@@ -3,6 +3,16 @@
 from modules.utils.db import get_engine
 from modules.utils.sql import read_sql
 from sqlalchemy import text
+import pandas as pd
+
+
+def _normalise_iso_date(d: str | None) -> str | None:
+    """Convert input to strict YYYY-MM-DD or return None."""
+    if d is None:
+        return None
+    ts = pd.to_datetime(d, errors="raise")
+    return ts.strftime("%Y-%m-%d")
+
 
 def query(
         table: str,
@@ -52,7 +62,10 @@ def query(
     pandas.DataFrame
         DataFrame containing the query results
     """
-    
+    #--- Normalise incoming dates ---
+    start = _normalise_iso_date(start)
+    end = _normalise_iso_date(end)
+
     #Validation: can't use start and end without date_column
     if (start or end) and not date_column:
             raise ValueError(
@@ -75,7 +88,6 @@ def query(
     if where:
         for condition in where:
             sql += f" AND ({condition})"
-    
 
 
     #Date filtering
@@ -101,6 +113,7 @@ def query(
     #ORDER BY
     if order_by:
         sql += f" ORDER BY {order_by}"
+
     
     #Execute
     return read_sql(engine, sql, params=final_params)
