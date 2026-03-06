@@ -9,6 +9,7 @@ import pandas as pd
 
 from modules.utils.query import query
 from modules.utils.excel import write_once_then_update
+from modules.utils.progress import step
 
 from modules.domain.fastpark import (
     monthly_movements_and_validations,
@@ -21,27 +22,6 @@ from modules.domain.fastpark import (
 )
 
 from modules.viz.fastpark import plot_distribution
-
-
-def _step(prev: float, msg: str) -> float:
-    """
-    Print progress with elapsed seconds.
-
-    Parameters
-    ----------
-    prev: float
-        Previous timestamp (from time.perf_counter())
-    msg: str
-        Message to print for this step
-    
-    Returns
-    ----------    
-    
-    """
-    now = time.perf_counter()
-    print(f"    ✓ {msg}   [{now - prev:0.2f}s]")
-    return now
-
 
 def load_fastpark(start: str, end: str, overlap: bool = True) -> pd.DataFrame:
     """
@@ -162,7 +142,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     # 1) Load FastPark
     print("[1/7] Loading FastPark…")
     fp = load_fastpark(start, end, overlap)
-    t1 = _step(t0, f"Loaded FastPark ({len(fp):,} rows)")
+    t1 = step(t0, f"Loaded FastPark ({len(fp):,} rows)")
 
     if fp.empty:
         print("No FastPark rows in this window.")
@@ -171,24 +151,24 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     # 2) Load flights
     print("[2/7] Loading flight data…")
     fl = load_flights(start, end)
-    t2 = _step(t1, f"Loaded flights ({len(fl):,} rows)")
+    t2 = step(t1, f"Loaded flights ({len(fl):,} rows)")
 
     # 3) Monthly movements
     print("[3/7] Monthly movements & validation…")
     monthly_df, base_summary = monthly_movements_and_validations(fp)
-    t3 = _step(t2, "Monthly movements computed")
+    t3 = step(t2, "Monthly movements computed")
 
     # 4) Duration validation
     print("[4/7] Check-in duration validation…")
     dur = checkin_duration_validation(fp)
-    t4 = _step(t3, "Duration validation complete")
+    t4 = step(t3, "Duration validation complete")
 
     # 5) Peaks + diffs + histogram
     print("[5/7] Peaks + entry/exit stats…")
     peaks = peak_days_table(fp)
     central, desc, avg_e, med_e, avg_x, med_x = entry_exit_diffs_stats(fp)
     hist = entry_exit_histogram(fp, avg_e, med_e, avg_x, med_x)
-    t5 = _step(t4, "Peaks/stats/hist computed")
+    t5 = step(t4, "Peaks/stats/hist computed")
 
     
     # Optional charts
@@ -205,7 +185,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
         plot_distribution(hist, "entry", plot_folder + "fastpark_entry_distribution.png")
         plot_distribution(hist, "exit",  plot_folder + "fastpark_exit_distribution.png")
 
-        t5 = _step(t5, f"Charts saved → {plot_folder}")
+        t5 = step(t5, f"Charts saved → {plot_folder}")
 
 
     # 6) LOS + flights
@@ -219,7 +199,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     top_airlines["Category"] = "Airline"
     sectors["Category"] = "Sector"
     flight_info_df = pd.concat([top_airlines, sectors], ignore_index=True)[["Category", "Name", "Count"]]
-    t6 = _step(t5, "LOS + flight info complete")
+    t6 = step(t5, "LOS + flight info complete")
 
     # Combined summary
     summary_full = pd.concat([base_summary, dur, peaks, central, desc], ignore_index=True)
@@ -257,7 +237,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
             excel_out, "Flight Info", flight_info_df, anchor="A2", include_header=True
         )
 
-        _step(t6, f"Excel updated → {excel_out}")
+        step(t6, f"Excel updated → {excel_out}")
 
     print("\n✔ FastPark report complete.\n")
 

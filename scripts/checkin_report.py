@@ -1,11 +1,16 @@
 #scripts/checkin_report.py
+import sys
+import pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
 
 import argparse
-import sys
+import time
 import pandas as pd
 
 from modules.utils.query import query
 from modules.utils.excel import write_once_then_update
+from modules.utils.progress import step
 from modules.domain.checkin import compute_peak_rolling_hour, compute_durations, compute_penetration, compute_apr_sept_sidecheck
 
 # ====================================================================================
@@ -179,20 +184,45 @@ def main(start: str, end: str, excel_out: str | None) -> None:
     -------
     None
     """
-    # Load report-specific datasets
+
+    print("\nCHECK-IN REPORT")
+    print(f"Window: {start} -> {end}\n")
+
+    t0 = time.perf_counter()
+
+    # [1/6] Load CUPPs
+    print("[1/6] Loading CUPPs...")
     cupps  = load_cupps(start, end)
+    t1 = step(t0, f" Loaded CUPPs ({len(cupps):,} rows)")
+
+    # [2/6] Load kiosk
+    print("[2/6] Loading Kiosk...")
     kiosk  = load_kiosk(start, end)
+    t2 = step(t1, f" Loaded Kiosk ({len(kiosk):,} rows)")
+
+    # [3/6] Load flights (denominator)
+    print("[3/6] Loading flights (denominator)…")
     flights = load_flights_denominator(start, end)
+    t3 = step(t2, f" Loaded flights ({len(flights):,} rows)")
 
-    # Analytics (reusable domain helpers)
+    if cupps.empty and kiosk.empty:
+        print("No Check-In data for this window")
+
+    # [4/6] Analytics
+    print("[4/6] Computing analytics…")
+    #Peak rolling hour and window
     roll, peak_val, win_start, win_end = compute_peak_rolling_hour(cupps, kiosk)
+    #Average durations
     desk_mean, kiosk_mean = compute_durations(cupps, kiosk)
+    #Penetration overll
     rate_all, pen_all = compute_penetration(cupps, kiosk, flights)
-
+    #Penetration Apr-Sep (using start-year)
     year_start = pd.Timestamp(start).year
     rate_apr_sep, pen_apr_sep = compute_apr_sept_sidecheck(cupps, kiosk, flights, year_start)
+    t4 = step(t3, "Analytics computed")
 
-    # Console summary
+    # [5/6]Console summary
+    print("[5/6] Console summary...")
     print("\n--- CHECK-IN: PEAK ROLLING HOUR ---")
     print(f"Peak rolling hour pax: {int(peak_val)}")
     print(f"Window: {win_start:%Y-%m-%d %H:%M} → {win_end:%Y-%m-%d %H:%M}")
@@ -206,22 +236,29 @@ def main(start: str, end: str, excel_out: str | None) -> None:
 
     print("\n--- PENETRATION (Apr–Sep) ---")
     print(pen_apr_sep)
+    t5 = step(t4, "Console summary printed")
 
-    # Optional Excel output
+    # [6/6] Optional Excel output
     if excel_out:
+        print("[6/6] Writing Excel...")
+
+        #Rolling hour
         write_once_then_update(
             path=excel_out, sheet="Rolling_Hour",
             df=roll[["Bucket","CUPPS_Pax","SITA_Pax","Total_Pax","Rolling1h"]],
             anchor="A2", include_header=True
         )
+        #Penetration overall
         write_once_then_update(
             path=excel_out, sheet="Penetration_All",
             df=pen_all, anchor="A2", include_header=True
         )
+        #Penetration Apr -Sep
         write_once_then_update(
             path=excel_out, sheet="Penetration_Apr_Sep",
             df=pen_apr_sep, anchor="A2", include_header=True
         )
+        #Durations
         durations_df = pd.DataFrame({
             "Metric": ["Avg Desk per pax (s)", "Avg Kiosk (s)"],
             "Value":  [desk_mean, kiosk_mean]
@@ -230,6 +267,7 @@ def main(start: str, end: str, excel_out: str | None) -> None:
             path=excel_out, sheet="Durations",
             df=durations_df, anchor="A2", include_header=True
         )
+    print("\n✔ Check-in report complete.\n")
 
 
 if __name__ == "__main__":
