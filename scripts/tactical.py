@@ -263,6 +263,7 @@ def main(weeks_short: int, weeks_long: int, summer_start: str, summer_end: str, 
     hr_6w = arrivals_per_hour(fl_6w)
     hr_su = arrivals_per_hour(fl_su)
 
+
     sectors_2w = [c for c in hr_2w.columns if c not in ["Date", "Hour", "Hour_Label"]]
     sectors_6w = [c for c in hr_6w.columns if c not in ["Date", "Hour", "Hour_Label"]]
     sectors_su = [c for c in hr_su.columns if c not in ["Date", "Hour", "Hour_Label"]]

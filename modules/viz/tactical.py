@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.dates import HourLocator, DateFormatter
 import seaborn as sns
 
 # For optional baselines in hourly arrivals
@@ -336,7 +337,8 @@ def plot_peak_day_all_sectors(
     matplotlib.axes.Axes
         Axes with the rendered chart.
     """
-    df = hourly_df[hourly_df["Date"] == peak_day].copy().sort_values("Hour")
+    match_date = pd.to_datetime(peak_day).date()
+    df = hourly_df[hourly_df["Date"] == match_date].copy().sort_values("Hour")
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -361,7 +363,7 @@ def plot_peak_day_all_sectors(
     ax.set_axisbelow(True)
     ax.yaxis.grid(True, linestyle="--", alpha=0.5)
 
-    label = _fmt_day(peak_day)
+    label = _fmt_day(match_date)
     ax.set_title(title or f"Peak Arrival Day: {label}")
     plt.tight_layout()
     _maybe_save(fig, save_path)
@@ -584,11 +586,18 @@ def plot_peak_international_immigration(
         zorder=2,
     )
 
-    # Step line for capacity
+    
+    # Capacity lines for IA1/IA2 aligned with opening hours
+    left_edges = x["Time_15"].to_numpy()
+    slot = (left_edges[1] - left_edges[0]) if len(left_edges) > 1 else pd.Timedelta(minutes=15)
+    rightmost = left_edges[-1] + slot if len(left_edges) else pd.NaT
+    edges = np.append(left_edges, rightmost)
+    cap_vals = x["Capacity"].to_numpy(dtype=float)
+    cap_step = np.append(cap_vals, cap_vals[-1] if len(cap_vals) else np.nan)
     ax.step(
-        x["Time_15"].values,
-        x["Capacity"].values,
-        where="mid",
+        edges,
+        cap_step,
+        where="post",
         linestyle="--",
         color="#15235a",
         linewidth=1.2,
@@ -596,30 +605,36 @@ def plot_peak_international_immigration(
         zorder=3,
     )
 
+
     # Shade IA1 open blocks
+    
     flags = x["IA1_Open"].astype(bool).to_numpy()
     times = x["Time_15"].to_numpy()
     shaded_any = False
-    start_idx = None
-    for i, f in enumerate(flags):
-        if f and start_idx is None:
-            start_idx = i
-        if (not f or i == len(flags) - 1) and start_idx is not None:
-            end_i = i if not f else i
-            slot = (times[1] - times[0]) if len(times) > 1 else pd.Timedelta(minutes=15)
+    start_i = None
+    for i in range(len(flags) + 1):
+        current_open = flags[i] if i < len(flags) else False
+        if current_open and start_i is None:
+            start_i = i
+        if (not current_open) and start_i is not None:
+            start_edge = times[start_i]
+            end_edge = times[i] if i < len(times) else times[-1] + slot
             ax.axvspan(
-                times[start_idx],
-                times[end_i] + slot,
+                start_edge,
+                end_edge,
                 color="#7E0C6E",
                 alpha=0.15,
                 label="IA1 open" if not shaded_any else None,
                 zorder=1,
             )
             shaded_any = True
-            start_idx = None
+            start_i = None
+
 
     # Timestamps as 'DD Mon HH:MM'
-    _apply_datetime_axis(ax, formatter="%d %b %H:%M")
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M"))
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
     ax.set_ylabel("Passengers")
     ax.set_xlabel("Time")

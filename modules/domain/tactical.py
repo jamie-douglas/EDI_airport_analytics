@@ -410,9 +410,72 @@ def peak_security_hour(security_rh: pd.DataFrame) -> Dict[str, object]:
     }
 
 
+def security_peak_utilisation(peak_info: Dict[str, object], capacity_line: float) -> float:
+    """
+    Compute the utilisation percentage at the security peak rolling-hour window.
+
+    Parameters
+    ----------
+    peak_info : dict
+        Output of peak_security_hour(...), must include 'Total RH'.
+    capacity_line : float
+        Reference rolling-hour capacity (e.g., SECURITY_CAX).
+
+    Returns
+    -------
+    float
+        Utilisation percentage (0..100). Returns 0.0 if capacity_line <= 0.
+    """
+    total_rh = float(peak_info.get("Total RH", 0))
+    if capacity_line <= 0:
+        return 0.0
+    return (total_rh / capacity_line) * 100.0
+
+
+
 # ======================================================================
 # IMMIGRATION — 15‑MIN QUEUE (TPH/4)
 # ======================================================================
+
+
+def _ensure_15min_skeleton(day_df: pd.DataFrame, day_col: str = "Date", slot_col: str = "Time_15") -> pd.DataFrame:
+    """
+    Ensure a contiguous 15‑minute grid for a single day (00:00..23:45), left‑joining
+    any existing per‑slot arrivals and defaulting missing values to zero.
+
+    Parameters
+    ----------
+    day_df : pandas.DataFrame
+        Input DataFrame containing at least [day_col, slot_col] and (optionally) 'International'.
+        All rows must belong to the same day.
+    day_col : str, default "Date"
+        Column that holds the calendar day.
+    slot_col : str, default "Time_15"
+        Column that holds the left edge of the 15‑minute slot (datetime64[ns]).
+
+    Returns
+    -------
+    pandas.DataFrame
+        A 96‑row (00:00..23:45) 15‑minute skeleton for the day with columns:
+        [day_col, slot_col, 'Hour', 'International' (filled to 0 if missing)].
+    """
+    x = day_df.copy().sort_values(slot_col)
+    if x.empty:
+        return x
+
+    d = x[day_col].iloc[0]
+    day_start = pd.to_datetime(d)
+    skeleton = pd.DataFrame({
+        slot_col: pd.date_range(day_start, day_start + pd.Timedelta(hours=23, minutes=45), freq="15min")
+    })
+    skeleton[day_col] = d
+    skeleton["Hour"] = skeleton[slot_col].dt.hour
+
+    cols_to_merge = [c for c in x.columns if c in {day_col, slot_col, "International"}]
+    out = skeleton.merge(x[cols_to_merge], on=[day_col, slot_col], how="left")
+    out["International"] = pd.to_numeric(out.get("International", 0), errors="coerce").fillna(0)
+    return out
+
 
 def immigration_queue_15m(
     arrivals_15: pd.DataFrame,
@@ -455,12 +518,26 @@ def immigration_queue_15m(
         Subset for 'peak_day' with added columns:
           'IA1_Open' (bool), 'Throughput_15' (float), 'Capacity' (float), 'Overflow' (float)
     """
+    # Slice the selected day and ensure a full 96‑slot (00:00..23:45) grid so capacity/shading
+    # align exactly to IA1 open/close edges even when a boundary slot has zero arrivals.
     df = arrivals_15[arrivals_15["Date"] == peak_day].copy().sort_values("Time_15")
+    if df.empty:
+        return df
+    df = _ensure_15min_skeleton(df, day_col="Date", slot_col="Time_15")
 
+    # IA1 open rule — choose ONE of the following:
+    # A) Left‑edge semantics (slot is open if its START hour is open) — recommended:
     df["IA1_Open"] = df["Hour"].apply(lambda h: bool(ia1_is_open(peak_day, int(h))))
+
+    # B) Right‑edge semantics (slot is open if its END lies in an open hour) — alternative:
+    # df["Slot_End"] = pd.to_datetime(df["Time_15"]) + pd.Timedelta(minutes=15)
+    # df["IA1_Open"] = df["Slot_End"].dt.hour.apply(lambda h: bool(ia1_is_open(peak_day, int(h))))
+
+    # Per‑slot throughput and capacity
     df["Throughput_15"] = (ia2_tph + df["IA1_Open"].astype(int) * ia1_tph) / 4.0
     df["Capacity"]      =  ia2_cax + df["IA1_Open"].astype(int) * ia1_cax
 
+    # Simple overflow recursion
     overflow = []
     q_prev = 0.0
     for _, r in df.iterrows():
