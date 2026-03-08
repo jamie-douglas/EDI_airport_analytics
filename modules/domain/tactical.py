@@ -133,7 +133,7 @@ def arrivals_per_hour(flights: pd.DataFrame) -> pd.DataFrame:
     df = to_datetime(df, "Schedule")
 
     # 2) floor to hour
-    df = bucket_time(df, time_col="Schedule", freq="H", out_col="Schedule_H")
+    df = bucket_time(df, time_col="Schedule", freq="h", out_col="Schedule_H")
 
     # 3) add date parts from the FLOORED timestamp; map to canonical 'Date'/'Hour'
     df = add_date_parts(df, "Schedule_H")
@@ -340,22 +340,41 @@ def security_rolling_hour(
         Same rows with added:
           'Rolling Hour Pax', 'Rolling Hour Staff', 'Rolling Hour Total'
     """
+    
     df = security[security["Forecast DateTime"].dt.hour >= opening_hour].copy()
     df = df.sort_values(["Date", "Forecast DateTime"])
+
+    # Ensure types align for merges
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    key_cols = ["Date", "Forecast DateTime"]
 
     for src, out in [("Pax", "Rolling Hour Pax"),
                      ("Staff", "Rolling Hour Staff"),
                      ("Total", "Rolling Hour Total")]:
+
         rolled = rolling_sum(
-            df,
+            df.copy(),  # safe copy for function internals
             time_col="Forecast DateTime",
             value_col=src,
             window=window_slots,
             out_col=out,
             groupby_keys=["Date"],
         )
-        df[out] = rolled[out]
+
+        # Expect the rolled frame to include Date + time + out
+        # Coerce same key types
+        rolled["Date"] = pd.to_datetime(rolled["Date"]).dt.date
+
+        # Keep only keys + out_col, then merge
+        df = df.merge(
+            rolled[key_cols + [out]],
+            on=key_cols,
+            how="left",
+            validate="one_to_one"
+        )
+
     return df
+
 
 
 def peak_security_hour(security_rh: pd.DataFrame) -> Dict[str, object]:

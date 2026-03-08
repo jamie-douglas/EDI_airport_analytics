@@ -63,9 +63,10 @@ def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
 
 def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str, 
                 window: Union[str. int], out_col: str = "RollingSum",
-                groupby_keys: Optional[List[str]] = None) -> pd.DataFrame:
+                groupby_keys: Optional[List[str]] = None, min_periods: int = 1,) -> pd.DataFrame:
     """
-    Computes a rolling sum over time, optionally grouped by keys.
+    Computes a rolling sum over time, optionally grouped by keys. Returns only the key columns and time column and the new rolling column so callers 
+    can merge on key without index dependent behaviour.
 
     Parameters
     ----------
@@ -81,6 +82,8 @@ def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str,
         Name of the output column for the rolling sum
     groupby_keys: list of str, optional
         Keys for grouped rolling operations (e.g., per Date)
+    min_periods: int, default 1
+        Minimum observations in window to have a value (1 gives partial sums for early slots)
     
     Returns
     --------
@@ -91,23 +94,29 @@ def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str,
     x = df.copy()
     x[time_col] = pd.to_datetime(x[time_col], errors='coerce')
 
+    keep_cols = ([*(groupby_keys + [time_col])])
+
     if groupby_keys:
         x = x.sort_values(groupby_keys + [time_col])
-        x[out_col] = (
+        rolled = (
             x.groupby(groupby_keys)
-            .rolling(window=window, on=time_col)[value_col]
+            .rolling(window=window, on=time_col, min_periods=min_periods)[value_col]
             .sum()
             .reset_index(level=groupby_keys, drop=True)
         )
+        out = x[keep_cols].copy()
+        out[out_col] = rolled.to_numpy()
     else:
         x = x.sort_values(time_col)
-        x[out_col] = (
+        rs = (
             x.set_index(time_col)[value_col]
-            .rolling(window=window)
+            .rolling(window=window, min_periods=min_periods)
             .sum()
-            .to_numpy()
         )
-    return x
+        out = x[keep_cols].copy()
+        out[out_col] = rs.to_numpy()
+
+    return out
 
 def peak_rolling_window(df: pd.DataFrame, time_col: str, roll_col: str, bucket_minutes: int, bucket_count: int):
     """
