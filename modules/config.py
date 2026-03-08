@@ -47,3 +47,28 @@ IA1_BASELINE_NIGHT_HOURS = [(22, 24), (0, 1)]  # 22:00–01:00
 
 # IA2 is always 24 hours
 IA2_ALWAYS_OPEN = True
+
+
+# --------------------------
+# IMMIGRATION THROUGHPUT & CAPACITY
+# --------------------------
+IA1_TPH = 834
+IA2_TPH = 1304
+IA1_CAX = 569
+IA2_CAX = 754
+
+
+#--------------------------
+# SEASON WINDOWS (used by Tactical Readiness)
+# --------------------------
+# Use date-only strings here; we don't need time-of-day for these windows.
+SUMMER_START = "2026-03-29"
+SUMMER_END   = "2026-10-24"
+
+# --------------------------
+# SECURITY CAPACITY (for charts)
+# --------------------------
+# Security rolling-hour capacity reference line used in plots.
+SECURITY_CAX = 4240
+
+
