@@ -25,7 +25,7 @@ def mean_duration_seconds(df: pd.DataFrame, start_col: str, end_col: str, max_mi
     x = df.copy()
 
     x[start_col] = pd.to_datetime(x[start_col], errors="coerce")
-    x[end_col] = pd.to_datetime(x[end_col], erroes="coerce")
+    x[end_col] = pd.to_datetime(x[end_col], errors="coerce")
 
     secs= (x[end_col] - x[start_col]).dt.total_seconds()
     if max_minutes is not None:

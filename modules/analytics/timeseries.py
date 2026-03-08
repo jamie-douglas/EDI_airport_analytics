@@ -1,7 +1,7 @@
 #modules/analytics/timeseries.py
 
 import pandas as pd
-from typing import List, Optional, Literal
+from typing import List, Optional, Union
 
 def bucket_time(df: pd.DataFrame, time_col: str, freq: str,
                 out_col: str = "TimeBucket") -> pd.DataFrame:
@@ -62,7 +62,7 @@ def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
     )
 
 def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str, 
-                window: str | int, out_col: str = "RollingSum",
+                window: Union[str. int], out_col: str = "RollingSum",
                 groupby_keys: Optional[List[str]] = None) -> pd.DataFrame:
     """
     Computes a rolling sum over time, optionally grouped by keys.
@@ -132,6 +132,8 @@ def peak_rolling_window(df: pd.DataFrame, time_col: str, roll_col: str, bucket_m
     (float, pandas.Timestamp, pandas.Timestamp)
         Tuple containing (peak_value, window_start_stimestamp, window_end_timestamp)
     """
+    if df.empty or df[roll_col].dropna().empty:
+        return 0.0, pd.NaT, pd.NaT
 
     #find the row with the highest rolling sum
     peak_row = df.loc[df[roll_col].idxmax()]

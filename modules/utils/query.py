@@ -25,10 +25,27 @@ def query(
         end: str | None = None,
         distinct: bool = False,
         order_by: str | None = None,
-        overlap: bool = False
+        overlap: bool = False,
+        or_events: bool = False,
 ):
     """
     Executes a dynamic SQL SELECT query with optional filters, parameters, and date bounds
+    
+    Date filtering modes
+    --------------------
+    1) Single timestamp column:
+       WHERE date_col >= :start AND date_col < :end
+
+    2) Interval columns + overlap=True:
+       WHERE row_start < :end AND row_end >= :start
+
+    3) Interval columns + or_events=True:
+       WHERE (
+           (row_start >= :start AND row_start < :end)
+        OR (row_end   >= :start AND row_end   < :end)
+       )
+       Use this when your "event" can be either start or end, and end may be NULL.
+
     
     Parameters
     ----------
@@ -53,9 +70,7 @@ def query(
     order_by: str, optional
         ORDER BY clause without the keyword
     overlap : bool, optional
-        If true and both date_column and end_column are provided, returns rows that overlap the window
-        (row_start < end AND row_end >= start). If False, returns rows fully contained within the window 
-        (row_start >= start AND row_end < end). Default is False (non-overlapping).
+    or_events: bool, optional
         
     Returns
     ---------
@@ -91,14 +106,14 @@ def query(
 
 
     #Date filtering
-    if date_column and start and not end_column:
-        #single timestamp column
-        sql += f" AND {date_column} >= :start"
-        final_params['start'] = start
-        if end:
-            sql += f" AND {date_column} < :end"
-            final_params['end'] = end
-
+    if date_column and end_column and start and end and or_events:
+        sql += (
+            f" AND ( ({date_column} >= :start AND {date_column} < :end) "
+            f"OR    ({end_column} >= :start AND {end_column} < :end) )"
+        )
+        final_params["start"] = start
+        final_params["end"] = end
+    
     elif date_column and end_column and start and end:
         #interval columns (start, end)
         if overlap:
@@ -109,6 +124,16 @@ def query(
             sql += f" AND {date_column} >= :start AND {end_column} < :end"
         final_params['start'] = start
         final_params['end'] = end
+
+    elif date_column and start:
+        #single timestamp column
+        sql += f" AND {date_column} >= :start"
+        final_params['start'] = start
+        if end:
+            sql += f" AND {date_column} < :end"
+            final_params['end'] = end
+
+    
     
     #ORDER BY
     if order_by:

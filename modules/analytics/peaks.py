@@ -17,6 +17,8 @@ def peak_day(series_by_day: pd.Series) -> Tuple[pd.Timestamp, float]:
     (pandas.Timestamp, float)
         Peak day and its corresponding value
     """
-
-    peak_dt = series_by_day.idxmax()
+    s = series_by_day.dropna()
+    if s.empty:
+        return pd.NaT, 0.0
+    peak_dt = s.idxmax()
     return pd.to_datetime(peak_dt), float(series_by_day.loc[peak_dt])

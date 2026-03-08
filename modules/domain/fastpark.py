@@ -313,7 +313,7 @@ def checkin_duration_validation(fp_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({
         "Metric": [
             "Average Kiosk Transaction Time (secs)",
-            "Invaild Duration Count",
+            "Invalid Duration Count",
             "Total Transactions"
         ],
         "Value": [
