@@ -73,7 +73,7 @@ def monthly_movements_and_validations(fp_df: pd.DataFrame, start: str, end: str)
     monthly_df["Month"] = monthly_df["Month"].astype(str)
 
     #Total distinct transactions: A transaction is a booking that had an entry or exit in the window
-    valid_refs = pd.unique(pd.concat([entries["BookingReference"], exits["BookingReference"]]), ignore_index=True)
+    valid_refs = pd.unique(pd.concat([entries["BookingReference"], exits["BookingReference"]], ignore_index=True))
     total_transactions = df[df["BookingReference"].isin(valid_refs)]["BookingReference"].nunique()
     total_entries = entries["BookingReference"].nunique()
     total_exits = exits["BookingReference"].nunique()

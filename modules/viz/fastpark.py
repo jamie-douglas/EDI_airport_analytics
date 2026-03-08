@@ -48,6 +48,8 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     counts = df[counts_col].to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 9))
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
 
     # Small gaps between bars
     gap = 0.05
@@ -97,5 +99,5 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
         spine.set_visible(False)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
+    plt.savefig(output_path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.05)
     plt.close()
