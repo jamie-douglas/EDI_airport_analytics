@@ -216,6 +216,7 @@ def plot_hourly_pax(
 # ---------------------------------------------------------------------
 # Weekly A/B/C heatmap
 # ---------------------------------------------------------------------
+
 def plot_weekly_abc(
     daily_summary_df: pd.DataFrame,
     a_threshold: float,
@@ -226,6 +227,7 @@ def plot_weekly_abc(
 ) -> plt.Axes:
     """
     Plot a heatmap of weekly counts of A/B/C days (7-day chunks, in sequence).
+    Auto-sizes figure height and fonts based on the number of weeks to keep numbers readable.
 
     Parameters
     ----------
@@ -247,24 +249,32 @@ def plot_weekly_abc(
     matplotlib.axes.Axes
         Axes with the rendered heatmap.
     """
+    
     df = daily_summary_df.copy().sort_values("Schedule Date").reset_index(drop=True)
     df["Week_Num"] = (np.arange(len(df)) // 7) + 1
 
-    # Week start labels as 'DD Mon'
-    week_starts = df.groupby("Week_Num")["Schedule Date"].min()
-    week_labels = [ _fmt_day(d) for d in week_starts ]
-
+    # Week-start labels as 'DD Mon' (aligned to weeks)
     weekly_counts = (
         df.groupby(["Week_Num", "Ranking"])["Schedule Date"]
           .count()
           .unstack(fill_value=0)
           .reindex(columns=["A", "B", "C"], fill_value=0)
     )
+    week_starts = df.groupby("Week_Num")["Schedule Date"].min()
+    week_labels = [pd.to_datetime(d).strftime("%d %b") for d in week_starts]
 
+    # Figure sizing / fonts scale with number of rows
+    nrows = weekly_counts.shape[0]
+    # Non-square cells so tall seasons remain readable
+    fig_h = max(4.0, 0.45 * nrows + 1.6)  # 0.45" per row + header margin
     if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 4))
+        fig, ax = plt.subplots(figsize=(12, fig_h))
     else:
         fig = ax.figure
+
+    annot_fs = 11 if nrows <= 14 else 10 if nrows <= 20 else 9 if nrows <= 28 else 8
+    ylab_fs  = 11 if nrows <= 20 else 10
+    xtick_fs = 11
 
     sns.heatmap(
         weekly_counts,
@@ -273,16 +283,21 @@ def plot_weekly_abc(
         cbar=False,
         linewidths=0.5,
         linecolor="white",
-        square=True,
-        annot=weekly_counts,
+        square=False,                      # let height grow with rows
+        annot=weekly_counts.values,
         fmt="d",
+        annot_kws={"fontsize": annot_fs},
     )
 
+    # Align y-ticks with cell centers and set readable labels
+    ax.set_yticks(np.arange(nrows) + 0.5)
+    ax.set_yticklabels(week_labels, rotation=0, fontsize=ylab_fs)
+
+    # Top axis labels
     ax.xaxis.set_ticks_position("top")
     ax.xaxis.set_label_position("top")
+    ax.set_xticklabels(weekly_counts.columns, rotation=0, fontsize=xtick_fs)
     ax.set_ylabel("Week Commencing")
-    ax.set_yticklabels(week_labels, rotation=0)
-    ax.set_xticklabels(weekly_counts.columns, rotation=0)
 
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -295,12 +310,13 @@ def plot_weekly_abc(
         f"B: {int(b_threshold):,}–{int(a_threshold):,} pax | "
         f"C: < {int(b_threshold):,} pax",
         fontsize=12,
-        pad=20,
+        pad=16,
     )
 
     plt.tight_layout()
     _maybe_save(fig, save_path)
     return ax
+
 
 
 # ---------------------------------------------------------------------
@@ -653,3 +669,78 @@ def plot_peak_international_immigration(
     return ax
 
 
+
+def render_table_png(
+    df: pd.DataFrame,
+    title: str,
+    save_path: Optional[str] = None,
+    max_rows: int = 30,
+    col_widths: Optional[Sequence[float]] = None,
+) -> plt.Axes:
+    """
+    Render a small table as a PNG image for slides.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table to render. Pre-format values as strings for best control.
+    title : str
+        Title shown above the table (e.g., "Immigration Overflow Windows (2-week)").
+    save_path : str, optional
+        If provided, save the figure to this path.
+    max_rows : int, default 30
+        Maximum number of rows to render (truncates beyond this).
+    col_widths : sequence[float], optional
+        Optional relative column widths for nicer layout (e.g., [0.9, 1.3, 1.3, 0.8, 0.8]).
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axes containing the rendered table.
+    """
+    data = df.copy()
+    if data.empty:
+        data = pd.DataFrame({"No data": ["(no rows)"]})
+
+    truncated = False
+    if len(data) > max_rows:
+        data = data.iloc[:max_rows].copy()
+        truncated = True
+
+    nrows, ncols = data.shape
+    fig_w = 8.0
+    row_h = 0.35
+    top_h = 0.9
+    fig_h = top_h + row_h * (nrows + 1)  # +1 header
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.axis("off")
+
+    cell_text = data.values.tolist()
+    col_labels = list(data.columns)
+
+    if col_widths is None:
+        col_widths = [1.0 / max(ncols, 1)] * ncols
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="left",
+        colLoc="left",
+        colWidths=col_widths,
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.2)
+
+    ax.set_title(title, fontsize=12, pad=12)
+    if truncated:
+        ax.text(
+            0.0, -0.05,
+            f"(Showing first {max_rows} rows)",
+            transform=ax.transAxes, fontsize=8, ha="left", va="top", color="#555"
+        )
+
+    plt.tight_layout()
+    _maybe_save(fig, save_path)
+    return ax

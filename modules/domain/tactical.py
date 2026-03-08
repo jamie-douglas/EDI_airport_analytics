@@ -547,3 +547,129 @@ def immigration_queue_15m(
         q_prev = q
     df["Overflow"] = overflow
     return df
+
+
+def immigration_queue_15m_all_days(
+    pax_15: pd.DataFrame,
+    ia1_tph: float = IA1_TPH,
+    ia2_tph: float = IA2_TPH,
+    ia1_cax: float = IA1_CAX,
+    ia2_cax: float = IA2_CAX,
+) -> pd.DataFrame:
+    """
+    Compute the 15-minute immigration queue for every day present in pax_15.
+
+    Parameters
+    ----------
+    pax_15 : pandas.DataFrame
+        Output of arrivals_per_15min(...), including:
+        - 'Date' (date), 'Time_15' (datetime64[ns]), 'Hour' (int),
+        - 'International' (numeric)
+    ia1_tph, ia2_tph, ia1_cax, ia2_cax : float
+        Capacity/throughput constants (from config).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per 15-min slot for each day:
+        ['Date','Time_15','Hour','International','IA1_Open','Throughput_15','Capacity','Overflow']
+    """
+    if pax_15.empty:
+        return pax_15.copy()
+
+    out = []
+    for d in sorted(pax_15["Date"].unique()):
+        day = pax_15[pax_15["Date"] == d][["Date", "Time_15", "International"]].copy()
+        day = _ensure_15min_skeleton(day, day_col="Date", slot_col="Time_15")
+        day["IA1_Open"] = day["Hour"].apply(lambda h: bool(ia1_is_open(d, int(h))))
+        day["Throughput_15"] = (ia2_tph + day["IA1_Open"].astype(int) * ia1_tph) / 4.0
+        day["Capacity"]      =  ia2_cax + day["IA1_Open"].astype(int) * ia1_cax
+
+        overflow, prev = [], 0.0
+        for _, r in day.iterrows():
+            arrivals = float(r.get("International", 0.0))
+            q = max(0.0, arrivals + prev - float(r["Throughput_15"]))
+            overflow.append(q); prev = q
+        day["Overflow"] = overflow
+        out.append(day)
+
+    return pd.concat(out, ignore_index=True)
+
+
+
+def immigration_overflow_windows(
+    imm_all: pd.DataFrame,
+    criterion: str = "queue_gt_capacity",  # "queue_gt_capacity" | "queue_gt_zero" | "rolling_gt_throughput"
+) -> pd.DataFrame:
+    """
+    Compress 15‑minute breach periods into contiguous windows per day.
+
+    criterion:
+      - "queue_gt_capacity"   : breach when Overflow > Capacity      (matches the chart)
+      - "queue_gt_zero"       : breach when Overflow > 0             (legacy throughput view)
+      - "rolling_gt_throughput": breach when rolling 60‑min INTL > rolling 60‑min throughput
+
+    Returns a table with ['Date','Start','End','Duration_Minutes','Max_Overflow'].
+    'End' is right‑closed: 15 minutes after the last breaching slot.
+    """
+    if imm_all.empty:
+        return pd.DataFrame(columns=["Date","Start","End","Duration_Minutes","Max_Overflow"])
+
+    x = imm_all.sort_values(["Date", "Time_15"]).copy()
+    x["Time_15"] = pd.to_datetime(x["Time_15"], errors="coerce")
+    x["Overflow"] = pd.to_numeric(x["Overflow"], errors="coerce")
+    x["Capacity"] = pd.to_numeric(x["Capacity"], errors="coerce")
+
+    # ---- choose breach mask
+    if criterion == "queue_gt_capacity":
+        x["__breach__"] = x["Overflow"] > x["Capacity"]
+    elif criterion == "queue_gt_zero":
+        x["__breach__"] = x["Overflow"] > 0
+    elif criterion == "rolling_gt_throughput":
+        # rolling 60‑min passengers vs rolling 60‑min throughput (= sum of Throughput_15 over last 4 slots)
+        x["Throughput_15"] = pd.to_numeric(x["Throughput_15"], errors="coerce")
+        x["International"] = pd.to_numeric(x.get("International", 0), errors="coerce")
+        x["__intl_roll__"] = (
+            x.sort_values(["Date", "Time_15"])
+             .groupby("Date")["International"]
+             .rolling(window=4, min_periods=1)
+             .sum()
+             .reset_index(level=0, drop=True)
+        )
+        x["__thr_roll__"] = (
+            x.sort_values(["Date", "Time_15"])
+             .groupby("Date")["Throughput_15"]
+             .rolling(window=4, min_periods=1)
+             .sum()
+             .reset_index(level=0, drop=True)
+        )
+        x["__breach__"] = x["__intl_roll__"] > x["__thr_roll__"]
+    else:
+        raise ValueError(f"Unknown criterion: {criterion}")
+
+    windows = []
+    for d, df_day in x.groupby("Date", sort=True):
+        times = df_day["Time_15"].to_numpy()
+        flags = df_day["__breach__"].to_numpy()
+        if len(times) == 0:
+            continue
+
+        slot = (times[1] - times[0]) if len(times) > 1 else np.timedelta64(15, "m")
+        start_i = None
+
+        for i in range(len(flags) + 1):
+            current = flags[i] if i < len(flags) else False  # sentinel closes
+            if current and start_i is None:
+                start_i = i
+            if (not current) and start_i is not None:
+                start = times[start_i]
+                end   = times[i] if i < len(times) else times[-1] + slot
+                seg   = df_day.iloc[start_i:i]
+                max_q = float(pd.to_numeric(seg["Overflow"], errors="coerce").max()) if i > start_i else 0.0
+                # minutes as NumPy timedelta64
+                dur   = int((end - start) / np.timedelta64(1, "m"))
+                windows.append({"Date": d, "Start": start, "End": end,
+                                "Duration_Minutes": dur, "Max_Overflow": max_q})
+                start_i = None
+
+    return pd.DataFrame(windows)
