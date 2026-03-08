@@ -24,7 +24,7 @@ from modules.domain.fastpark import (
 )
 
 
-def load_fastpark(start: str, end: str, overlap: bool = True) -> pd.DataFrame:
+def load_fastpark(start: str, end: str, overlap: bool = False, or_events: bool = True) -> pd.DataFrame:
     """
     Load FastPark stays using correct interval:
       StayStart = CheckInStarted
@@ -64,7 +64,7 @@ def load_fastpark(start: str, end: str, overlap: bool = True) -> pd.DataFrame:
         end_column="ActualCheckedOutDate",   # interval end
         start=start,
         end=end,
-        overlap=overlap
+        or_events=True,
     )
 
 
@@ -107,7 +107,32 @@ def load_flights(start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool):
+def _date_filter_mode_line(or_events: bool, overlap: bool,
+                           date_col: str = "CheckInStarted",
+                           end_col: str = "ActualCheckedOutDate") -> str:
+    """
+    Build a one-line description of the date filtering logic.
+
+    - or_events=True: (date_col ∈ [start,end)) OR (end_col ∈ [start,end))
+    - or_events=False and end_col present:
+        * overlap=True : (date_col < end) AND (end_col >= start)
+        * overlap=False: (date_col >= start) AND (end_col < end)
+    - If only date_col is used: (date_col ∈ [start,end))
+    """
+    if or_events:
+        return (f"Mode   : OR events  — ({date_col} OR {end_col} in [start, end))")
+    # interval mode
+    if end_col:
+        return (f"Mode   : Interval   — "
+                f"{'Overlap' if overlap else 'Contained'} "
+                f"({date_col} {'<' if overlap else '>='} end and "
+                f"{end_col} {'>=' if overlap else '<'} start)")
+    # single-timestamp fallback (not used in FastPark)
+    return f"Mode   : Single ts  — ({date_col} in [start, end))"
+
+
+
+def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool, or_events: bool = True):
     """
     Run the FastPark report for a date window.
 
@@ -135,14 +160,15 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
 
     print("\nFASTPARK REPORT")
     print(f"Window : {start} → {end}")
-    print(f"Overlap: {overlap}")
+    print(_date_filter_mode_line(or_events, overlap))
     print(f"Plots  : {plots}\n")
+
 
     t0 = time.perf_counter()
 
     # 1) Load FastPark
     print("[1/7] Loading FastPark…")
-    fp = load_fastpark(start, end, overlap)
+    fp = load_fastpark(start, end, or_events)
     t1 = step(t0, f"Loaded FastPark ({len(fp):,} rows)")
 
     if fp.empty:
@@ -243,21 +269,30 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     print("\n✔ FastPark report complete.\n")
 
 
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         p = argparse.ArgumentParser()
         p.add_argument("--start", required=True)
         p.add_argument("--end", required=True)
         p.add_argument("--out", default=None)
-        p.add_argument("--no-overlap", action="store_true")
+        p.add_argument("--no-overlap", action="store_true",
+                       help="When in interval mode, use fully-contained instead of overlap.")
         p.add_argument("--plots", action="store_true")
+        p.add_argument("--or-events", action="store_true",
+                       help="Use legacy OR-events windowing (either start OR end in [start,end)).")
+        p.add_argument("--no-or-events", action="store_true",
+                       help="Disable OR-events; use interval mode with --no-overlap to control containment.")
         args = p.parse_args()
 
-        main(
-            args.start, args.end, args.out,
-            overlap=not args.no_overlap,
-            plots=args.plots
-        )
+        # Resolve flags:
+        # default True unless user explicitly passes --no-or-events
+        use_or_events = args.or_events or not args.no_or_events
+        use_overlap   = not args.no_overlap
 
+        main(args.start, args.end, args.out,
+             overlap=use_overlap,
+             plots=args.plots,
+             or_events=use_or_events)
     else:
-        main("2025-01-01", "2025-01-05", None, True, False)
+        main("2025-01-01", "2025-01-05", None, True, False, or_events=True)
