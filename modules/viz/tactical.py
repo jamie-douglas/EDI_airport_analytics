@@ -113,7 +113,7 @@ def plot_daily_pax_summary(
         alpha = 1.0 if row["Ranking"] == "A" else 0.8 if row["Ranking"] == "B" else 0.6
         ax.bar(i, row.get("D", 0), color="#7E0C6E", alpha=alpha, label="Departures" if i == 0 else None)
         ax.bar(i, row.get("A", 0), bottom=row.get("D", 0), color="#CE007F", alpha=alpha, label="Arrivals" if i == 0 else None)
-        ax.text(i, row["Total"], row["Total_k"], ha="center", va="bottom", fontweight="bold")
+        ax.text(i, row["Total"], row["Total_k"], ha="center", va="bottom")
         ax.text(i, baseline_annot_y, row["Ranking"], ha="center", va="bottom", color="#ef9a00", fontweight="bold")
 
     ax.set_ylabel("Passengers")

@@ -232,7 +232,7 @@ def run_window(
             format_overflow_table(ov),
             title=f"Immigration Overflow Windows {spec.label}",
             save_path=sp(pdir, "immigration_overflow_windows.png"),
-            max_rows=60,
+            max_rows=90,
             col_widths=[0.8, 1.2, 1.2, 0.9, 0.9],
         )
         if ps: print(f"    Saved: {sp(pdir,'immigration_overflow_windows.png')}")
@@ -341,16 +341,27 @@ def main(
     # -----------------------------------------------------------
     # Overflow windows summary
     # -----------------------------------------------------------
+    
     print("\n--- IMMIGRATION OVERFLOW WINDOWS ---")
 
     def _days_with_overflow(ov_df: pd.DataFrame) -> int:
         return 0 if ov_df.empty else ov_df["Date"].nunique()
 
     for spec in specs:
-        days = _days_with_overflow(results[spec.name]["overflow_windows"])
+        ov = results[spec.name]["overflow_windows"]
+
+        days = _days_with_overflow(ov)
         print(f"{spec.label:<10} total days where queue moves into overflow: {days}")
 
+        # Breach duration stats
+        avg_breach_minutes = ov["Duration_Minutes"].mean() if not ov.empty else 0
+        median_breach_minutes = ov["Duration_Minutes"].median() if not ov.empty else 0
+
+        print(f"  • Avg Breach Duration: {avg_breach_minutes:.1f} mins")
+        print(f"  • Median Breach Duration: {median_breach_minutes:.1f} mins")
+
     t4 = step(t3, "Window stats printed")
+
 
     
 # -----------------------------------------------------------
