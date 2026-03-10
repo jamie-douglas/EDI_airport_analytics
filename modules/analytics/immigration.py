@@ -1,5 +1,7 @@
 
 # modules/analytics/immigration.py
+from __future__ import annotations
+from typing import Optional
 import pandas as pd
 from modules.config import (
     IMM_SEASON_SUMMER_START,
@@ -103,3 +105,35 @@ def ia2_is_open(*_, **__) -> bool:
     bool
     """
     return IA2_ALWAYS_OPEN
+
+
+def peak_immigration_day(flights: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """
+    Determine the true Peak Immigration Day:
+        = calendar day with the highest total International arrivals
+          based on Immigration Arrival Time = Schedule + 20 minutes.
+
+    This MUST be bucket-independent (5 vs 10 vs 15 min should not matter).
+    """
+
+    # Keep only arrivals
+    f = flights[flights["A/D"] == "A"].copy()
+    if f.empty:
+        return None
+
+    # Compute immigration arrival timestamp
+    f["Imm_Arrival"] = f["Schedule"] + pd.Timedelta(minutes=20)
+
+    # Keep international only
+    f_intl = f[f["Sector"] == "International"].copy()
+    if f_intl.empty:
+        return None
+
+    # Group by immigration arrival date
+    daily_total = (
+        f_intl.groupby(f_intl["Imm_Arrival"].dt.date)["Pax"]
+              .sum()
+    )
+
+    # Return the max-date
+    return daily_total.idxmax()

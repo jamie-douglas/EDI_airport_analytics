@@ -552,19 +552,22 @@ def plot_peak_security(
 def plot_peak_international_immigration(
     imm_df: pd.DataFrame,
     peak_day: object,
+    time_col: str,
     window_label: str = "",
     ax: Optional[plt.Axes] = None,
     save_path: Optional[str] = None,
 ) -> plt.Axes:
     """
-    Plot the immigration queue (15‑minute slots) for a single day.
+    Plot the immigration queue for a single day at any slot size using a dynamic timestamp column
 
     Parameters
     ----------
     imm_df : pandas.DataFrame
-        Must include: 'Time_15', 'Overflow', 'Capacity', 'IA1_Open', 'Date'.
+        Must include: 'Time_col', 'Overflow', 'Capacity', 'IA1_Open', 'Date'.
     peak_day : date-like
         Day being plotted (for title).
+    time_col: str
+        Timestamp column name (e.g., 'Time_5', 'Time_10', 'Time_15')
     window_label : str
         Title suffix (e.g., "(2-week)" or "(Summer)").
     ax : matplotlib.axes.Axes, optional
@@ -577,8 +580,11 @@ def plot_peak_international_immigration(
     matplotlib.axes.Axes
         Axes with the rendered chart.
     """
-    x = imm_df.copy().sort_values("Time_15")
-    x["Time_15"] = pd.to_datetime(x["Time_15"], errors="coerce")
+    x = imm_df.copy().sort_values(time_col)
+    x[time_col] = pd.to_datetime(x[time_col], errors="coerce")
+
+    peak_day = pd.to_datetime(peak_day).date()
+    x = x[x["Date"] == peak_day]
 
     if ax is None:
         fig, ax = plt.subplots(figsize=(14, 6))
@@ -586,12 +592,18 @@ def plot_peak_international_immigration(
         fig = ax.figure
 
     # Width in days from 15‑min delta
-    deltas = x["Time_15"].diff().dropna()
-    width_days = (deltas.median().total_seconds() / 86400.0) if not deltas.empty else (15 / 1440.0)
+    deltas = x[time_col].diff().dropna()
+    if not deltas.empty:
+        width_days = deltas.median().total_seconds() / 86400.0
+        slot = deltas.iloc[0]
+    else:
+        #fallback (slot_minutes unknown here, assume 15 min only if no deltas)
+        width_days = 15/ 1440.0
+        slot = pd.Timedelta(minutes=15)
 
     # Bars for queue
     ax.bar(
-        x["Time_15"].values,
+        x[time_col].values,
         x["Overflow"].values,
         width=width_days,
         align="center",
@@ -604,11 +616,11 @@ def plot_peak_international_immigration(
 
     
     # Capacity lines for IA1/IA2 aligned with opening hours
-    left_edges = x["Time_15"].to_numpy()
-    slot = (left_edges[1] - left_edges[0]) if len(left_edges) > 1 else pd.Timedelta(minutes=15)
+    left_edges = x[time_col].to_numpy()
     rightmost = left_edges[-1] + slot if len(left_edges) else pd.NaT
     edges = np.append(left_edges, rightmost)
-    cap_vals = x["Capacity"].to_numpy(dtype=float)
+
+    cap_vals = x["Capacity"].astype(float).to_numpy()
     cap_step = np.append(cap_vals, cap_vals[-1] if len(cap_vals) else np.nan)
     ax.step(
         edges,
@@ -625,14 +637,15 @@ def plot_peak_international_immigration(
     # Shade IA1 open blocks
     
     flags = x["IA1_Open"].astype(bool).to_numpy()
-    times = x["Time_15"].to_numpy()
+    times = x[time_col].to_numpy()
     shaded_any = False
     start_i = None
+
     for i in range(len(flags) + 1):
-        current_open = flags[i] if i < len(flags) else False
-        if current_open and start_i is None:
+        current = flags[i] if i < len(flags) else False
+        if current and start_i is None:
             start_i = i
-        if (not current_open) and start_i is not None:
+        if (not current) and start_i is not None:
             start_edge = times[start_i]
             end_edge = times[i] if i < len(times) else times[-1] + slot
             ax.axvspan(

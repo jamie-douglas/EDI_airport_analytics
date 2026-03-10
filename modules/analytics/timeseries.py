@@ -62,7 +62,7 @@ def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
     )
 
 def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str, 
-                window: Union[str. int], out_col: str = "RollingSum",
+                window: Union[str, int], out_col: str = "RollingSum",
                 groupby_keys: Optional[List[str]] = None, min_periods: int = 1,) -> pd.DataFrame:
     """
     Computes a rolling sum over time, optionally grouped by keys. Returns only the key columns and time column and the new rolling column so callers 

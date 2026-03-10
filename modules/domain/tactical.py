@@ -168,18 +168,17 @@ import pandas as pd
 from modules.utils.dates import to_datetime, add_date_parts
 from modules.analytics.timeseries import bucket_time, rolling_sum
 
-def arrivals_per_15min(flights: pd.DataFrame) -> pd.DataFrame:
+def arrivals_per_slots(flights: pd.DataFrame, slot_minutes: int = 15) -> pd.DataFrame:
     """
-    Convert flights to a 15‑minute arrivals grid at immigration arrival time.
-
+    Convert flights into an arrivals grid at arbitraty slot resolution (e.g., 5, 10, 15 minutes) using Immigration Arrival Time (Schedule + 20 mins)
     Steps
     -----
-    1) Keep arrivals ('A') and coerce 'Schedule' to datetime.
+    1) Keep arrivals ('A') and ensure 'Schedule' to datetime.
     2) Compute 'Immigration Arrival' = 'Schedule' + 20 minutes.
-    3) Floor to 15-minute buckets as 'Time_15'.
-    4) Derive canonical 'Date' and 'Hour' (and 'Hour_Label') from 'Time_15'.
-    5) Aggregate passenger totals per (Date, Time_15, Sector) and pivot wide.
-    6) Compute a per-day rolling 60-minute sum for 'International' (4 × 15 min).
+    3) Floor to slot_minute buckets (e.g., 5min, 15min) _> new timestamp column)
+    4) Extract canonical 'Date' and 'Hour' (and 'Hour_Label') from this bucket timestamp
+    5) Aggregate passenger totals per (Date, 'Time_{slot_minutes}', Sector) and pivot wide bysector
+    6) Compute a rolling 60-minute International arrivals per day using window = 60/ slot_minutes
 
     Parameters
     ----------
@@ -189,15 +188,17 @@ def arrivals_per_15min(flights: pd.DataFrame) -> pd.DataFrame:
           - 'A/D' ('A' or 'D')
           - 'Pax' (numeric)
           - 'Sector' (string)
+    slot_minutes: int
+        slot size in minutes (e.g. 5, 10, 15)
 
     Returns
     -------
     pandas.DataFrame
-        Columns:
+        One row per (Date, 'Time_{slot_minutes}') with Columns:
           - 'Date' (date)            : calendar day of the 15‑min bucket
-          - 'Time_15' (datetime64[ns]): 15‑minute bucket timestamp
-          - 'Hour' (int)             : 0..23, derived from 'Time_15'
-          - 'Hour_Label' (str)       : 'HH:00', derived from 'Time_15'
+          - 'Tim_{slot_minutes}' (datetime64[ns]): bucket timestamp
+          - 'Hour' (int)             : 0..23, derived from 'Time_{slot_minutes}'
+          - 'Hour_Label' (str)       : 'HH:00', derived from 'Time_{slot_minutes}'
           - one numeric column per sector (CTA, Domestic, International, ...)
           - 'Intl_Rolling_Hour' (float): rolling 60‑minute sum of 'International' by day
     """
@@ -208,37 +209,42 @@ def arrivals_per_15min(flights: pd.DataFrame) -> pd.DataFrame:
     # 2) +20 min walk-time to immigration
     df["Immigration Arrival"] = df["Schedule"] + timedelta(minutes=20)
 
+    
+
     # 3) floor to 15-min buckets
-    df = bucket_time(df, time_col="Immigration Arrival", freq="15min", out_col="Time_15")
+    freq = f"{slot_minutes}min"
+    time_col = f"Time_{slot_minutes}"
+    df = bucket_time(df, time_col="Immigration Arrival", freq=freq, out_col=time_col)
 
     # 4) derive canonical Date/Hour from the FLOORED timestamp
-    df = add_date_parts(df, "Time_15")
-    df["Date"] = df["Time_15_date"]
-    df["Hour"] = df["Time_15_hour"]
-    df["Hour_Label"] = df["Time_15_hour_label"]
+    df = add_date_parts(df, time_col)
+    df["Date"] = df[f"{time_col}_date"]
+    df["Hour"] = df[f"{time_col}_hour"]
+    df["Hour_Label"] = df[f"{time_col}_hour_label"]
 
-    # 5) totals per (Date, Time_15, Sector) → wide
+    # 5) totals per (Date, Time_{slot_minutes}, Sector) → wide
     totals = (
-        df.groupby(["Date", "Time_15", "Sector"])["Pax"]
+        df.groupby(["Date", time_col, "Sector"])["Pax"]
           .sum()
           .reset_index()
-          .pivot(index=["Date", "Time_15"], columns="Sector", values="Pax")
+          .pivot(index=["Date", time_col], columns="Sector", values="Pax")
           .fillna(0)
           .reset_index()
-          .sort_values(["Date", "Time_15"])
+          .sort_values(["Date", time_col])
     )
 
-    # Add Hour and Hour_Label back to totals (derived from Time_15 to keep it canonical)
-    parts = add_date_parts(totals, "Time_15")
-    totals["Hour"] = parts["Time_15_hour"]
-    totals["Hour_Label"] = parts["Time_15_hour_label"]
+    # Add Hour and Hour_Label back to totals (derived from Time_{slot_minutes} to keep it canonical)
+    parts = add_date_parts(totals, time_col)
+    totals["Hour"] = parts[f"{time_col}_hour"]
+    totals["Hour_Label"] = parts[f"{time_col}_hour_label"]
 
-    # 6) rolling 60-minute sum of International (4 × 15min) per day
+    # 6) rolling 60-minute sum of International per day
+    window = int(60/slot_minutes)
     rolled = rolling_sum(
         totals,
-        time_col="Time_15",
+        time_col=time_col,
         value_col="International",
-        window=4,                      # 4 × 15 min = 60 min
+        window=window,                     
         out_col="Intl_Rolling_Hour",
         groupby_keys=["Date"],
     )
@@ -438,26 +444,26 @@ def security_peak_utilisation(peak_info: Dict[str, object], capacity_line: float
 # ======================================================================
 
 
-def _ensure_15min_skeleton(day_df: pd.DataFrame, day_col: str = "Date", slot_col: str = "Time_15") -> pd.DataFrame:
+def _ensure_slot_skeleton(day_df: pd.DataFrame, slot_minutes: int, day_col: str = "Date", slot_col: str = "SlotTime") -> pd.DataFrame:
     """
-    Ensure a contiguous 15‑minute grid for a single day (00:00..23:45), left‑joining
-    any existing per‑slot arrivals and defaulting missing values to zero.
+    Build a contiguous slot-sized grid for a single day (00:00...23:59),
+    left-join incoming per-slot data, and default missing arrivals to 0
 
     Parameters
     ----------
     day_df : pandas.DataFrame
         Input DataFrame containing at least [day_col, slot_col] and (optionally) 'International'.
-        All rows must belong to the same day.
+    slot_minutes : int
+        Slot size in minutes (used to build full-day grid).
     day_col : str, default "Date"
         Column that holds the calendar day.
-    slot_col : str, default "Time_15"
-        Column that holds the left edge of the 15‑minute slot (datetime64[ns]).
+    slot_col : str, default "SlotTime"
+        Column that holds the left edge of the slot (datetime64[ns]).
 
     Returns
     -------
     pandas.DataFrame
-        A 96‑row (00:00..23:45) 15‑minute skeleton for the day with columns:
-        [day_col, slot_col, 'Hour', 'International' (filled to 0 if missing)].
+        A dull day's worth of slots (e.g. 288 rows for 5-min slots)
     """
     x = day_df.copy().sort_values(slot_col)
     if x.empty:
@@ -465,8 +471,10 @@ def _ensure_15min_skeleton(day_df: pd.DataFrame, day_col: str = "Date", slot_col
 
     d = x[day_col].iloc[0]
     day_start = pd.to_datetime(d)
+
+    #Full day grid
     skeleton = pd.DataFrame({
-        slot_col: pd.date_range(day_start, day_start + pd.Timedelta(hours=23, minutes=45), freq="15min")
+        slot_col: pd.date_range(day_start, day_start + pd.Timedelta(days=1) - timedelta(minutes=slot_minutes), freq=f"{slot_minutes}min")
     })
     skeleton[day_col] = d
     skeleton["Hour"] = skeleton[slot_col].dt.hour
@@ -477,21 +485,22 @@ def _ensure_15min_skeleton(day_df: pd.DataFrame, day_col: str = "Date", slot_col
     return out
 
 
-def immigration_queue_15m(
-    arrivals_15: pd.DataFrame,
+def immigration_queue_slots(
+    slots_df: pd.DataFrame,
     peak_day: object,
+    slot_minutes: int = 15,
     ia1_tph: float = IA1_TPH,
     ia2_tph: float = IA2_TPH,
     ia1_cax: float = IA1_CAX,
     ia2_cax: float = IA2_CAX,
 ) -> pd.DataFrame:
     """
-    Model a simple immigration queue over 15‑minute slots for one day.
+    Model a simple immigration queue at arbitraty slot resolution (5,10, 15 minutes).
 
-    The queue evolves per slot t as:
+    Queue Equation:
+    ---------------
         Q_next = max(0, arrivals_t + Q_prev - throughput_t),
-    where
-        throughput_t = (ia2_tph + IA1_Open * ia1_tph) / 4.
+    where throughput_t = (ia2_tph + IA1_Open * ia1_tph) * slot_minutes/60).
 
     IA1_Open is evaluated per slot using an hourly rule:
         ia1_is_open(peak_day, Hour).
@@ -518,12 +527,23 @@ def immigration_queue_15m(
         Subset for 'peak_day' with added columns:
           'IA1_Open' (bool), 'Throughput_15' (float), 'Capacity' (float), 'Overflow' (float)
     """
-    # Slice the selected day and ensure a full 96‑slot (00:00..23:45) grid so capacity/shading
-    # align exactly to IA1 open/close edges even when a boundary slot has zero arrivals.
-    df = arrivals_15[arrivals_15["Date"] == peak_day].copy().sort_values("Time_15")
+
+    time_col = f"Time_{slot_minutes}"
+
+    df = (
+        slots_df[slots_df["Date"] == peak_day]
+        .copy()
+        .sort_values(time_col)
+    )
+
     if df.empty:
         return df
-    df = _ensure_15min_skeleton(df, day_col="Date", slot_col="Time_15")
+    
+    #Build full-day slot grid (handles missing boundary slots)
+    df = _ensure_slot_skeleton(df, slot_minutes, day_col="Date", slot_col=time_col)
+
+    #Throughput fraction per slot: slot_minutes / 60
+    factor = slot_minutes / 60.0
 
     # IA1 open rule — choose ONE of the following:
     # A) Left‑edge semantics (slot is open if its START hour is open) — recommended:
@@ -534,7 +554,7 @@ def immigration_queue_15m(
     # df["IA1_Open"] = df["Slot_End"].dt.hour.apply(lambda h: bool(ia1_is_open(peak_day, int(h))))
 
     # Per‑slot throughput and capacity
-    df["Throughput_15"] = (ia2_tph + df["IA1_Open"].astype(int) * ia1_tph) / 4.0
+    df["Throughput"] = (ia2_tph + df["IA1_Open"].astype(int) * ia1_tph) * factor
     df["Capacity"]      =  ia2_cax + df["IA1_Open"].astype(int) * ia1_cax
 
     # Simple overflow recursion
@@ -542,11 +562,59 @@ def immigration_queue_15m(
     q_prev = 0.0
     for _, r in df.iterrows():
         arrivals = float(r.get("International", 0.0))
-        q = max(0.0, arrivals + q_prev - float(r["Throughput_15"]))
+        q = max(0.0, arrivals + q_prev - float(r["Throughput"]))
         overflow.append(q)
         q_prev = q
     df["Overflow"] = overflow
-    return df
+
+    df["slot_minutes"] = slot_minutes
+
+    return df[
+        ["Date", time_col, "Hour", "International",
+         "IA1_Open", "Throughput", "Capacity", "Overflow", "slot_minutes"]
+    ]
+
+def _ensure_15min_skeleton(day_df: pd.DataFrame,
+                           day_col="Date",
+                           slot_col="Time_15") -> pd.DataFrame:
+    """
+    Build a contiguous per 15 minute grid for a single day
+
+    Parameters
+    ----------
+    day_df : pandas.DataFrame
+        Input DataFrame containing at least [day_col, slot_col] and (optionally) 'International'.
+    day_col : str, default "Date"
+        Column that holds the calendar day.
+    slot_col : str, default "Time_15"
+        Column that holds the left edge of the 15‑minute slot (datetime64[ns]).
+
+    Returns
+    -------
+    pandas.DataFrame
+        A dull day's worth of slots (e.g. 288 rows for 5-min slots)
+    """
+    x = day_df.copy().sort_values(slot_col)
+    if x.empty:
+        return x
+
+    d = x[day_col].iloc[0]
+    day_start = pd.to_datetime(d)
+
+    skeleton = pd.DataFrame({
+        slot_col: pd.date_range(
+            day_start,
+            day_start + pd.Timedelta(days=1) - pd.Timedelta(minutes=15),
+            freq="15min"
+        )
+    })
+    skeleton[day_col] = d
+    skeleton["Hour"] = skeleton[slot_col].dt.hour
+
+    out = skeleton.merge(x[[day_col, slot_col, "International"]], 
+                         on=[day_col, slot_col], how="left")
+    out["International"] = out["International"].fillna(0)
+    return out
 
 
 def immigration_queue_15m_all_days(
@@ -596,50 +664,162 @@ def immigration_queue_15m_all_days(
     return pd.concat(out, ignore_index=True)
 
 
+def immigration_queue_slots_all_days(
+    slots_df: pd.DataFrame,
+    slot_minutes: int,
+    ia1_tph: float = IA1_TPH,
+    ia2_tph: float = IA2_TPH,
+    ia1_cax: float = IA1_CAX,
+    ia2_cax: float = IA2_CAX,
+) -> pd.DataFrame:
+    """
+    Compute the immigration queue at arbitrary slot resolution (5, 10, 15 minutes)
+    for *every* day present in a slot‑sized arrivals grid.
+
+    Steps
+    -----
+    1) Identify all distinct calendar days in the slot arrivals table.
+    2) For each day:
+         a) Extract that day's slot‑level arrivals.
+         b) Run immigration_queue_slots(...) for the full day.
+    3) Concatenate results across all days into a single DataFrame.
+
+    Parameters
+    ----------
+    slots_df : pandas.DataFrame
+        Output of arrivals_per_slots(...), must include for all days:
+          - 'Date'              (date)
+          - 'Time_X'            (datetime64)
+          - 'Hour'              (int: 0..23)
+          - 'International'     (numeric arrivals per slot)
+
+    slot_minutes : int
+        Slot size in minutes (e.g., 5, 10, 15). Determines throughput fraction
+        and number of slots per day (e.g., 288 slots if 5 minutes).
+
+    ia1_tph, ia2_tph : float
+        Hourly throughputs for IA1 and IA2 (from config).
+
+    ia1_cax, ia2_cax : float
+        Capacity (hall size) for IA1 and IA2 (from config).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Concatenated queue results for all days, with columns:
+          - 'Date'
+          - 'Time_{slot_minutes}'
+          - 'Hour'
+          - 'International'
+          - 'IA1_Open'     (bool)
+          - 'Throughput'   (float per slot)
+          - 'Capacity'     (float)
+          - 'Overflow'     (float)
+        One row per slot per day.
+    """
+    if slots_df.empty:
+        return pd.DataFrame()
+
+    out = []
+    for d in sorted(slots_df["Date"].unique()):
+        day_df = slots_df[slots_df["Date"] == d]
+        q = immigration_queue_slots(
+            day_df,
+            peak_day=d,
+            slot_minutes=slot_minutes,
+            ia1_tph=ia1_tph,
+            ia2_tph=ia2_tph,
+            ia1_cax=ia1_cax,
+            ia2_cax=ia2_cax,
+        )
+        out.append(q)
+
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
 
 def immigration_overflow_windows(
-    imm_all: pd.DataFrame,
+    imm_all: pd.DataFrame, 
+    time_col: str,
     criterion: str = "queue_gt_capacity",  # "queue_gt_capacity" | "queue_gt_zero" | "rolling_gt_throughput"
 ) -> pd.DataFrame:
     """
-    Compress 15‑minute breach periods into contiguous windows per day.
+    Compress breach periods into contiguous windows per day for ANY slot size
 
     criterion:
       - "queue_gt_capacity"   : breach when Overflow > Capacity      (matches the chart)
       - "queue_gt_zero"       : breach when Overflow > 0             (legacy throughput view)
       - "rolling_gt_throughput": breach when rolling 60‑min INTL > rolling 60‑min throughput
 
+    Parameters
+    ----------
+    imm_all:
+        Must include:
+            - 'Date
+            - dynamic timestamp column (time_col)
+            -'Overflow'
+            -'Capacity'
+            -'International'
+            -'Throughput' (slot-based) or Throughput_15 (legacy)
+            -optional: 'slot_minutes
+    time_col : str
+        timestamp column to use e.g. 'Time_5', 'Time_10'
+    criterion: str
+        Breach definition:
+        - "queue_gt_capacity"   : breach when Overflow > Capacity      (matches the chart)
+        - "queue_gt_zero"       : breach when Overflow > 0             (legacy throughput view)
+        - "rolling_gt_throughput": breach when rolling 60‑min INTL > rolling 60‑min throughput
+
     Returns a table with ['Date','Start','End','Duration_Minutes','Max_Overflow'].
-    'End' is right‑closed: 15 minutes after the last breaching slot.
     """
+    #Handle empty input
     if imm_all.empty:
         return pd.DataFrame(columns=["Date","Start","End","Duration_Minutes","Max_Overflow"])
 
-    x = imm_all.sort_values(["Date", "Time_15"]).copy()
-    x["Time_15"] = pd.to_datetime(x["Time_15"], errors="coerce")
+    #sort by date and dynamic timestamp
+    x = imm_all.sort_values(["Date", time_col]).copy()
+    x[time_col] = pd.to_datetime(x[time_col], errors="coerce")
+
+    #clean numeric columns
     x["Overflow"] = pd.to_numeric(x["Overflow"], errors="coerce")
     x["Capacity"] = pd.to_numeric(x["Capacity"], errors="coerce")
 
     # ---- choose breach mask
     if criterion == "queue_gt_capacity":
         x["__breach__"] = x["Overflow"] > x["Capacity"]
+
     elif criterion == "queue_gt_zero":
         x["__breach__"] = x["Overflow"] > 0
+
     elif criterion == "rolling_gt_throughput":
-        # rolling 60‑min passengers vs rolling 60‑min throughput (= sum of Throughput_15 over last 4 slots)
-        x["Throughput_15"] = pd.to_numeric(x["Throughput_15"], errors="coerce")
+        # Determine throughout column name
+        if "Throughput" in x.columns:
+            thr_col = "Throughput" #slot-based
+        else:
+            thr_col = "Throughput_15" #legacy fall back
+        
+        #determine slots per hour (rolling 60 min window width)
+        if "slot_minutes" in x.columns and x["slot_minutes"].notna().any():
+            sm = int(pd.to_numeric(x["slot_minutes"], errors="coerce").dropna().iloc[0])
+            slots_per_hour = max(1, int(round( 60/sm)))
+        else:
+            slots_per_hour = 4 #15 min legacy
+
         x["International"] = pd.to_numeric(x.get("International", 0), errors="coerce")
+        x[thr_col] = pd.to_numeric(x.get(thr_col, 0), errors="coerce")
+
+        #60 minutes rolling sums
         x["__intl_roll__"] = (
-            x.sort_values(["Date", "Time_15"])
+            x.sort_values(["Date", time_col])
              .groupby("Date")["International"]
-             .rolling(window=4, min_periods=1)
+             .rolling(window=slots_per_hour, min_periods=1)
              .sum()
              .reset_index(level=0, drop=True)
         )
         x["__thr_roll__"] = (
-            x.sort_values(["Date", "Time_15"])
-             .groupby("Date")["Throughput_15"]
-             .rolling(window=4, min_periods=1)
+            x.sort_values(["Date", time_col])
+             .groupby("Date")[thr_col]
+             .rolling(window=slots_per_hour, min_periods=1)
              .sum()
              .reset_index(level=0, drop=True)
         )
@@ -647,14 +827,20 @@ def immigration_overflow_windows(
     else:
         raise ValueError(f"Unknown criterion: {criterion}")
 
+    #build windows
     windows = []
     for d, df_day in x.groupby("Date", sort=True):
-        times = df_day["Time_15"].to_numpy()
+        times = df_day[time_col].to_numpy()
         flags = df_day["__breach__"].to_numpy()
         if len(times) == 0:
             continue
 
-        slot = (times[1] - times[0]) if len(times) > 1 else np.timedelta64(15, "m")
+        #infer slot duration from data
+        if len(times) > 1:
+            slot = times[1] - times[0]
+        else:
+            slot = pd.Timedelta(minutes=15) #fallback only
+        
         start_i = None
 
         for i in range(len(flags) + 1):
@@ -665,11 +851,12 @@ def immigration_overflow_windows(
                 start = times[start_i]
                 end   = times[i] if i < len(times) else times[-1] + slot
                 seg   = df_day.iloc[start_i:i]
-                max_q = float(pd.to_numeric(seg["Overflow"], errors="coerce").max()) if i > start_i else 0.0
-                # minutes as NumPy timedelta64
+                seg_cap = pd.to_numeric(seg["Capacity"], errors="coerce").fillna(0)
+                seg_down = seg["Overflow"] - seg_cap
+                max_downhall = float(seg_down.max()) if len(seg_down) else 0.0
                 dur   = int((end - start) / np.timedelta64(1, "m"))
                 windows.append({"Date": d, "Start": start, "End": end,
-                                "Duration_Minutes": dur, "Max_Overflow": max_q})
+                                "Duration_Minutes": dur, "Max_DownHall": max_downhall})
                 start_i = None
 
     return pd.DataFrame(windows)
