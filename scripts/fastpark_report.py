@@ -307,7 +307,7 @@ if __name__ == "__main__":
         p = argparse.ArgumentParser()
         p.add_argument("--start", required=True)
         p.add_argument("--end", required=True)
-        p.add_argument("--out", default=None)
+        p.add_argument("--out", default=None, help ="output Excel File path(optional)")
         p.add_argument("--no-overlap", action="store_true",
                        help="When in interval mode, use fully-contained instead of overlap.")
         p.add_argument("--plots", action="store_true")
