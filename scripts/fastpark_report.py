@@ -12,6 +12,7 @@ from modules.utils.query import query
 from modules.utils.excel import write_once_then_update
 from modules.utils.progress import step
 from modules.viz.fastpark import plot_distribution
+from modules.analytics.growth import period_growth
 
 from modules.domain.fastpark import (
     monthly_movements_and_validations,
@@ -167,7 +168,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     t0 = time.perf_counter()
 
     # 1) Load FastPark
-    print("[1/7] Loading FastPark…")
+    print("[1/8] Loading FastPark…")
     fp = load_fastpark(start, end, or_events)
     t1 = step(t0, f"Loaded FastPark ({len(fp):,} rows)")
 
@@ -176,22 +177,22 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
         return
 
     # 2) Load flights
-    print("[2/7] Loading flight data…")
+    print("[2/8] Loading flight data…")
     fl = load_flights(start, end)
     t2 = step(t1, f"Loaded flights ({len(fl):,} rows)")
 
     # 3) Monthly movements
-    print("[3/7] Monthly movements & validation…")
+    print("[3/8] Monthly movements & validation…")
     monthly_df, base_summary = monthly_movements_and_validations(fp, start, end)
     t3 = step(t2, "Monthly movements computed")
 
     # 4) Duration validation
-    print("[4/7] Check-in duration validation…")
+    print("[4/8] Check-in duration validation…")
     dur = checkin_duration_validation(fp)
     t4 = step(t3, "Duration validation complete")
 
     # 5) Peaks + diffs + histogram
-    print("[5/7] Peaks + entry/exit stats…")
+    print("[5/8] Peaks + entry/exit stats…")
     peaks = peak_days_table(fp, start, end)
     central, desc, avg_e, med_e, avg_x, med_x = entry_exit_diffs_stats(fp)
     hist = entry_exit_histogram(fp, avg_e, med_e, avg_x, med_x)
@@ -216,24 +217,51 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
 
 
     # 6) LOS + flights
-    print("[6/7] LOS + flight info…")
+    print("[6/8] LOS + flight info…")
+    
     avg_los, top3, bot3, los_bins = length_of_stay(fp, start, end)
     top_airlines, sectors = flight_info(fl, fp)
 
-    # Tidy flight info tables
+    # Rename for consistency
     top_airlines = top_airlines.rename(columns={"Airline_Description": "Name"})
     sectors = sectors.rename(columns={"Sector": "Name"})
+
+    # Tag categories
     top_airlines["Category"] = "Airline"
     sectors["Category"] = "Sector"
-    flight_info_df = pd.concat([top_airlines, sectors], ignore_index=True)[["Category", "Name", "Count"]]
+
+    # Include Percent in output
+    flight_info_df = pd.concat(
+        [top_airlines, sectors],
+        ignore_index=True
+    )[["Category", "Name", "Count", "Percent"]]
+
     t6 = step(t5, "LOS + flight info complete")
+
+    
+    # ---- Transaction Growth (multi-year) ----
+    print("[7/8] Computing transaction growth...")
+    growth_df = period_growth(
+        loader_fn=load_fastpark,
+        start=start,
+        end=end,
+        years_back=3,
+        id_col="BookingReference",
+        loader_kwargs={
+            "overlap": overlap,
+            "or_events": or_events
+        }
+    )
+    t7 = step(t6, "Transaction growth computed")
+
+
 
     # Combined summary
     summary_full = pd.concat([base_summary, dur, peaks, central, desc], ignore_index=True)
 
     # 7) Excel outputs
     if excel_out:
-        print("[7/7] Writing Excel…")
+        print("[8/8] Writing Excel…")
 
         write_once_then_update(
             excel_out, "Monthly Movements", monthly_df, anchor="A2", include_header=True
@@ -264,7 +292,11 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
             excel_out, "Flight Info", flight_info_df, anchor="A2", include_header=True
         )
 
-        step(t6, f"Excel updated → {excel_out}")
+        write_once_then_update(
+            excel_out, "Transaction Growth", growth_df, anchor="A2", include_header=True
+        )
+
+        step(t7, f"Excel updated → {excel_out}")
 
     print("\n✔ FastPark report complete.\n")
 

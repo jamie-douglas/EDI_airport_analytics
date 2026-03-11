@@ -47,7 +47,7 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     widths = ends - starts
     counts = df[counts_col].to_numpy()
 
-    fig, ax = plt.subplots(figsize=(12, 9))
+    fig, ax = plt.subplots(figsize=(12, 9), dpi=200)
     fig.patch.set_alpha(0)
     ax.set_facecolor("none")
 
@@ -82,22 +82,41 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
 
     # Bar labels
     for s, w, c in zip(starts, adj, counts):
+        
         if c <= 0:
-            continue
-        ypos = c * (0.5 if c > max_h * 0.1 else 1.02)
-        ax.text(s + w / 2, ypos, f"{int(c)}", ha="center", rotation=90, color="white")
+                continue
+
+        # Three-tier placement
+        if c > max_h * 0.1:
+            # Tall bars
+            ypos = c * 0.5
+        elif c > max_h * 0.02:
+            # Medium-small
+            ypos = c * 1.25
+        else:
+            # Very small numbers → lift higher
+            ypos = c + (max_h * 0.03)
+
+        ax.text(
+            s + w / 2,
+            ypos,
+            f"{int(c)}",
+            ha="center",
+            rotation=90,
+            color="white"
+        )
+
 
     # X-axis formatting
     ax.set_xlim(-200, 200)
     ticks = np.arange(-180, 181, 60)
     ax.set_xticks(ticks)
-    ax.set_xticklabels([hhmm(t) for t in ticks], rotation=45, ha="right")
+    ax.set_xticklabels([hhmm(t) for t in ticks], rotation=45, ha="right", color="white")
 
     # Minimal chrome
     ax.yaxis.set_visible(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.05)
+    plt.savefig(output_path, dpi=200, transparent=True)
     plt.close()

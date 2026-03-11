@@ -415,8 +415,8 @@ def length_of_stay(fp_df: pd.DataFrame, start: str, end: str, bins: Optional[Seq
 def flight_info(flight_df: pd.DataFrame, fp_df: pd.DataFrame):
     """
     Join FastPark bookings with flight schedule and compute:
-        - top 3 airlines
-        - sector distribution
+        - top 3 airlines (with % of total FastPark bookings)
+        - sector distribution (with % share)
 
     Parameters
     ----------
@@ -446,19 +446,26 @@ def flight_info(flight_df: pd.DataFrame, fp_df: pd.DataFrame):
 
     merged = fp_unique.merge(f, on="Flight Key", how="left")
 
-    # Top 3 airlines
-    top_airlines = (
-        merged.groupby("Airline_Description")["BookingReference"]
-        .nunique().sort_values(ascending=False)
-        .reset_index().rename(columns={"BookingReference":"Count"})
-        .head(3)
-    )
+    total_fp = len(fp_unique)
 
-    # Sector counts
+    # Airline Distribution
+    airline_counts = (
+        merged.groupby("Airline_Description")["BookingReference"]
+        .nunique()
+        .sort_values(ascending=False)
+        .reset_index()
+        .rename(columns={"BookingReference":"Count"})
+    )
+    airline_counts["Percent"] = (airline_counts["Count"] / total_fp) * 100
+
+    # Sector distribution
     sector_counts = (
         merged.groupby("Sector")["BookingReference"]
-        .nunique().sort_values(ascending=False)
-        .reset_index().rename(columns={"BookingReference":"Count"})
+        .nunique()
+        .sort_values(ascending=False)
+        .reset_index()
+        .rename(columns={"BookingReference":"Count"})
     )
+    sector_counts["Percent"] = (sector_counts["Count"]/ total_fp) * 100
 
-    return top_airlines, sector_counts
+    return airline_counts, sector_counts

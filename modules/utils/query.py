@@ -27,6 +27,7 @@ def query(
         order_by: str | None = None,
         overlap: bool = False,
         or_events: bool = False,
+        engine = None,
 ):
     """
     Executes a dynamic SQL SELECT query with optional filters, parameters, and date bounds
@@ -71,6 +72,7 @@ def query(
         ORDER BY clause without the keyword
     overlap : bool, optional
     or_events: bool, optional
+    engine: optional
         
     Returns
     ---------
@@ -88,7 +90,7 @@ def query(
             )
 
 
-    engine = get_engine()
+    engine = engine or get_engine()
 
     #SELECT
     select_clause = "SELECT DISTINCT " if distinct else "SELECT "
