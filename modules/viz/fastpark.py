@@ -39,7 +39,7 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     counts_col = "Entry Count" if mode == "entry" else "Exit Count"
     avg_line = df["Avg Entry Line"].iloc[0] if mode == "entry" else df["Avg Exit Line"].iloc[0]
     med_line = df["Median Entry Line"].iloc[0] if mode == "entry" else df["Median Exit Line"].iloc[0]
-    bar_color = "#D2B0C8" if mode == "entry" else "#C1C1FF"
+    bar_color = "#ce007f" if mode == "entry" else "#22a3b5"
 
     # Bar geometry
     starts = df["Bin Start"].to_numpy()
@@ -63,8 +63,8 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     max_h = counts.max() if counts.size else 0
     if max_h > 0:
         ax.set_ylim(0, max_h * 1.05)
-        ax.axvline(0, color="#ce007f", linewidth=2)
-        ax.axvline(avg_line, color="#22a3b5", linewidth=2)
+        ax.axvline(0, color="white", linewidth=2)
+        ax.axvline(avg_line, color="#9A8B7D", linewidth=2)
         ax.axvline(med_line, color="#27a06b", linewidth=2)
 
     # Formatter
@@ -76,9 +76,9 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     # Line labels
     if max_h > 0:
         y = max_h * 1.01
-        ax.text(0, y, "On Time (00:00)", rotation=45, ha="left", color="#ce007f")
-        ax.text(avg_line, y, f"Avg ({hhmm(avg_line)})", rotation=45, ha="left", color="#22a3b5")
-        ax.text(med_line, y, f"Median ({hhmm(med_line)})", rotation=45, ha="left", color="#27a06b")
+        ax.text(0, y, "On Time (00:00)", rotation=45, ha="left", color="white", fontsize=12)
+        ax.text(avg_line, y, f"Avg ({hhmm(avg_line)})", rotation=45, ha="left", color="#9A8B7D", fontsize=12)
+        ax.text(med_line, y, f"Median ({hhmm(med_line)})", rotation=45, ha="left", color="#27a06b", fontsize=12)
 
     # Bar labels
     for s, w, c in zip(starts, adj, counts):
@@ -102,8 +102,8 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
             ypos,
             f"{int(c)}",
             ha="center",
-            rotation=90,
-            color="white"
+            color="white",
+            fontsize=11
         )
 
 
@@ -111,7 +111,7 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     ax.set_xlim(-200, 200)
     ticks = np.arange(-180, 181, 60)
     ax.set_xticks(ticks)
-    ax.set_xticklabels([hhmm(t) for t in ticks], rotation=45, ha="right", color="white")
+    ax.set_xticklabels([hhmm(t) for t in ticks], ha="right", color="#22a3b5", fontsize=12)
 
     # Minimal chrome
     ax.yaxis.set_visible(False)
