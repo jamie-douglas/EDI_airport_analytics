@@ -34,3 +34,34 @@ def simple_penetration(numerator_df: pd.DataFrame, numerator_col: str, denominat
         "Total_Denominator": [den],
         "Penetration Rate": [rate]
     })
+
+
+def row_penetration(df: pd.DataFrame,
+                    numerator_col: str,
+                    denominator_col: str,
+                    out_col: str = "Penetration Rate") -> pd.DataFrame:
+    """
+    Computes per-row penetration = numerator_col / denominator_col (vectorised).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table (e.g., monthly PRM summary).
+    numerator_col : str
+        Column to use as the numerator (e.g., 'Unique Count').
+    denominator_col : str
+        Column to use as the denominator (e.g., 'Total Pax').
+    out_col : str, default 'Penetration Rate'
+        Name of the output penetration column.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of df with a new `out_col` containing row-wise penetration values.
+    """
+    out = df.copy()
+    num = pd.to_numeric(out[numerator_col], errors="coerce")
+    den = pd.to_numeric(out[denominator_col], errors="coerce")
+    out[out_col] = num.divide(den).where(den.ne(0))
+    
+    return out

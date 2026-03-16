@@ -25,7 +25,7 @@ def to_datetime(df: pd.DataFrame, columns: Union[str, List[str]]) -> pd.DataFram
         x[col] = pd.to_datetime(x[col], errors='coerce')
     return x
 
-def add_date_parts(df: pd.DataFrame, col: str) -> pd.DataFrame:
+def add_date_parts(df: pd.DataFrame, col: str, day=None, year=None, month=None, month_name=None, hour=None, hour_label=None) -> pd.DataFrame:
     """
     Append common date/time parts derived from a datetime column.
 
@@ -49,11 +49,17 @@ def add_date_parts(df: pd.DataFrame, col: str) -> pd.DataFrame:
     """
     x = df.copy()
     t = pd.to_datetime(x[col], errors="coerce")
-    x[f"{col}_date"] = t.dt.date
-    x[f"{col}_year"] = t.dt.year
-    x[f"{col}_month"] = t.dt.month
-    x[f"{col}_month_name"] = t.dt.strftime("%b")
-    x[f"{col}_hour"] = t.dt.hour
-    x[f"{col}_hour_label"] = t.dt.strftime("%H:00")
+    if day:
+        x[f"Day"] = t.dt.date
+    if year:
+        x[f"Year"] = t.dt.year
+    if month:
+        x[f"Month"] = t.dt.month
+    if month_name:
+        x[f"Month Name"] = t.dt.strftime("%b")
+    if hour:
+        x[f"Hour"] = t.dt.hour
+    if hour_label:
+        x[f"Hour Label"] = t.dt.strftime("%H:00")
     return x
 

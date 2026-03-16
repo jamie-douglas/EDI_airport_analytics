@@ -6,7 +6,6 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 import argparse
 import time
 import pandas as pd
-import os
 
 from modules.utils.query import query
 from modules.utils.excel import write_once_then_update

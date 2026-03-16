@@ -29,37 +29,28 @@ def bucket_time(df: pd.DataFrame, time_col: str, freq: str,
 
     x = df.copy()
     x[time_col] = pd.to_datetime(x[time_col], errors='coerce')
-    x[out_col] = x[time_col].dt.floor(freq)
+
+    f = freq.upper()
+
+    if f == "M":
+        #Month start
+        x[out_col] = x[time_col].dt.to_period("M").dt.to_timestamp()
+    
+    elif f in ("Q", "QE", "Q-DEC", "Q-SEP", "Q-JAN"):
+        # Quarter-start
+        x[out_col] = x[time_col].dt.to_period("Q").dt.to_timestamp()
+
+    elif f in ("Y", "A", "YS", "AS"):
+        # Year-start
+        x[out_col] = x[time_col].dt.to_period("Y").dt.to_timestamp()
+
+    else:
+        # Timedelta-based floors work normally (safe for 5min/15min/H/D/W)
+        x[out_col] = x[time_col].dt.floor(freq)
+
     return x
 
-def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
-              out_col: str) -> pd.DataFrame:
-    """
-    Groups by input columns and computes the sum of a specified column.
 
-    Parameters
-    ----------
-    df: pandas.DataFrame
-        Input DataFrame
-    by_cols: List of str
-        Grouping columns
-    value_col: str
-        Column to aggregate
-    out_col: str
-        Name of the output summed column. 
-    
-    Returns
-    ---------
-    pandas.DataFrame
-        Grouped DataFrame with a single aggregated column
-    """
-
-    return (
-        df.groupby(by_cols, dropna=False)[value_col]
-        .sum()
-        .rename(out_col)
-        .reset_index()
-    )
 
 def rolling_sum(df: pd.DataFrame, time_col: str, value_col: str, 
                 window: Union[str, int], out_col: str = "RollingSum",

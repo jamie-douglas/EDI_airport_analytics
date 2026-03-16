@@ -71,4 +71,26 @@ SUMMER_END   = "2026-10-24"
 # Security rolling-hour capacity reference line used in plots.
 SECURITY_CAX = 4240
 
+# --------------------------
+# PRM RECEPTION AND BOOKING
+# --------------------------
 
+#Lansdie Reception Centre location values
+PRM_LANDSIDE_VALUES = [
+    "PRM Landside",
+    "Special Assistance Reception (Landside)",
+]
+
+#Airside Reception Centre location values
+PRM_AIRSIDE_VALUES = [
+    "Airside PRM Reserved Seating Area",
+    "East Term PRM Reception",
+    "East Terminus PRM Reception",
+    "PRM Airside",
+    "PRM Reception Airside",
+]
+
+# --------------------------
+# STANDS WITH JETBRIDGES
+# --------------------------
+JETBRIDGE_STANDS = {"1","2","2A","3","3A","4","4A","9","9A","15","15A","16B","16","16A","18"}
