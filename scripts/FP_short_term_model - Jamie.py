@@ -346,10 +346,13 @@ print(merged_df.head(30))
 
 merged_df['date'] = pd.to_datetime(merged_df.index)
 
-# Increase forecasted_exits by 10% for every date in March
+# Increase forecasted_exits by 15% for M-W and 7% for Th-S
 march_mask = merged_df['date'].dt.month == 3
-merged_df.loc[march_mask, 'entry_forecast'] *= 1.10
-merged_df.loc[march_mask, 'exit_forecast'] *= 1.10
+weekday = merged_df['date'].dt.dayofweek
+mtw_mask = weekday.isin([0,1,2]) #Mon, Tue, Wed
+ths_mask = weekday.isin([3,4,5,6]) #Thu-Sun
+merged_df.loc[march_mask & mtw_mask, ['entry_forecast', 'exit_forecast'] *= 1.15
+merged_df.loc[march_mask & ths_mask, ['entry_forecast', 'exit_forecast'] *= 1.07
 
 merged_df.drop(columns=['date'], inplace=True)
 
