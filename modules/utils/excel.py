@@ -144,7 +144,8 @@ def _write_values(ws: Worksheet, df: pd.DataFrame, anchor: str, include_header: 
 
 def _detect_block(ws: Worksheet, anchor: str) -> Tuple[int, int]:
     """
-    Detects the existing headers+data block width and height from an anchor.
+    Detects the existing headers+data block width if the header row contains at least one non-empty value.
+     This prevents false detection on empty sheets.
 
     Parameters
     ----------
@@ -161,26 +162,29 @@ def _detect_block(ws: Worksheet, anchor: str) -> Tuple[int, int]:
     """
     r0, c0 = _cell_to_rc(anchor)
 
-    # Detect width from header row by scanning non-empty cells to the right.
+    # Scan header row for *any* non-empty cell
+    scan_limit = 256
+    header_values = [
+        ws.cell(row=r0, column=c0 + i).value for i in range(scan_limit)
+    ]
+
+    if not any(v not in (None, "") for v in header_values):
+        return(0,0)
+    
+    #Determine width from contiguous non-empty header cells
     width = 0
-    while ws.cell(row=r0, column=c0 + width).value not in (None, ""):
-        width += 1
-    if width == 0:
-        return 0, 0
+    for v in header_values:
+        if v in (None, ""):
+            break
+        width +=1
 
     # Detect height: count contiguous non-empty rows beneath the header.
     height = 1  # include header row
     r = r0 + 1
-    while True:
-        row_has_data = any(
-            ws.cell(row=r, column=c).value not in (None, "")
-            for c in range(c0, c0 + width)
-        )
-        if row_has_data:
-            height += 1
-            r += 1
-        else:
-            break
+    while any(ws.cell(row=r, column=c).value not in (None, "")
+              for c in range(c0, c0 + width)):
+                height += 1
+                r += 1
 
     return width, height
 

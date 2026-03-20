@@ -1,9 +1,11 @@
 import pandas as pd
 
-from modules.analytics.peaks import peak_day
+
 from modules.analytics.growth import period_growth
 from modules.analytics.grouping import group_unique, group_sum
 from modules.analytics.timeseries import bucket_time
+from modules.analytics.penetration import row_penetration
+from modules.config import JETBRIDGE_STANDS
 
 
 #---------------------------------------------------------------
@@ -63,7 +65,7 @@ def group_pax_by_time(pax_df: pd.DataFrame, time_col: str, freq: str, out_col: s
     return group_sum(bucketed, by_cols=[out_col], value_col="Pax", out_col="Total Pax")
 
 #---------------------------------------------------------------
-# Merge PRM and Pax
+# Merge PRM and Pax (time-based)
 #---------------------------------------------------------------
 
 def merge_pax(prm_group_df: pd.DataFrame, pax_group_df: pd.DataFrame, bucket_col: str) -> pd.DataFrame:
@@ -87,7 +89,63 @@ def merge_pax(prm_group_df: pd.DataFrame, pax_group_df: pd.DataFrame, bucket_col
     return prm_group_df.merge(pax_group_df, on=bucket_col, how="left")
 
 #---------------------------------------------------------------
-# Compare with Budget
+# break down by SSR Code, Adhoc or Planned
+#---------------------------------------------------------------
+
+def prm_breakdowns (prm_df: pd.DataFrame, ssr_col: str = "SSR Code", booking_col: str = "Adhoc Or Planned", id_col: str = "Passenger ID") -> dict[str, pd.DataFrame]:
+    """
+    Compute PRM demand breakdowns by SSR Code and by Adhoc/Planned
+    
+    Parameters
+    ----------
+    prm_df: pandas.DataFrame
+        input dataset, must_include: ssr_col, plan_col, id_col
+    ssr_col: str, default "SSR Code"
+        Column containing SSR category for each PRM record
+    booking_col: str, default "Adhoc Or Planned"
+        Column indicating whether the request was Ad-Hoc or Planned
+    id_col: str, default "Passenger ID"
+        Unique passenger identifier to deduplicate on. 
+
+    Returns
+    ---------
+    dict[str, pandas.DataFrame]
+        {
+            "by_ssr": DataFrame with columns:
+                [SSR Code, Unique Count, Total PRM, % of PRM Demand],
+            "by_booking": DataFrame with columns:
+                [Adhoc Or Planned, Unique Count, Total PRM, % of PRM Demand]
+        }
+    
+    Notes
+    ----------
+    - Percentages are computed relative to the total unique PRM passengers within prm_df
+    
+    """
+
+    total_prm_unique = prm_df[id_col].nunique()
+
+    # --- By SSR Code ---
+    by_ssr = group_unique(prm_df, [ssr_col], id_col=id_col).copy()
+    by_ssr["_denom_total"] = float(total_prm_unique)
+    by_ssr = row_penetration(by_ssr, "Unique Count", "_denom_total", "% of PRM Demand")
+    by_ssr["% of PRM Demand"] *= 100.0
+    by_ssr["Total PRM"] = int(total_prm_unique)
+    by_ssr = by_ssr.drop(columns = ["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
+
+    # --- By Adhco/Planned ---
+    by_booking = group_unique(prm_df, [booking_col], id_col = id_col).copy()
+    by_booking["_denom_total"] = float(total_prm_unique)
+    by_booking = row_penetration(by_booking, "Unique Count", "_denom_total", "% of PRM Demand")
+    by_booking["% of PRM Demand"] *= 100.0
+    by_booking["Total PRM"] = int(total_prm_unique)
+    by_booking = by_booking.drop(columns=["_denom_total"]).sort_values(booking_col).reset_index(drop=True)
+
+    return {"by_ssr": by_ssr, "by_booking": by_booking}
+
+
+#---------------------------------------------------------------
+# Compare with Budget (demand and penetration)
 #---------------------------------------------------------------
 
 def add_budget_comparison(grouped_df: pd.DataFrame, budget_df: pd.DataFrame, bucket_col:str) -> pd.DataFrame:
@@ -115,47 +173,6 @@ def add_budget_comparison(grouped_df: pd.DataFrame, budget_df: pd.DataFrame, buc
     df["Diff vs Budget Penetration Rate (%)"] = (df["Penetration Rate"] - df["Budget Penetration Rate"]) / df["Budget Penetration Rate"] * 100
 
     return df
-
-#---------------------------------------------------------------
-# multi-year PRM growth (unique Passenger ID)
-#---------------------------------------------------------------
-
-def growth_unique_passengers(loader_fn, start: str, end: str, years_back: int = 3, loader_kwargs: dict | None=None) -> pd.DataFrame:
-    """
-    Compute PRM growth using period_growth(), counting unique 'Passgener ID'
-    
-    Parameters
-    ----------
-    
-    loader_fn : callable
-        Loader returning a CLEAN PRM DataFrame for (start, end).
-    start : str
-    end : str
-    years_back : int, default 3
-    loader_kwargs : dict, optional
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns:
-            • Period
-            • Count
-            • Absolute Change
-            • Percent Change
-    """
-
-    
-    loader_kwargs = loader_kwargs or {}
-
-    return period_growth(
-        loader_fn=loader_fn,
-        start=start,
-        end=end,
-        years_back=years_back,
-        id_col="Passenger ID",
-        loader_kwargs=loader_kwargs,
-    )
-
 
 def compute_complaints_rolling_window(
     budget_df: pd.DataFrame,

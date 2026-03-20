@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 
 
 def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> None:
@@ -114,6 +115,143 @@ def plot_distribution(hist_df: pd.DataFrame, mode: str, output_path: str) -> Non
     ax.set_xticklabels([hhmm(t) for t in ticks], ha="right", color="#22a3b5", fontsize=12)
 
     # Minimal chrome
+    ax.yaxis.set_visible(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    plt.savefig(output_path, dpi=200, transparent=True)
+    plt.close()
+
+
+
+
+
+
+def plot_distribution_darkslide(hist_df: pd.DataFrame, mode: str, output_path: str) -> None:
+    """
+    Dark-slide version of plot_distribution using the original (working)
+    bar-label placement logic, with updated colours, bold fonts, and improved
+    reference-line labels (clean, vertical, non-overlapping).
+    """
+
+    df = hist_df.copy()
+
+    # --- Dark-slide colours (desaturated, readable) ---
+    bar_color = "#a10065" if mode == "entry" else "#17828f"
+
+    counts_col = "Entry Count" if mode == "entry" else "Exit Count"
+    avg_line  = df["Avg Entry Line"].iloc[0] if mode == "entry" else df["Avg Exit Line"].iloc[0]
+    med_line  = df["Median Entry Line"].iloc[0] if mode == "entry" else df["Median Exit Line"].iloc[0]
+
+    # --- Bar geometry ---
+    starts  = df["Bin Start"].to_numpy()
+    ends    = df["Bin End"].to_numpy()
+    widths  = ends - starts
+    counts  = df[counts_col].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 9), dpi=200)
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+
+    # --- Bars ---
+    gap = 0.05
+    adj = widths * (1 - gap)
+
+    ax.bar(
+        starts + widths * gap / 2,
+        counts,
+        width=adj,
+        align="edge",
+        color=bar_color,
+        edgecolor="#dddddd",
+        linewidth=0.8,
+        zorder=10
+    )
+
+    max_h = counts.max() if counts.size else 0
+    ax.set_ylim(0, max_h * 1.40)
+
+    # --- Reference lines ---
+    ax.axvline(0,        color="white",   linewidth=4, zorder=20)
+    ax.axvline(avg_line, color="#c3b9b0", linewidth=4, zorder=20)
+    ax.axvline(med_line, color="#2bc68a", linewidth=4, zorder=20)
+
+    # --- Time formatter ---
+    def hhmm(v):
+        sign = "-" if v < 0 else ""
+        v = abs(v)
+        return f"{sign}{int(v//60):02d}:{int(v%60):02d}"
+
+    # --- Reference-line labels: vertical, pixel-offset, bottom→top ---
+    label_y = max_h * 1.32
+    pixel_offset = 16
+
+    def line_label(x, text, color, side="right"):
+        """
+        Places a vertical label next to the line at x, offset in *pixels*
+        (so it never touches the line regardless of data scale).
+        """
+        dx = pixel_offset if side == "right" else -pixel_offset
+
+        ax.annotate(
+            text,
+            xy=(x, label_y),
+            xycoords="data",
+            xytext=(dx, 0),
+            textcoords="offset points",
+            rotation=90,
+            rotation_mode="anchor",
+            va="bottom",
+            ha="left" if side == "right" else "right",
+            fontsize=14,
+            fontweight="bold",
+            color=color,
+            zorder=25,
+            clip_on=False,
+            path_effects=[pe.withStroke(linewidth=2, foreground="black", alpha=0.35)]
+        )
+
+    # --- Decide label sides (Avg & Median split; On-Time always left) ---
+    median_left = med_line < avg_line
+    med_side = "left" if median_left else "right"
+    avg_side = "right" if median_left else "left"
+
+    line_label(0,        "On-Time: 00:00",            "white",    side="left")
+    line_label(avg_line, f"Avg: {hhmm(avg_line)}",    "#c3b9b0",  side=avg_side)
+    line_label(med_line, f"Median: {hhmm(med_line)}", "#2bc68a",  side=med_side)
+
+    # --- ORIGINAL WORKING BAR-LABEL LOGIC (unchanged) ---
+    for s, w, c in zip(starts, adj, counts):
+
+        if c <= 0:
+            continue
+
+        # Three-tier placement (your original logic)
+        if c > max_h * 0.1:
+            ypos = c * 0.5
+        elif c > max_h * 0.02:
+            ypos = c * 1.25
+        else:
+            ypos = c + (max_h * 0.03)
+
+        ax.text(
+            s + w / 2,
+            ypos,
+            f"{int(c)}",
+            ha="center",
+            color="white",
+            fontsize=12,
+            fontweight="bold",
+            zorder=30,
+        )
+
+    # --- X-axis formatting ---
+    ticks = np.arange(-180, 181, 60)
+    ax.set_xlim(-200, 200)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([hhmm(t) for t in ticks], color="white", fontsize=14)
+
+    # --- Minimalist frame ---
     ax.yaxis.set_visible(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
