@@ -35,25 +35,26 @@ BUDGET_EXCEL_PATH = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limite
 
 def load_prm_data(start: str, end: str) -> pd.DataFrame:
     """ 
-    Load PRM Data where Billing PRM = 1, for time period.
+    Load PRM Data where Billing PRM = 1, for time period 
     
     Parameters
     ----------
-    start : str
-        Start of window (ISO format 'YYYY-MM-DD', inclusive).
-    end : str
-        End of window (ISO format 'YYYY-MM-DD', exclusive).
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
     
-    Returns
-    -------
-    pandas.DataFrame
-        DataFrame of PRM Data with columns:
-        ['Job ID', 'Passenger ID', 'Operation Date', 'A/D', 'Vehicle Type',
-         'Adhoc Or Planned', 'Pickup Location', 'Destination Location', 'SSR Code',
-         'Day', 'Year']
+     Returns
+    ----------
+    pd.DataFrame
+        Dataframe of PRM Data with columns:
+        ['Job ID', 'Passenger ID', 'Operation Date', 'Vehicle Type', 'Operation Date_day', 'Operation Date_month', 'Operation Date_year']
     """
+
+    
     start_op = start.replace("-", "")   # "2025-01-01" → "20250101"
     end_op   = end.replace("-", "")     # "2026-01-01" → "20260101"
+
 
     df = query(
         table="PRM.CompletedServicesByJob",
@@ -66,14 +67,14 @@ def load_prm_data(start: str, end: str) -> pd.DataFrame:
             "adhocOrPlanned AS [Adhoc Or Planned]",
             "actualPickupLocation AS [Pickup Location]",
             "actualDestinationLocation AS [Destination Location]",
-            "currentSSRCode AS [SSR Code]"
+            "currentSSRCode AS [SSR Code]" 
         ],
-        where = [
-            "BillingPRM = 1",
-            "Operation_DateID_Local >= :start_op",
-            "Operation_DateID_Local < :end_op",
+        where = ["BillingPRM = 1",
+                 "Operation_DateID_Local >= :start_op",
+                 "Operation_DateID_Local < :end_op",
         ],
         params= {"start_op": start_op, "end_op": end_op},
+        query_option = "OPTION (RECOMPILE)",
     )
     
     df = to_datetime(df, "Operation Date")
@@ -380,27 +381,152 @@ def build_breakdowns(prm_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # DEBUGGING (unchanged)
 # ---------------------------------------------------------------
 
-def debug_prm_spanning_months(prm_df: pd.DataFrame, excel_out: str | None = None) -> dict[str, pd.DataFrame]:
+# def debug_prm_spanning_months(prm_df: pd.DataFrame, excel_out: str | None = None) -> dict[str, pd.DataFrame]:
+#     """
+#     TEMP DEBUG: Create Excel tabs to show:
+#        • PRMs in multiple months
+#        • PRMs crossing midnight (consecutive days)
+#        • PRMs crossing midnight *and* crossing into a different month (likely cause of discrepancies)
+
+#     Tabs written (if excel_out provided):
+#       - "PRMs in Multiple Months"
+#       - "Cross-Midnight PRMs"
+#       - "Cross-Midnight Across Months"
+#       - "PRM Debug Summary"
+
+#     Returns
+#     -------
+#     dict[str, pandas.DataFrame]
+#         DataFrames for interactive inspection keyed by:
+#             'multi_month', 'cross_midnight', 'cross_midnight_across_months', 'summary'
+#     """
+#     import pandas as pd
+
+#     if prm_df is None or prm_df.empty:
+#         summary = pd.DataFrame({
+#             "Metric": [
+#                 "Distinct PRMs in >1 month",
+#                 "Distinct PRMs crossing midnight",
+#                 "Distinct PRMs crossing midnight AND crossing months",
+#             ],
+#             "Value": [0, 0, 0],
+#         })
+#         if excel_out:
+#             write_once_then_update(excel_out, "PRM Debug Summary", summary, anchor="A2", include_header=True)
+#         return {"multi_month": pd.DataFrame(), "cross_midnight": pd.DataFrame(),
+#                 "cross_midnight_across_months": pd.DataFrame(), "summary": summary}
+
+#     df = prm_df.copy()
+#     df["Operation Date"] = pd.to_datetime(df["Operation Date"], errors="coerce")
+
+#     # 1) PRMs in multiple months
+#     df["YearMonth_Period"] = df["Operation Date"].dt.to_period("M")
+#     month_counts = df.groupby("Passenger ID")["YearMonth_Period"].nunique()
+#     multi_month_ids = month_counts[month_counts > 1].index
+
+#     multi_month_rows = (
+#         df[df["Passenger ID"].isin(multi_month_ids)]
+#         .sort_values(["Passenger ID", "Operation Date"])
+#         .drop(columns=["YearMonth_Period"])
+#         .copy()
+#     )
+
+#     # 2) Cross-midnight PRMs
+#     dx = df.sort_values(["Passenger ID", "Operation Date"]).copy()
+#     dx["OpDateOnly"] = dx["Operation Date"].dt.normalize()
+
+#     dx["Prev Operation Date"] = dx.groupby("Passenger ID")["Operation Date"].shift(1)
+#     dx["Prev OpDateOnly"]     = dx.groupby("Passenger ID")["OpDateOnly"].shift(1)
+#     dx["Day Diff"]            = (dx["OpDateOnly"] - dx["Prev OpDateOnly"]).dt.days
+
+#     consecutive_flags = dx.groupby("Passenger ID")["Day Diff"].apply(lambda s: (s == 1).any())
+#     cross_midnight_ids = consecutive_flags[consecutive_flags].index
+
+#     cross_midnight_rows = dx[dx["Passenger ID"].isin(cross_midnight_ids)].copy()
+#     cross_midnight_rows = cross_midnight_rows.drop(columns=["YearMonth_Period"], errors="ignore")
+
+#     # 3) Cross-midnight AND crossing into a new month
+#     dx["Prev Month"] = dx["Prev OpDateOnly"].dt.month
+#     dx["Curr Month"] = dx["OpDateOnly"].dt.month
+#     dx["Month Changed"] = dx["Prev Month"] != dx["Curr Month"]
+
+#     cross_month_mask = (dx["Day Diff"] == 1) & (dx["Month Changed"])
+#     cross_midnight_month_ids = dx.loc[cross_month_mask, "Passenger ID"].unique()
+
+#     cross_midnight_across_months = (
+#         dx[dx["Passenger ID"].isin(cross_midnight_month_ids)]
+#         .copy()
+#         .drop(columns=["YearMonth_Period"], errors="ignore")
+#     )
+
+#     # 4) Summary table
+#     summary = pd.DataFrame({
+#         "Metric": [
+#             "Distinct PRMs in >1 month",
+#             "Distinct PRMs crossing midnight",
+#             "Distinct PRMs crossing midnight AND crossing months",
+#         ],
+#         "Value": [
+#             int(len(multi_month_ids)),
+#             int(len(cross_midnight_ids)),
+#             int(len(cross_midnight_month_ids)),
+#         ],
+#     })
+
+#     # 5) Write Excel tabs
+#     if excel_out:
+#         write_once_then_update(excel_out, "PRMs in Multiple Months",
+#                                multi_month_rows, anchor="A2", include_header=True)
+
+#         write_once_then_update(excel_out, "Cross-Midnight PRMs",
+#                                cross_midnight_rows, anchor="A2", include_header=True)
+
+#         write_once_then_update(excel_out, "Cross-Midnight Across Months",
+#                                cross_midnight_across_months, anchor="A2", include_header=True)
+
+#         write_once_then_update(excel_out, "PRM Debug Summary",
+#                                summary, anchor="A2", include_header=True)
+
+#     return {
+#         "multi_month": multi_month_rows,
+#         "cross_midnight": cross_midnight_rows,
+#         "cross_midnight_across_months": cross_midnight_across_months,
+#         "summary": summary,
+#     }
+
+
+def debug_prm_spanning_months_effective(
+    prm_df: pd.DataFrame,
+    start: str,
+    excel_out: str | None = None,
+    *,
+    id_col: str = "Passenger ID",
+    date_col: str = "Operation Date",
+    ad_col: str = "A/D",
+) -> dict[str, pd.DataFrame]:
     """
-    TEMP DEBUG: Create Excel tabs to show:
-       • PRMs in multiple months
-       • PRMs crossing midnight (consecutive days)
-       • PRMs crossing midnight *and* crossing into a different month (likely cause of discrepancies)
+    Debug PRMs that:
+      • appear in >1 month
+      • cross midnight (consecutive days)
+      • cross midnight *and* cross months
 
-    Tabs written (if excel_out provided):
-      - "PRMs in Multiple Months"
-      - "Cross-Midnight PRMs"
-      - "Cross-Midnight Across Months"
-      - "PRM Debug Summary"
+    Computes the three metrics both:
+      - BEFORE Effective Month (raw Operation Date month)
+      - AFTER  Effective Month reassignment
 
-    Returns
-    -------
-    dict[str, pandas.DataFrame]
-        DataFrames for interactive inspection keyed by:
-            'multi_month', 'cross_midnight', 'cross_midnight_across_months', 'summary'
+    Writes a single "PRM Debug Summary (Before vs After EM)" sheet showing:
+      Metric | Before | After | Reduction
+
+    Also writes detail tabs for the AFTER view:
+      - "EM: PRMs in >1 Month"
+      - "EM: Cross-Midnight PRMs"
+      - "EM: Cross-Midnight Across Months"
+
+    Returns a dict with dataframes used.
     """
     import pandas as pd
 
+    # ---- Guard ----
     if prm_df is None or prm_df.empty:
         summary = pd.DataFrame({
             "Metric": [
@@ -408,90 +534,166 @@ def debug_prm_spanning_months(prm_df: pd.DataFrame, excel_out: str | None = None
                 "Distinct PRMs crossing midnight",
                 "Distinct PRMs crossing midnight AND crossing months",
             ],
-            "Value": [0, 0, 0],
+            "Before (raw)": [0, 0, 0],
+            "After (Effective Month)": [0, 0, 0],
+            "Reduction": [0, 0, 0],
         })
         if excel_out:
-            write_once_then_update(excel_out, "PRM Debug Summary", summary, anchor="A2", include_header=True)
-        return {"multi_month": pd.DataFrame(), "cross_midnight": pd.DataFrame(),
-                "cross_midnight_across_months": pd.DataFrame(), "summary": summary}
+            write_once_then_update(excel_out, "PRM Debug Summary (Before vs After EM)",
+                                   summary, anchor="A2", include_header=True)
+        return {
+            "before_multi_month": pd.DataFrame(),
+            "before_cross_midnight": pd.DataFrame(),
+            "before_cross_midnight_cross_month": pd.DataFrame(),
+            "after_multi_month": pd.DataFrame(),
+            "after_cross_midnight": pd.DataFrame(),
+            "after_cross_midnight_cross_month": pd.DataFrame(),
+            "summary": summary,
+        }
 
-    df = prm_df.copy()
-    df["Operation Date"] = pd.to_datetime(df["Operation Date"], errors="coerce")
+    # ========= BEFORE (raw Operation Date month) =========
+    raw = prm_df.copy()
+    raw[date_col] = pd.to_datetime(raw[date_col], errors="coerce")
+    raw["RawMonth"] = raw[date_col].dt.to_period("M")
 
-    # 1) PRMs in multiple months
-    df["YearMonth_Period"] = df["Operation Date"].dt.to_period("M")
-    month_counts = df.groupby("Passenger ID")["YearMonth_Period"].nunique()
-    multi_month_ids = month_counts[month_counts > 1].index
-
-    multi_month_rows = (
-        df[df["Passenger ID"].isin(multi_month_ids)]
-        .sort_values(["Passenger ID", "Operation Date"])
-        .drop(columns=["YearMonth_Period"])
-        .copy()
+    # (1) In >1 raw month
+    raw_month_counts = raw.groupby(id_col)["RawMonth"].nunique()
+    raw_multi_ids = raw_month_counts[raw_month_counts > 1].index
+    before_multi_month = (
+        raw[raw[id_col].isin(raw_multi_ids)]
+           .sort_values([id_col, date_col])
+           .drop(columns=["RawMonth"])
     )
 
-    # 2) Cross-midnight PRMs
-    dx = df.sort_values(["Passenger ID", "Operation Date"]).copy()
-    dx["OpDateOnly"] = dx["Operation Date"].dt.normalize()
+    # For cross-midnight, compute day diffs
+    rsort = raw.sort_values([id_col, date_col]).copy()
+    rsort["OpDateOnly"] = rsort[date_col].dt.normalize()
+    rsort["PrevOpDateOnly"] = rsort.groupby(id_col)["OpDateOnly"].shift(1)
+    rsort["DayDiff"] = (rsort["OpDateOnly"] - rsort["PrevOpDateOnly"]).dt.days
 
-    dx["Prev Operation Date"] = dx.groupby("Passenger ID")["Operation Date"].shift(1)
-    dx["Prev OpDateOnly"]     = dx.groupby("Passenger ID")["OpDateOnly"].shift(1)
-    dx["Day Diff"]            = (dx["OpDateOnly"] - dx["Prev OpDateOnly"]).dt.days
+    # (2) Cross-midnight (any consecutive-day occurrence)
+    before_cross_midnight_ids = rsort.groupby(id_col)["DayDiff"].apply(lambda s: (s == 1).any())
+    before_cross_midnight_ids = before_cross_midnight_ids[before_cross_midnight_ids].index
+    before_cross_midnight = rsort[rsort[id_col].isin(before_cross_midnight_ids)].copy()
+    before_cross_midnight = before_cross_midnight.drop(columns=["RawMonth"], errors="ignore")
 
-    consecutive_flags = dx.groupby("Passenger ID")["Day Diff"].apply(lambda s: (s == 1).any())
-    cross_midnight_ids = consecutive_flags[consecutive_flags].index
+    # (3) Cross-midnight AND cross raw month
+    rsort["PrevRawMonth"] = rsort["PrevOpDateOnly"].dt.to_period("M")
+    rsort["CurrRawMonth"] = rsort["OpDateOnly"].dt.to_period("M")
+    rsort["RawMonthChanged"] = rsort["PrevRawMonth"] != rsort["CurrRawMonth"]
+    raw_cross_month_mask = (rsort["DayDiff"] == 1) & (rsort["RawMonthChanged"])
+    before_cross_midnight_cross_month_ids = rsort.loc[raw_cross_month_mask, id_col].unique()
+    before_cross_midnight_cross_month = rsort[rsort[id_col].isin(before_cross_midnight_cross_month_ids)].copy()
+    before_cross_midnight_cross_month = before_cross_midnight_cross_month.drop(columns=["RawMonth"], errors="ignore")
 
-    cross_midnight_rows = dx[dx["Passenger ID"].isin(cross_midnight_ids)].copy()
-    cross_midnight_rows = cross_midnight_rows.drop(columns=["YearMonth_Period"], errors="ignore")
+    before_counts = {
+        "multi": int(len(raw_multi_ids)),
+        "xmid": int(len(before_cross_midnight_ids)),
+        "xmid_xmon": int(len(before_cross_midnight_cross_month_ids)),
+    }
 
-    # 3) Cross-midnight AND crossing into a new month
-    dx["Prev Month"] = dx["Prev OpDateOnly"].dt.month
-    dx["Curr Month"] = dx["OpDateOnly"].dt.month
-    dx["Month Changed"] = dx["Prev Month"] != dx["Curr Month"]
+    # ========= AFTER (Effective Month) =========
+    eff = assign_effective_month(
+        prm_df.copy(),
+        id_col=id_col,
+        date_col=date_col,
+        ad_col=ad_col,
+        out_col="Effective Month",
+        window_start=start,   # ensures we don't reassign into pre-window months
+    )
+    eff[date_col] = pd.to_datetime(eff[date_col], errors="coerce")
+    eff["EffMonth"] = eff["Effective Month"].dt.to_period("M")
 
-    cross_month_mask = (dx["Day Diff"] == 1) & (dx["Month Changed"])
-    cross_midnight_month_ids = dx.loc[cross_month_mask, "Passenger ID"].unique()
-
-    cross_midnight_across_months = (
-        dx[dx["Passenger ID"].isin(cross_midnight_month_ids)]
-        .copy()
-        .drop(columns=["YearMonth_Period"], errors="ignore")
+    # (1) In >1 Effective Month
+    eff_month_counts = eff.groupby(id_col)["EffMonth"].nunique()
+    eff_multi_ids = eff_month_counts[eff_month_counts > 1].index
+    after_multi_month = (
+        eff[eff[id_col].isin(eff_multi_ids)]
+           .sort_values([id_col, date_col])
+           .drop(columns=["EffMonth"])
     )
 
-    # 4) Summary table
+    # (2) Cross-midnight (any consecutive-day occurrence) – same day logic,
+    #     but now reported on the EM-adjusted frame so you can inspect rows post-reassignment.
+    esort = eff.sort_values([id_col, date_col]).copy()
+    esort["OpDateOnly"] = esort[date_col].dt.normalize()
+    esort["PrevOpDateOnly"] = esort.groupby(id_col)["OpDateOnly"].shift(1)
+    esort["DayDiff"] = (esort["OpDateOnly"] - esort["PrevOpDateOnly"]).dt.days
+
+    after_cross_midnight_ids = esort.groupby(id_col)["DayDiff"].apply(lambda s: (s == 1).any())
+    after_cross_midnight_ids = after_cross_midnight_ids[after_cross_midnight_ids].index
+    after_cross_midnight = esort[esort[id_col].isin(after_cross_midnight_ids)].copy()
+
+    # (3) Cross-midnight AND cross Effective Month
+    esort["PrevEffMonth"] = esort.groupby(id_col)["Effective Month"].shift(1)
+    esort["PrevEffMonthP"] = esort["PrevEffMonth"].dt.to_period("M")
+    esort["CurrEffMonthP"] = esort["Effective Month"].dt.to_period("M")
+    esort["EffMonthChanged"] = esort["PrevEffMonthP"] != esort["CurrEffMonthP"]
+    eff_cross_month_mask = (esort["DayDiff"] == 1) & (esort["EffMonthChanged"])
+    after_cross_midnight_cross_month_ids = esort.loc[eff_cross_month_mask, id_col].unique()
+    after_cross_midnight_cross_month = esort[esort[id_col].isin(after_cross_midnight_cross_month_ids)].copy()
+
+    after_counts = {
+        "multi": int(len(eff_multi_ids)),
+        "xmid": int(len(after_cross_midnight_ids)),
+        "xmid_xmon": int(len(after_cross_midnight_cross_month_ids)),
+    }
+
+    # ========= Summary: Before vs After =========
     summary = pd.DataFrame({
         "Metric": [
             "Distinct PRMs in >1 month",
             "Distinct PRMs crossing midnight",
             "Distinct PRMs crossing midnight AND crossing months",
         ],
-        "Value": [
-            int(len(multi_month_ids)),
-            int(len(cross_midnight_ids)),
-            int(len(cross_midnight_month_ids)),
+        "Before (raw)": [
+            before_counts["multi"],
+            before_counts["xmid"],
+            before_counts["xmid_xmon"],
+        ],
+        "After (Effective Month)": [
+            after_counts["multi"],
+            after_counts["xmid"],
+            after_counts["xmid_xmon"],
         ],
     })
+    summary["Reduction"] = summary["Before (raw)"] - summary["After (Effective Month)"]
 
-    # 5) Write Excel tabs
+    # ========= Write to Excel (optional) =========
     if excel_out:
-        write_once_then_update(excel_out, "PRMs in Multiple Months",
-                               multi_month_rows, anchor="A2", include_header=True)
+        # Summary (side-by-side)
+        write_once_then_update(
+            excel_out, "Debug Raw vs EM",
+            summary, anchor="A2", include_header=True
+        )
 
-        write_once_then_update(excel_out, "Cross-Midnight PRMs",
-                               cross_midnight_rows, anchor="A2", include_header=True)
-
-        write_once_then_update(excel_out, "Cross-Midnight Across Months",
-                               cross_midnight_across_months, anchor="A2", include_header=True)
-
-        write_once_then_update(excel_out, "PRM Debug Summary",
-                               summary, anchor="A2", include_header=True)
+        # AFTER details (so you can inspect the leftover cases)
+        write_once_then_update(
+            excel_out, "EM >1 Month",
+            after_multi_month, anchor="A2", include_header=True
+        )
+        write_once_then_update(
+            excel_out, "EM Cross-Midnight PRMs",
+            after_cross_midnight, anchor="A2", include_header=True
+        )
+        write_once_then_update(
+            excel_out, "EM Cross-Midnight Months",
+            after_cross_midnight_cross_month, anchor="A2", include_header=True
+        )
 
     return {
-        "multi_month": multi_month_rows,
-        "cross_midnight": cross_midnight_rows,
-        "cross_midnight_across_months": cross_midnight_across_months,
+        # before
+        "before_multi_month": before_multi_month,
+        "before_cross_midnight": before_cross_midnight,
+        "before_cross_midnight_cross_month": before_cross_midnight_cross_month,
+        # after
+        "after_multi_month": after_multi_month,
+        "after_cross_midnight": after_cross_midnight,
+        "after_cross_midnight_cross_month": after_cross_midnight_cross_month,
+        # summary
         "summary": summary,
     }
+
 
 
 # ---------------------------------------------------------------
@@ -586,7 +788,7 @@ def main(start: str, end: str, budget_path: str, excel_out: str | None):
 
         # --- TEMP debug tabs ---
         print("     • Adding debug tabs: multi-month / cross-midnight …")
-        debug_prm_spanning_months(prm_df, excel_out)
+        debug_prm_spanning_months_effective(prm_df, start=start, excel_out= excel_out)
 
         step(t7, f"Excel updated → {excel_out}")
 

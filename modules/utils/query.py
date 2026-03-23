@@ -28,6 +28,7 @@ def query(
         overlap: bool = False,
         or_events: bool = False,
         engine = None,
+        query_option: str | None = None
 ):
     """
     Executes a dynamic SQL SELECT query with optional filters, parameters, and date bounds
@@ -73,6 +74,7 @@ def query(
     overlap : bool, optional
     or_events: bool, optional
     engine: optional
+    query_option: optional
         
     Returns
     ---------
@@ -140,6 +142,13 @@ def query(
     #ORDER BY
     if order_by:
         sql += f" ORDER BY {order_by}"
+
+    # trailing query option, optional, (e.g. OPTION(RECOMPILE))
+    if query_option:
+        opt = query_option.strip()
+        if not opt.upper().startswith("OPTION"):
+            raise ValueError("query_option must start with OPTION")
+        sql += f"{opt}"
 
     
     #Execute

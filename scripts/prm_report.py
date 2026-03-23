@@ -73,6 +73,7 @@ def load_prm_data(start: str, end: str) -> pd.DataFrame:
                  "Operation_DateID_Local < :end_op",
         ],
         params= {"start_op": start_op, "end_op": end_op},
+        query_option = "OPTION (RECOMPILE)",
     )
     
     df = to_datetime(df, "Operation Date")
