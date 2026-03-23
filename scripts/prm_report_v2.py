@@ -494,6 +494,21 @@ def build_breakdowns(prm_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 #         "summary": summary,
 #     }
 
+def _clean_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove any pandas Period or helper columns that Excel cannot store."""
+    bad_cols = [
+        "EffMonth",
+        "PrevEffMonth", "PrevEffMonthP",
+        "CurrEffMonthP",
+        "RawMonth",
+        "PrevRawMonth", "CurrRawMonth",
+        "OpDateOnly", "PrevOpDateOnly",
+        "DayDiff",
+        "RawMonthChanged", "EffMonthChanged",
+    ]
+    return df.drop(columns=[c for c in bad_cols if c in df.columns], errors="ignore")
+
+
 
 def debug_prm_spanning_months_effective(
     prm_df: pd.DataFrame,
@@ -670,15 +685,15 @@ def debug_prm_spanning_months_effective(
         # AFTER details (so you can inspect the leftover cases)
         write_once_then_update(
             excel_out, "EM >1 Month",
-            after_multi_month, anchor="A2", include_header=True
+            _clean_for_excel(after_multi_month), anchor="A2", include_header=True
         )
         write_once_then_update(
             excel_out, "EM Cross-Midnight PRMs",
-            after_cross_midnight, anchor="A2", include_header=True
+            _clean_for_excel(after_cross_midnight), anchor="A2", include_header=True
         )
         write_once_then_update(
             excel_out, "EM Cross-Midnight Months",
-            after_cross_midnight_cross_month, anchor="A2", include_header=True
+            _clean_for_excel(after_cross_midnight_cross_month), anchor="A2", include_header=True
         )
 
     return {
