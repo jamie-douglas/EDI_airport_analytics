@@ -152,46 +152,78 @@ def peak_days_table(fp_df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
         build("Peak Movements Day", daily_movements),
     ])
 
-def entry_exit_diffs_stats(fp_df: pd.DataFrame) -> pd.DataFrame:
+
+def entry_exit_diffs_stats(fp_df: pd.DataFrame):
     """
-    Compute entry/ exit time-difference statistics in minutes
-    
+    Compute entry/exit time-difference statistics (in minutes) and return both
+    the enriched DataFrame and summary metrics.
+
+    What this does (for the reader):
+    - Takes a FastPark fact table (row-level records with scheduled/actual times).
+    - Parses the relevant datetime columns (safe with errors='coerce').
+    - Computes two new numeric columns (in minutes):
+        * EntryDiffMin = CheckInStarted - ExpectedArrivalDate
+        * ExitDiffMin  = ActualCheckedOutDate - ExpectedReturnDate
+    - Builds high-level summary tables (human-readable HH:MM averages/medians
+      and numeric percentiles), plus raw numeric averages/medians.
+    - **Returns the DataFrame that includes the new diff columns** as the first
+      return value so downstream functions (e.g., 5‑minute distribution builder)
+      can use the actual per-row minute differences without recomputing.
+
     Parameters
     ----------
-    fp_df: pd.DataFrame
-        Input DataFrame
-        
+    fp_df : pd.DataFrame
+        Input DataFrame expected to contain the datetime columns:
+        ['CheckInStarted', 'ExpectedArrivalDate',
+         'ActualCheckedOutDate', 'ExpectedReturnDate'].
+        Any missing/invalid values are safely coerced to NaT.
+
     Returns
-    ----------
-    pd.DataFrame
-        DataFrame with metrics: average/median entry/exit time differences in HH:MM format
-    
+    -------
+    df_with_diffs : pd.DataFrame
+        A **copy** of the input with two additional float columns:
+        - 'EntryDiffMin' : minutes early/late for entry (negative = early)
+        - 'ExitDiffMin'  : minutes early/late for exit  (negative = early)
+    central_df : pd.DataFrame
+        Two-column table with HH:MM-formatted average/median for entry/exit.
+        Columns: ['Metric', 'Value'].
+    describe_df : pd.DataFrame
+        Two-column table with numeric min/25th/75th/max for entry/exit.
+        Columns: ['Metric', 'Value'].
+    avg_e : float
+        Average entry time difference in minutes.
+    med_e : float
+        Median entry time difference in minutes.
+    avg_x : float
+        Average exit time difference in minutes.
+    med_x : float
+        Median exit time difference in minutes.
     """
     df = fp_df.copy()
 
-    #Parse datetimes
-    for c in ["CheckInStarted", "ExpectedArrivalDate", "ActualCheckedOutDate", "ExpectedReturnDate"]:
-        df[c] = pd.to_datetime(df[c], errors = "coerce")
+    # Parse datetimes robustly
+    for c in ["CheckInStarted", "ExpectedArrivalDate",
+              "ActualCheckedOutDate", "ExpectedReturnDate"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    #Differences in minutes
+    # Per-row differences in minutes
     df["EntryDiffMin"] = (df["CheckInStarted"] - df["ExpectedArrivalDate"]).dt.total_seconds() / 60
-    df["ExitDiffMin"] = (df["ActualCheckedOutDate"] - df["ExpectedReturnDate"]).dt.total_seconds() / 60
+    df["ExitDiffMin"]  = (df["ActualCheckedOutDate"] - df["ExpectedReturnDate"]).dt.total_seconds() / 60
 
-    #Drop invalids per series
+    # Series for stats (drop NaNs)
+    e = pd.to_numeric(df["EntryDiffMin"], errors="coerce").dropna()
+    x = pd.to_numeric(df["ExitDiffMin"],  errors="coerce").dropna()
 
-    e = df["EntryDiffMin"].dropna()
-    x = df["ExitDiffMin"].dropna()
+    # Averages/Medians (raw minutes)
+    avg_e, med_e = float(e.mean()), float(e.median())
+    avg_x, med_x = float(x.mean()), float(x.median())
 
-    #Averages/Medians
-    avg_e, med_e = e.mean(), e.median()
-    avg_x, med_x = x.mean(), x.median()
-
-    #HH:MM formatter
-    def hhmm(v):
+    # HH:MM formatter
+    def hhmm(v: float) -> str:
         sign = "-" if v < 0 else ""
         v = abs(v)
-        return f"{sign}{int(v//60):02d}:{int(v%60):02d}"
-    
+        return f"{sign}{int(v // 60):02d}:{int(v % 60):02d}"
+
     central_df = pd.DataFrame({
         "Metric": [
             "Average Entry Difference (HH:MM)",
@@ -199,11 +231,9 @@ def entry_exit_diffs_stats(fp_df: pd.DataFrame) -> pd.DataFrame:
             "Average Exit Difference (HH:MM)",
             "Median Exit Difference (HH:MM)",
         ],
-        "Value": [
-            hhmm(avg_e), hhmm(med_e), hhmm(avg_x), hhmm(med_x)
-        ]
+        "Value": [hhmm(avg_e), hhmm(med_e), hhmm(avg_x), hhmm(med_x)]
     })
-    
+
     # Percentiles
     e_desc, x_desc = e.describe(), x.describe()
     describe_df = pd.DataFrame({
@@ -219,7 +249,47 @@ def entry_exit_diffs_stats(fp_df: pd.DataFrame) -> pd.DataFrame:
         ]
     })
 
-    return central_df, describe_df, float(avg_e), float(med_e), float(avg_x), float(med_x)
+    # Return the df WITH diffs first, followed by your existing outputs
+    return df, central_df, describe_df, avg_e, med_e, avg_x, med_x
+
+
+
+
+def build_5min_distribution(df: pd.DataFrame,
+                            freq: int = 5,
+                            clamp: tuple[int, int] = (-180, 180)) -> pd.DataFrame:
+    """
+    Floors EntryDiffMin and ExitDiffMin to N‑minute buckets and counts occurrences.
+
+    clamp = (-180, 180) restricts the range to ±3 hours, matching your old histogram.
+    """
+
+    x = df.copy()
+
+    # Floor to nearest freq minutes
+    x["EntryBucket"] = (x["EntryDiffMin"] // freq) * freq
+    x["ExitBucket"]  = (x["ExitDiffMin"]  // freq) * freq
+
+    # Apply clamp
+    lo, hi = clamp
+    x = x[(x["EntryBucket"] >= lo) & (x["EntryBucket"] <= hi) |
+          (x["ExitBucket"] >= lo) & (x["ExitBucket"] <= hi)]
+
+    # Count per bucket
+    entry_counts = x.groupby("EntryBucket").size().rename("EntryCount")
+    exit_counts  = x.groupby("ExitBucket").size().rename("ExitCount")
+
+    # Full index across clamped range
+    full_index = pd.Index(range(lo, hi + 1, freq), name="MinutesDiff")
+
+    out = (pd.DataFrame(index=full_index)
+           .join(entry_counts, how="left")
+           .join(exit_counts, how="left")
+           .fillna(0)
+           .reset_index())
+
+    return out
+
 
 
 def entry_exit_histogram(

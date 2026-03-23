@@ -10,13 +10,14 @@ import pandas as pd
 from modules.utils.query import query
 from modules.utils.excel import write_once_then_update
 from modules.utils.progress import step
-from modules.viz.fastpark import plot_distribution_darkslide
+from modules.viz.fastpark import plot_entry_exit_lines
 from modules.analytics.growth import period_growth
 
 from modules.domain.fastpark import (
     monthly_movements_and_validations,
     peak_days_table,
     entry_exit_diffs_stats,
+    build_5min_distribution,
     entry_exit_histogram,
     checkin_duration_validation,
     length_of_stay,
@@ -193,9 +194,11 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
     # 5) Peaks + diffs + histogram
     print("[5/8] Peaks + entry/exit stats…")
     peaks = peak_days_table(fp, start, end)
-    central, desc, avg_e, med_e, avg_x, med_x = entry_exit_diffs_stats(fp)
+    df_with_diffs, central, desc, avg_e, med_e, avg_x, med_x = entry_exit_diffs_stats(fp)
     hist = entry_exit_histogram(fp, avg_e, med_e, avg_x, med_x)
-    t5 = step(t4, "Peaks/stats/hist computed")
+    dist = build_5min_distribution(df_with_diffs)
+    line_ax = plot_entry_exit_lines(dist_df=dist, med_entry=med_e, med_exit=med_x)
+    t5 = step(t4, "Peaks/stats/lines computed")
 
     
     # Optional charts
@@ -209,8 +212,7 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
         os.makedirs(plot_folder, exist_ok=True)  # create if missing
 
         # Save PNGs into output folder
-        plot_distribution_darkslide(hist, "entry", plot_folder + "fastpark_entry_distribution.png")
-        plot_distribution_darkslide(hist, "exit",  plot_folder + "fastpark_exit_distribution.png")
+        plot_entry_exit_lines(dist_df=dist, med_entry=med_e, med_exit=med_x,save_path= plot_folder + "fastpark_entry_exit__line_distribution.png")
 
         t5 = step(t5, f"Charts saved → {plot_folder}")
 
