@@ -14,7 +14,7 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
                           save_path: str | None = None):
     """
     Two-line Entry/Exit distribution with:
-      • Early/Late shading UNDER THE CURVES ONLY, by side of 0 (no gap at 00:00).
+      • Early/Late shading under the curves, by side of 0 (no gap at 00:00).
       • Dashed 'On time' line with vertical label centered on the line.
       • Median arrows pointing up-right (~45°) BUT text is horizontal, larger, bold.
       • Legend under the chart, side-by-side, larger, bold.
@@ -30,6 +30,9 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
     BRAND_PURPLE = "#4B0082"   # 0-line
     EARLY_SHADE  = "#FDE2E4"
     LATE_SHADE   = "#DFF7EA"
+    ENTRY_ARROW_LINE = "#D2B0C8"
+    EXIT_ARROW_LINE = "#C1C1FF"
+
 
     # --- Data ---
     x  = dist_df["MinutesDiff"].to_numpy()
@@ -75,13 +78,13 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
         rotation=90,
         ha="center",
         va="center",
-        fontsize=13,
+        fontsize=16,
         fontweight="bold",
         color="white",
         zorder=7
     )
 
-    # ---- Median arrows up-right; text horizontal, bold ----
+    # ---- Median horizontal arrows ----
     def hhmm(v):
         sign = "-" if v < 0 else ""
         v = abs(v)
@@ -104,8 +107,8 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
     ax.annotate(
         "",
         xy=(med_entry, y_entry_m),
-        xytext=(med_entry + dx, y_entry_m + dyE),
-        arrowprops=dict(arrowstyle="->", color=BRAND_PINK, lw=2),
+        xytext=(med_entry + dx * 2.5, y_entry_m),
+        arrowprops=dict(arrowstyle="->", color=ENTRY_ARROW_LINE, lw=4,),
         zorder=8,
     )
 
@@ -113,8 +116,8 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
     ax.annotate(
         "",
         xy=(med_exit, y_exit_m),
-        xytext=(med_exit + dx, y_exit_m + dyX),
-        arrowprops=dict(arrowstyle="->", color=BRAND_BLUE, lw=2),
+        xytext=(med_exit + dx*2.5, y_exit_m),
+        arrowprops=dict(arrowstyle="->", color=EXIT_ARROW_LINE, lw=4),
         zorder=8,
 )
 
@@ -126,8 +129,8 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
     ticks = np.arange(start, stop+1, step)
 
     ax.set_xticks(ticks)
-    ax.set_xticklabels([hhmm(t) for t in ticks], color="white", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Difference from booked (HH:MM)", color="white", fontsize=12, fontweight="bold", labelpad=8)
+    ax.set_xticklabels([hhmm(t) for t in ticks], color="white", fontsize=16, fontweight="bold")
+    ax.set_xlabel("Time difference compared to booked (HH:MM)", color="white", fontsize=16, fontweight="bold", labelpad=8)
 
     # ---- Cleanup ----
     ax.yaxis.set_visible(False)
@@ -138,14 +141,14 @@ def plot_entry_exit_lines(dist_df: pd.DataFrame,
     # ---- Legend below: side-by-side, bigger, bold ----
     leg = ax.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.12),  # below the axis
+        bbox_to_anchor=(0.5, -0.16),  # below the axis
         ncol=2,
         frameon=False,
         handlelength=2.5,
         borderaxespad=0.0
     )
     for txt in leg.get_texts():
-        txt.set_fontsize(12)
+        txt.set_fontsize(16)
         txt.set_fontweight("bold")
         txt.set_color("white")
 

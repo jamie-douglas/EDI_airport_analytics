@@ -288,13 +288,23 @@ def build_yearly(prm_df: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFram
                .nunique()
                .reset_index(name="Unique Count")
     )
+    #Adjusted yearly demand = distinct(Passenger, Effective Month) pairs
+    pairs=prm_eff[["Passenger ID", "Effective Month"]].dropna().drop_duplicates()
+    pairs["Year"] = pairs["Effective Month"].dt.year
+    y_adjusted = (
+        pairs.groupby("Year")
+        .size()
+        .reset_index(name="Adjusted Yearly PRM Demand")
+    )
 
     # Merge and compute penetration
     yearly = (
-        y_prm.merge(y_amb, on="Year", how="left")
-             .merge(y_pax, on="Year", how="left")
+        y_prm
+            .merge(y_adjusted, on="Year", how="left")
+            .merge(y_amb, on="Year", how="left")
+            .merge(y_pax, on="Year", how="left")
     )
-    yearly = row_penetration(yearly, numerator_col="Unique Count", denominator_col="Total Pax", out_col="Penetration Rate")
+    yearly = row_penetration(yearly, numerator_col="Adjusted Yearly PRM Demand", denominator_col="Total Pax", out_col="Penetration Rate")
 
     # Year-level budget comparison
     budget_year = budget_df.groupby("Year", as_index=False).agg({
@@ -324,7 +334,7 @@ def build_yearly(prm_df: pd.DataFrame, monthly: pd.DataFrame, daily: pd.DataFram
 # Build Breakdown tables (SSR + Adhoc/Planned)
 # ---------------------------------------------------------------
 
-def build_breakdowns(prm_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+def build_breakdowns(prm_df: pd.DataFrame, start: str) -> dict[str, pd.DataFrame]:
     """
     Build PRM, Ambulift, Landside RC, and Airside RC breakdowns and return the merged summary tables used for Excel output.
     
@@ -347,7 +357,7 @@ def build_breakdowns(prm_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         } 
     """
     # Compute 4 domain-level breakdowns
-    prm_bk  = prm_breakdowns(prm_df)
+    prm_bk  = prm_breakdowns(prm_df, window_start=start)
     ambu_bk = ambulift_breakdowns(prm_df)
     land_bk = landside_RC_breakdowns(prm_df)
     air_bk  = airside_RC_breakdowns(prm_df)
@@ -378,121 +388,8 @@ def build_breakdowns(prm_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 # ---------------------------------------------------------------
-# DEBUGGING (unchanged)
+# DEBUGGING (before and after effective month)
 # ---------------------------------------------------------------
-
-# def debug_prm_spanning_months(prm_df: pd.DataFrame, excel_out: str | None = None) -> dict[str, pd.DataFrame]:
-#     """
-#     TEMP DEBUG: Create Excel tabs to show:
-#        • PRMs in multiple months
-#        • PRMs crossing midnight (consecutive days)
-#        • PRMs crossing midnight *and* crossing into a different month (likely cause of discrepancies)
-
-#     Tabs written (if excel_out provided):
-#       - "PRMs in Multiple Months"
-#       - "Cross-Midnight PRMs"
-#       - "Cross-Midnight Across Months"
-#       - "PRM Debug Summary"
-
-#     Returns
-#     -------
-#     dict[str, pandas.DataFrame]
-#         DataFrames for interactive inspection keyed by:
-#             'multi_month', 'cross_midnight', 'cross_midnight_across_months', 'summary'
-#     """
-#     import pandas as pd
-
-#     if prm_df is None or prm_df.empty:
-#         summary = pd.DataFrame({
-#             "Metric": [
-#                 "Distinct PRMs in >1 month",
-#                 "Distinct PRMs crossing midnight",
-#                 "Distinct PRMs crossing midnight AND crossing months",
-#             ],
-#             "Value": [0, 0, 0],
-#         })
-#         if excel_out:
-#             write_once_then_update(excel_out, "PRM Debug Summary", summary, anchor="A2", include_header=True)
-#         return {"multi_month": pd.DataFrame(), "cross_midnight": pd.DataFrame(),
-#                 "cross_midnight_across_months": pd.DataFrame(), "summary": summary}
-
-#     df = prm_df.copy()
-#     df["Operation Date"] = pd.to_datetime(df["Operation Date"], errors="coerce")
-
-#     # 1) PRMs in multiple months
-#     df["YearMonth_Period"] = df["Operation Date"].dt.to_period("M")
-#     month_counts = df.groupby("Passenger ID")["YearMonth_Period"].nunique()
-#     multi_month_ids = month_counts[month_counts > 1].index
-
-#     multi_month_rows = (
-#         df[df["Passenger ID"].isin(multi_month_ids)]
-#         .sort_values(["Passenger ID", "Operation Date"])
-#         .drop(columns=["YearMonth_Period"])
-#         .copy()
-#     )
-
-#     # 2) Cross-midnight PRMs
-#     dx = df.sort_values(["Passenger ID", "Operation Date"]).copy()
-#     dx["OpDateOnly"] = dx["Operation Date"].dt.normalize()
-
-#     dx["Prev Operation Date"] = dx.groupby("Passenger ID")["Operation Date"].shift(1)
-#     dx["Prev OpDateOnly"]     = dx.groupby("Passenger ID")["OpDateOnly"].shift(1)
-#     dx["Day Diff"]            = (dx["OpDateOnly"] - dx["Prev OpDateOnly"]).dt.days
-
-#     consecutive_flags = dx.groupby("Passenger ID")["Day Diff"].apply(lambda s: (s == 1).any())
-#     cross_midnight_ids = consecutive_flags[consecutive_flags].index
-
-#     cross_midnight_rows = dx[dx["Passenger ID"].isin(cross_midnight_ids)].copy()
-#     cross_midnight_rows = cross_midnight_rows.drop(columns=["YearMonth_Period"], errors="ignore")
-
-#     # 3) Cross-midnight AND crossing into a new month
-#     dx["Prev Month"] = dx["Prev OpDateOnly"].dt.month
-#     dx["Curr Month"] = dx["OpDateOnly"].dt.month
-#     dx["Month Changed"] = dx["Prev Month"] != dx["Curr Month"]
-
-#     cross_month_mask = (dx["Day Diff"] == 1) & (dx["Month Changed"])
-#     cross_midnight_month_ids = dx.loc[cross_month_mask, "Passenger ID"].unique()
-
-#     cross_midnight_across_months = (
-#         dx[dx["Passenger ID"].isin(cross_midnight_month_ids)]
-#         .copy()
-#         .drop(columns=["YearMonth_Period"], errors="ignore")
-#     )
-
-#     # 4) Summary table
-#     summary = pd.DataFrame({
-#         "Metric": [
-#             "Distinct PRMs in >1 month",
-#             "Distinct PRMs crossing midnight",
-#             "Distinct PRMs crossing midnight AND crossing months",
-#         ],
-#         "Value": [
-#             int(len(multi_month_ids)),
-#             int(len(cross_midnight_ids)),
-#             int(len(cross_midnight_month_ids)),
-#         ],
-#     })
-
-#     # 5) Write Excel tabs
-#     if excel_out:
-#         write_once_then_update(excel_out, "PRMs in Multiple Months",
-#                                multi_month_rows, anchor="A2", include_header=True)
-
-#         write_once_then_update(excel_out, "Cross-Midnight PRMs",
-#                                cross_midnight_rows, anchor="A2", include_header=True)
-
-#         write_once_then_update(excel_out, "Cross-Midnight Across Months",
-#                                cross_midnight_across_months, anchor="A2", include_header=True)
-
-#         write_once_then_update(excel_out, "PRM Debug Summary",
-#                                summary, anchor="A2", include_header=True)
-
-#     return {
-#         "multi_month": multi_month_rows,
-#         "cross_midnight": cross_midnight_rows,
-#         "cross_midnight_across_months": cross_midnight_across_months,
-#         "summary": summary,
-#     }
 
 def _clean_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     """Remove any pandas Period or helper columns that Excel cannot store."""
@@ -789,7 +686,7 @@ def main(start: str, end: str, budget_path: str, excel_out: str | None):
 
     # 7) Breakdowns
     print("[7/8] Calculating SSR Code and Booking Type Breakdown…")
-    breakdowns = build_breakdowns(prm_df)
+    breakdowns = build_breakdowns(prm_df, start)
     t7 = step(t6, "SSR Code and Booking Type Breakdown Calculated.")
 
     # 8) Excel output
