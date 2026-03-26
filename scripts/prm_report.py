@@ -476,8 +476,6 @@ def main(start: str, end: str, budget_path: str, excel_out: str | None):
         print("     • Adding debug tabs: multi-month / cross-midnight …")
         debug_prm_spanning_months(prm_df, excel_out)
 
-        step(t7, f"Excel updated → {excel_out}")
-
 
         step(t7, f"Excel updated → {excel_out}")
 
