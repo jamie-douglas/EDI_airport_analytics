@@ -39,12 +39,12 @@ def add_date_parts(df: pd.DataFrame, col: str, day=None, year=None, month=None, 
     -------
     pandas.DataFrame
         Copy of df with the following additional columns:
-        - f"{col}_date"       : date (datetime.date)
-        - f"{col}_year"       : year (int)
-        - f"{col}_month"      : month number 1–12 (int)
-        - f"{col}_month_name" : abbreviated month name (e.g., "Jan")
-        - f"{col}_hour"       : hour-of-day 0–23 (int)
-        - f"{col}_hour_label" : hour label "HH:00" (str)
+        - f"Day"       : date (datetime.date)
+        - f"Year"       : year (int)
+        - f"Yonth"      : month number 1–12 (int)
+        - f"Month Name" : abbreviated month name (e.g., "Jan")
+        - f"Hour"       : hour-of-day 0–23 (int)
+        - f"Hour Label" : hour label "HH:00" (str)
     """
     x = df.copy()
     t = pd.to_datetime(x[col], errors="coerce")

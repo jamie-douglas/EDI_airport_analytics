@@ -1,0 +1,124 @@
+import sys
+import pathlib
+from pathlib import Path
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+import argparse
+import time
+import pandas as pd
+
+from modules.utils.query import query
+from modules.utils.dates import to_datetime
+from modules.utils.progress import step
+from modules.domain.prm.minibus import passenger_level_flags
+from modules.domain.prm.efficiency import vehicle_job_service_time, end_to_end_service_time, rolling_hour_vehicle_usage, rolling_hour_vehicle_model_usage
+
+
+
+def load_prm_data(start: str, end: str) -> pd.DataFrame:
+    """ 
+    Load PRM Data where Billing PRM = 1, for time period 
+    
+    Parameters
+    ----------
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
+    
+     Returns
+    ----------
+    pd.DataFrame
+        Dataframe of PRM Data with columns:
+        ['Job ID', 'Passenger ID', 'Operation Date', 'Vehicle Type', 'Operation Date_day', 'Operation Date_month', 'Operation Date_year']
+    """
+
+    
+    start_op = start.replace("-", "")   # "2025-01-01" → "20250101"
+    end_op   = end.replace("-", "")     # "2026-01-01" → "20260101"
+
+
+    df = query(
+        table="PRM.CompletedServicesByJob",
+        columns = [
+            "RequestID AS [Job ID]",
+            "PassengerID AS [Passenger ID]",
+            "FlightID AS [Flight ID]",
+            "AirlineCode_IATA AS [Airline Code]",
+            "FlightNumber AS [Flight Number]",
+            "Sector",
+            "ArrDep AS [A/D]",
+            "currentSSRCode AS [SSR Code]",
+            "startService_DateTime_Local AS [Job Start Time]",
+            "finishService_DateTime_Local AS [Job End Time]",
+            "scheduledDestinationConcourse AS [Scheduled DO Concourse]",
+            "scheduledDestinationLocation AS [Scheduled DO Location]",
+            "scheduledDestinationLocationType AS [Scheduled DO Location Type]",
+            "actualPickupLocation AS [Actual PU Location]",
+            "actualPickupConcourse AS [Actual PU Concourse]",
+            "actualPickupLocationType AS [Actual PU Location Type]",
+            "actualDestinationConcourse AS [Actual DO Concourse]",
+            "actualDestinationLocation AS [Actual DO Location]",
+            "actualDestinationLocationType AS [Actual DO Location Type]",
+            "EmployeeName AS [Employee]",
+            "VehicleShortName AS [Vehicle Model]",
+            "VehicleTypeName AS [Vehicle Type]",
+            "StandCode AS [Stand]"
+        ],
+        where = ["BillingPRM = 1",
+                 "Operation_DateID_Local >= :start_op",
+                 "Operation_DateID_Local < :end_op",
+        ],
+        params= {"start_op": start_op, "end_op": end_op},
+        query_option = "OPTION (RECOMPILE)",
+    )
+    
+    df = to_datetime(df, ["Job Start Time", "Job End Time"])
+
+    return df
+
+if __name__ == "__main__":
+    
+    start="2025-03-30"
+    end="2025-10-26"
+
+
+    t0 = time.perf_counter()
+
+    # 1) PRM
+    print("[1/4] Loading PRM jobs…")
+
+    prm_df = load_prm_data(start=start, end=end)
+    t1 = step(t0, f"Loaded PRM rows: {len(prm_df):,}")
+
+    # 2) passenger flags
+    print("[2/4] Building Passenger flags…")
+
+    flags_df = passenger_level_flags(prm_df)
+    t2 = step(t1, f"Build passenger flags: {len(flags_df):,}")
+
+    # 3) Job Service times
+    print("[3/4] Calculating average job service times…")
+
+    # 3A) service time per vehicle
+    job_st_df = vehicle_job_service_time(prm_df)
+    t3 = step(t2, f"Service Time Calculated:\n {job_st_df}")
+
+    #3B) service time per vehicle when job is combined
+    comb_st_df = vehicle_job_service_time(flags_df, passenger_flags=True)
+    t4 = step(t3, f"Combined Job Service Time Calculated:\n {comb_st_df}")
+
+    #3C) end-to-end service time
+    ETE_df = end_to_end_service_time(flags_df)
+    t5 = step(t4, f"End to End Service Time Calculated:\n {ETE_df}")
+
+    print("[4/4] Calculating Average PRMs per Vehicle Type…")
+    Avg_A, Avg_A_pivot, Avg_B = rolling_hour_vehicle_usage(flags_df)
+    t6 = step(t5, f"Average PRMs per Vehicle Type Calculated:\n Average PRMs per VT per Rolling Hour: \n {Avg_A_pivot} \n Average PRMs per VT per Rolling Hour: \n {Avg_B}")
+
+    
+    Model_A, Model_A_pivot, Model_B, peak, utilisation_df = rolling_hour_vehicle_model_usage(flags_df)
+    t7 = step(t6, f"Average PRMs per Vehicle Type/Model Calculated:\n Average PRMs per VT/VM per Rolling Hour: \n {Model_A_pivot} \n Average PRMs per VT/VM per Rolling Hour: \n {Model_B}")
+    t8 = step(t7, f"Peak Rolling Hour per VM calculated:\n {peak}")
+    t9 = step(t8, f"Utilisation per VM calculated: \n {utilisation_df}")
+    

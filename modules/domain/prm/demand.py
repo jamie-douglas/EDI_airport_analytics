@@ -134,11 +134,11 @@ def prm_breakdowns (prm_df: pd.DataFrame, ssr_col: str = "SSR Code", booking_col
         window_start=window_start,
     )
 
-    #Adjusted Total PRM = distinct (Passenger,EM Month) across the window
-    pairs=eff[[id_col, "Effective Month"]].dropna().drop_duplicates()
-    adjusted_total = int(len(pairs))
+    # #Adjusted Total PRM = distinct (Passenger,EM Month) across the window
+    # pairs=eff[[id_col, "Effective Month"]].dropna().drop_duplicates()
+    # adjusted_total = int(len(pairs))
 
-    #Helper: count pairs per froup (SSR/Booking)
+    #Helper: count pairs per group (SSR/Booking)
     def _count_pairs(df: pd.DataFrame, group_col: str, out_count_col: str) -> pd.DataFrame:
         gpairs = (
             df[[group_col, id_col, "Effective Month"]]
@@ -150,39 +150,39 @@ def prm_breakdowns (prm_df: pd.DataFrame, ssr_col: str = "SSR Code", booking_col
         )
         return gpairs
     
-    #total_prm_unique = prm_df[id_col].nunique()
+    total_prm_unique = prm_df[id_col].nunique()
 
-    # # --- By SSR Code ---
-    # by_ssr = group_unique(prm_df, [ssr_col], id_col=id_col).copy()
-    # by_ssr["_denom_total"] = float(total_prm_unique)
-    # by_ssr = row_penetration(by_ssr, "Unique Count", "_denom_total", "% of PRM Demand")
-    # by_ssr["% of PRM Demand"] *= 100.0
-    # by_ssr["Total PRM"] = int(total_prm_unique)
-    # by_ssr = by_ssr.drop(columns = ["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
-
-    #By SSR Code (Adjusted)
-    by_ssr = _count_pairs(eff, ssr_col, "Unique Count")
-    by_ssr["_denom_total"] = float(adjusted_total)
+    # --- By SSR Code ---
+    by_ssr = group_unique(prm_df, [ssr_col], id_col=id_col).copy()
+    by_ssr["_denom_total"] = float(total_prm_unique)
     by_ssr = row_penetration(by_ssr, "Unique Count", "_denom_total", "% of PRM Demand")
     by_ssr["% of PRM Demand"] *= 100.0
-    by_ssr["Total PRM"] = adjusted_total
-    by_ssr = by_ssr.drop(columns=["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
+    by_ssr["Total PRM"] = int(total_prm_unique)
+    by_ssr = by_ssr.drop(columns = ["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
 
-    # # --- By Adhoc/Planned ---
-    # by_booking = group_unique(prm_df, [booking_col], id_col = id_col).copy()
-    # by_booking["_denom_total"] = float(total_prm_unique)
-    # by_booking = row_penetration(by_booking, "Unique Count", "_denom_total", "% of PRM Demand")
-    # by_booking["% of PRM Demand"] *= 100.0
-    # by_booking["Total PRM"] = int(total_prm_unique)
-    # by_booking = by_booking.drop(columns=["_denom_total"]).sort_values(booking_col).reset_index(drop=True)
+    # #By SSR Code (Adjusted)
+    # by_ssr = _count_pairs(eff, ssr_col, "Unique Count")
+    # by_ssr["_denom_total"] = float(adjusted_total)
+    # by_ssr = row_penetration(by_ssr, "Unique Count", "_denom_total", "% of PRM Demand")
+    # by_ssr["% of PRM Demand"] *= 100.0
+    # by_ssr["Total PRM"] = adjusted_total
+    # by_ssr = by_ssr.drop(columns=["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
 
-    #By Adhoc/Planned (Adjusted)
-    by_booking = _count_pairs(eff, booking_col, "Unique Count")
-    by_booking["_denom_total"] = float(adjusted_total)
+    # --- By Adhoc/Planned ---
+    by_booking = group_unique(prm_df, [booking_col], id_col = id_col).copy()
+    by_booking["_denom_total"] = float(total_prm_unique)
     by_booking = row_penetration(by_booking, "Unique Count", "_denom_total", "% of PRM Demand")
     by_booking["% of PRM Demand"] *= 100.0
-    by_booking["Total PRM"] = adjusted_total
+    by_booking["Total PRM"] = int(total_prm_unique)
     by_booking = by_booking.drop(columns=["_denom_total"]).sort_values(booking_col).reset_index(drop=True)
+
+    # #By Adhoc/Planned (Adjusted)
+    # by_booking = _count_pairs(eff, booking_col, "Unique Count")
+    # by_booking["_denom_total"] = float(adjusted_total)
+    # by_booking = row_penetration(by_booking, "Unique Count", "_denom_total", "% of PRM Demand")
+    # by_booking["% of PRM Demand"] *= 100.0
+    # by_booking["Total PRM"] = adjusted_total
+    # by_booking = by_booking.drop(columns=["_denom_total"]).sort_values(booking_col).reset_index(drop=True)
 
     return {"by_ssr": by_ssr, "by_booking": by_booking}
 

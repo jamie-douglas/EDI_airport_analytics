@@ -1,12 +1,12 @@
 #Scripts/prm_report.py
 import sys
 import pathlib
+from pathlib import Path
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 import argparse
 import time
 import pandas as pd
-from pathlib import Path
 
 #utils
 from modules.utils.query import query

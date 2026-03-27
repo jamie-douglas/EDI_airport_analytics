@@ -59,6 +59,35 @@ def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
         .reset_index()
     )
 
+def group_average(df: pd.DataFrame, by_cols: List[str], value_col: str,
+              out_col: str) -> pd.DataFrame:
+    """
+    Groups by input columns and computes the average of a specified column.
+
+    Parameters
+    ----------
+    df: pandas.DataFrame
+        Input DataFrame
+    by_cols: List of str
+        Grouping columns
+    value_col: str
+        Column to aggregate
+    out_col: str
+        Name of the output summed column. 
+    
+    Returns
+    ---------
+    pandas.DataFrame
+        Grouped DataFrame with a single aggregated column
+    """
+
+    return (
+        df.groupby(by_cols, dropna=False)[value_col]
+        .mean()
+        .rename(out_col)
+        .reset_index()
+    )
+
 
 def ensure_effective_month(
     df: pd.DataFrame,
