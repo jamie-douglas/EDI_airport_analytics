@@ -1,0 +1,229 @@
+import sys
+import pathlib
+from pathlib import Path
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+import time
+import pandas as pd
+
+from modules.utils.progress import step
+from modules.domain.prm.minibus import passenger_level_flags
+from modules.domain.prm.challenges import (
+    prepare_prm_flight_summary,
+    merge_prm_and_flights,
+    challenge_summary
+)
+
+from modules.domain.prm.efficiency import (
+    get_prm_count_per_flight,
+    get_employee_count_per_flight,
+    get_wchc_s_count_per_flight,
+    get_disregard_counts_per_flight
+)
+
+from modules.utils.dates import to_datetime, add_date_parts
+from modules.utils.query import query
+
+# =====================================================================
+# Loaders
+# =====================================================================
+
+def load_prm_data(start: str, end: str) -> pd.DataFrame:
+    """
+    Load PRM Completed Services jobs.
+    """
+
+    start_op = start.replace("-", "")
+    end_op   = end.replace("-", "")
+
+    df = query(
+        table="PRM.CompletedServicesByJob",
+        columns=[
+            "RequestID AS [Job ID]",
+            "PassengerID AS [Passenger ID]",
+            "FlightID AS [Flight ID]",
+            "AirlineCode_IATA AS [Airline Code]",
+            "FlightNumber AS [Flight Number]",
+            "ArrDep AS [A/D]",
+            "currentSSRCode AS [SSR Code]",
+            "startService_DateTime_Local AS [Job Start Time]",
+            "finishService_DateTime_Local AS [Job End Time]",
+            "disregardCode AS [Disregard Code]",
+            "EmployeeName AS [Employee]",
+            "VehicleShortName AS [Vehicle Model]",
+            "VehicleTypeName AS [Vehicle Type]",
+            "StandCode AS [Stand]",
+            "ScheduledDateTime_Local AS [Scheduled DateTime]"
+        ],
+        where=[
+            "BillingPRM = 1",
+            "Operation_DateID_Local >= :start_op",
+            "Operation_DateID_Local < :end_op",
+        ],
+        params={"start_op": start_op, "end_op": end_op},
+        query_option="OPTION (RECOMPILE)",
+    )
+
+    df = to_datetime(df, ["Job Start Time", "Job End Time", "Scheduled DateTime"])
+    df = add_date_parts(df, col="Scheduled DateTime", day=True)
+
+    # Normalise flight number
+    df["Flight Number"] = df["Flight Number"].astype(str).str.lstrip("0")
+
+    return df
+
+
+def load_flight_data(start: str, end: str) -> pd.DataFrame:
+    """
+    Load flight data from EAL.FlightPerformance for merge.
+    """
+
+    df = query(
+        table="EAL.FlightPerformance",
+        columns=[
+            "FlightID AS [Flight ID]",
+            "ScheduledDateTime_Local AS [Scheduled DateTime]",
+            "FlightNumber AS [Flight Number]",
+            "AirlineCode_IATA AS [Airline Code]",
+            "Sector",
+            "StandCode AS [Stand]",
+            "DepartureGate AS [Departure Gate]",
+            "RemoteStand AS [Remote Stand]",
+            "IsPassengerFlight"
+        ],
+        where=[
+            "ScheduledDateTime_Local >= :start",
+            "ScheduledDateTime_Local < :end",
+        ],
+        params={"start": start, "end": end},
+        query_option="OPTION (RECOMPILE)",
+    )
+
+    df = to_datetime(df, ["Scheduled DateTime"])
+    df = add_date_parts(df, col="Scheduled DateTime", day=True)
+
+    df["Flight Number"] = df["Flight Number"].astype(str).str.lstrip("0")
+
+    return df
+
+def load_future_flight_data(start: str, end: str) -> pd.DataFrame:
+    """ 
+    Load Future Flight Data from defined period
+    
+    Parameters
+    ----------
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
+    
+     Returns
+    ----------
+    pd.DataFrame
+        Dataframe of Future Flight Data
+    """
+
+    df = query(
+        table="EAL.FlightPerformance_FutureFlights",
+        columns = [
+            "FlightID AS [Flight ID]",
+            "ScheduledDateTime_Local AS [Scheduled DateTime]",
+            "FlightNumber AS [Flight Number]",
+            "AirlineCode_IATA AS [Airline Code]",
+            "Sector",
+            "IsPassengerFlight"
+
+        ],
+        where=[
+            "ScheduledDateTime_Local >= :start",
+            "ScheduledDateTime_Local < :end",
+        ],
+        params={"start": start, "end": end},
+        query_option="OPTION (RECOMPILE)",
+    )
+
+    df = to_datetime(df, ["Scheduled DateTime"])
+    df = add_date_parts(df, col="Scheduled DateTime", day=True)
+
+    df["Flight Number"] = df["Flight Number"].astype(str).str.lstrip("0")
+
+    return df
+
+# =====================================================================
+# Main Script
+# =====================================================================
+
+if __name__ == "__main__":
+
+    start = "2025-03-30"
+    end   = "2025-10-26"
+
+    t0 = time.perf_counter()
+
+    # ------------------------------------------------------------
+    # 1. Load PRM Jobs
+    # ------------------------------------------------------------
+    print("[1/6] Loading PRM jobs…")
+    prm_df = load_prm_data(start, end)
+    t1 = step(t0, f"Loaded PRM rows: {len(prm_df):,}")
+
+    # ------------------------------------------------------------
+    # 2. Apply Passenger Flags
+    # ------------------------------------------------------------
+    print("[2/6] Applying Passenger Flags…")
+    prm_df = passenger_level_flags(prm_df)
+    t2 = step(t1, f"Passenger Flags applied: {len(prm_df):,}")
+
+    # ------------------------------------------------------------
+    # 3. Prepare flight-level PRM summary
+    # ------------------------------------------------------------
+    print("[3/6] Summarising PRM at flight level…")
+    prm_summary = prepare_prm_flight_summary(prm_df)
+    t3 = step(t2, f"Flight-level PRM summary created: {len(prm_summary):,}")
+
+    # ------------------------------------------------------------
+    # 4. Load flight schedule
+    # ------------------------------------------------------------
+    print("[4/6] Loading flight schedule (historic)…")
+    flights_df = load_flight_data(start, end)
+    t4 = step(t3, f"Flight schedule loaded: {len(flights_df):,}")
+
+    # ------------------------------------------------------------
+    # 5. Merge PRM summary with flight schedule
+    # ------------------------------------------------------------
+    print("[5/6] Merging PRM summary with flight schedule…")
+    merged_df = merge_prm_and_flights(prm_summary, flights_df)
+    t5 = step(t4, f"Merged dataset ready: {len(merged_df):,}")
+
+    # ------------------------------------------------------------
+    # 6. Load & prepare forecast data
+    # ------------------------------------------------------------
+    print("[6/6] Loading forecast flight schedule…")
+    forecast_df = load_future_flight_data(start, end)
+    t6 = step(t5, f"Forecast flights loaded: {len(forecast_df):,}")
+    
+    # ------------------------------------------------------------
+    # CHALLENGE #1 — United flights at Stand 10
+    # ------------------------------------------------------------
+
+    def ch_united_stand10(df):
+        """
+        Challenge #1:
+        United Airlines (UA) flights occurring at Stand 10.
+        """
+        return (df["Airline Code"] == "UA") & (df["Stand"] == "10")
+
+
+    mask_united_stand10 = ch_united_stand10(merged_df)
+
+    summary_united_stand10 = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_united_stand10
+    )
+
+    print("\n=== CHALLENGE #1 — UNITED AT STAND 10 ===")
+    for k, v in summary_united_stand10.items():
+        print(f"{k}: {v}")
+
