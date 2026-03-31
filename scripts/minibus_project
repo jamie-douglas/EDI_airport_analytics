@@ -8,10 +8,10 @@ import time
 import pandas as pd
 
 from modules.utils.query import query
-from modules.utils.dates import to_datetime
+from modules.utils.dates import to_datetime, add_date_parts
 from modules.utils.progress import step
 from modules.domain.prm.minibus import passenger_level_flags
-from modules.domain.prm.efficiency import vehicle_job_service_time, end_to_end_service_time, rolling_hour_vehicle_usage, rolling_hour_vehicle_model_usage
+from modules.domain.prm.efficiency import vehicle_job_service_time, end_to_end_service_time, rolling_hour_vehicle_usage, build_flight_prm_employee_summary
 
 
 
@@ -51,6 +51,7 @@ def load_prm_data(start: str, end: str) -> pd.DataFrame:
             "currentSSRCode AS [SSR Code]",
             "startService_DateTime_Local AS [Job Start Time]",
             "finishService_DateTime_Local AS [Job End Time]",
+            "disregardCode AS [Disregard Code]",
             "scheduledDestinationConcourse AS [Scheduled DO Concourse]",
             "scheduledDestinationLocation AS [Scheduled DO Location]",
             "scheduledDestinationLocationType AS [Scheduled DO Location Type]",
@@ -74,6 +75,7 @@ def load_prm_data(start: str, end: str) -> pd.DataFrame:
     )
     
     df = to_datetime(df, ["Job Start Time", "Job End Time"])
+    df = add_date_parts(df, col="Job Start Time", day=True)
 
     return df
 
@@ -86,19 +88,19 @@ if __name__ == "__main__":
     t0 = time.perf_counter()
 
     # 1) PRM
-    print("[1/4] Loading PRM jobs…")
+    print("[1/5] Loading PRM jobs…")
 
     prm_df = load_prm_data(start=start, end=end)
     t1 = step(t0, f"Loaded PRM rows: {len(prm_df):,}")
 
     # 2) passenger flags
-    print("[2/4] Building Passenger flags…")
+    print("[2/5] Building Passenger flags…")
 
     flags_df = passenger_level_flags(prm_df)
     t2 = step(t1, f"Build passenger flags: {len(flags_df):,}")
 
     # 3) Job Service times
-    print("[3/4] Calculating average job service times…")
+    print("[3/5] Calculating average job service times…")
 
     # 3A) service time per vehicle
     job_st_df = vehicle_job_service_time(prm_df)
@@ -112,13 +114,167 @@ if __name__ == "__main__":
     ETE_df = end_to_end_service_time(flags_df)
     t5 = step(t4, f"End to End Service Time Calculated:\n {ETE_df}")
 
-    print("[4/4] Calculating Average PRMs per Vehicle Type…")
-    Avg_A, Avg_A_pivot, Avg_B = rolling_hour_vehicle_usage(flags_df)
+    print("[4/5] Calculating Average PRMs per Vehicle Type…")
+    Avg_A, Avg_A_pivot, Avg_B, _, _, _ = rolling_hour_vehicle_usage(flags_df)
     t6 = step(t5, f"Average PRMs per Vehicle Type Calculated:\n Average PRMs per VT per Rolling Hour: \n {Avg_A_pivot} \n Average PRMs per VT per Rolling Hour: \n {Avg_B}")
 
     
-    Model_A, Model_A_pivot, Model_B, peak, utilisation_df = rolling_hour_vehicle_model_usage(flags_df)
+    Model_A, Model_A_pivot, Model_B, peak, utilisation_df, stats_df = rolling_hour_vehicle_usage(flags_df, vehicle_model=True)
     t7 = step(t6, f"Average PRMs per Vehicle Type/Model Calculated:\n Average PRMs per VT/VM per Rolling Hour: \n {Model_A_pivot} \n Average PRMs per VT/VM per Rolling Hour: \n {Model_B}")
     t8 = step(t7, f"Peak Rolling Hour per VM calculated:\n {peak}")
     t9 = step(t8, f"Utilisation per VM calculated: \n {utilisation_df}")
+    t10 = step(t9, f"Median and standard deviation calculated: \n {stats_df}")
+
     
+    print("[5/5] Building PRM/Employee Flight Summary…")
+
+    flight_totals, vehicle_breakdown, prm_bin_stats = build_flight_prm_employee_summary(flags_df)
+
+    t11 = step(
+        t10, 
+        "PRM/Employee Flight Summary Completed:\n"
+        f"Flight Totals:\n{flight_totals.head()}\n\n"
+        f"Vehicle Breakdown:\n{vehicle_breakdown.head()}\n\n"
+        f"PRM Bin Statistics:\n{prm_bin_stats}\n"
+    )
+
+
+    
+    # ------------------------------------------------------------
+    # DEBUGGING: Flights with >20 PRMs
+    # ------------------------------------------------------------
+
+    print("\n================ DEBUG: PRM > 20 ================\n")
+
+    flight_cols = ["Flight ID", "Day", "Airline Code", "Flight Number"]
+
+    debug_flights = flight_totals[flight_totals["PRM Count"] > 20].copy()
+
+    # --- Print Flight Totals
+    print("=== FLIGHT TOTALS ===")
+    if debug_flights.empty:
+        print("No flights with >20 PRMs found.")
+    else:
+        print(debug_flights.to_string(index=False))
+
+
+    # --- Vehicle breakdown for these flights
+    debug_vehicle = (
+        vehicle_breakdown
+            .merge(debug_flights[flight_cols], on=flight_cols, how="inner")
+            .copy()
+    )
+
+    print("\n=== VEHICLE BREAKDOWN FOR FLIGHTS >20 PRMs ===")
+    if debug_vehicle.empty:
+        print("No vehicles found for these flights.")
+    else:
+        print(debug_vehicle.to_string(index=False))
+
+    
+    # Bring raw vehicle model into debug_vehicle (distinct rows only)
+    model_lookup = flags_df[flight_cols + ["Vehicle Type", "Vehicle Model"]].drop_duplicates()
+
+    debug_vehicle = debug_vehicle.merge(
+        model_lookup,
+        on=flight_cols + ["Vehicle Type"],
+        how="left"
+    )
+
+
+
+    # ------------------------------------------------------------
+    # DATA QUALITY WARNINGS
+    # ------------------------------------------------------------
+
+    print("\n================ DATA QUALITY WARNINGS ================\n")
+
+    # ⚠ 1. Flights where vehicle != 'No Vehicle' but employee count = 0
+    mask_vehicle_staff_issue = (
+        (debug_vehicle["Vehicle Type"] != "No Vehicle") &
+        (debug_vehicle["Employee Count per Vehicle"] == 0)
+    )
+
+    staff_issues = debug_vehicle[mask_vehicle_staff_issue]
+
+    print("⚠ Flights where vehicle used but staff count = 0:")
+    if staff_issues.empty:
+        print("None 👍")
+    else:
+        print(staff_issues.to_string(index=False))
+
+
+    # ⚠ 2. Flights where multiple vehicles used but model names identical
+    multi_vehicle = debug_vehicle.groupby(flight_cols + ["Vehicle Type"])["Vehicle Model"].nunique().reset_index()
+    model_issues = multi_vehicle[multi_vehicle["Vehicle Model"] > 1]
+
+    print("\n⚠ Flights using multiple vehicles of same type but model mismatch:")
+    if model_issues.empty:
+        print("None 👍")
+    else:
+        print(model_issues.to_string(index=False))
+
+
+    # ------------------------------------------------------------
+    # HUMAN‑READABLE OPERATION SUMMARY
+    # ------------------------------------------------------------
+
+    print("\n================ HUMAN‑READABLE SUMMARY ================\n")
+
+    for _, fl in debug_flights.iterrows():
+
+        fl_key = (
+            (debug_vehicle["Flight ID"] == fl["Flight ID"]) &
+            (debug_vehicle["Day"] == fl["Day"]) &
+            (debug_vehicle["Airline Code"] == fl["Airline Code"]) &
+            (debug_vehicle["Flight Number"] == fl["Flight Number"])
+        )
+
+        subset = debug_vehicle[fl_key]
+
+        # Total staff
+        total_staff = subset["Employee Count per Vehicle"].sum()
+
+        # Total PRMs
+        total_prm = fl["PRM Count"]
+
+        # Vehicle summary counts
+        vehicle_summary = (
+            subset
+            .groupby("Vehicle Type")
+            .agg(
+                PRM_Type=("PRM Count per Vehicle", "sum"),
+                Staff_Type=("Employee Count per Vehicle", "sum"),
+                Units=("Vehicle Count", "sum")
+            )
+            .reset_index()
+        )
+
+        # Header line
+        vs = dict(zip(vehicle_summary["Vehicle Type"], vehicle_summary["Units"]))
+
+        header_parts = []
+        if "Ambulift" in vs: header_parts.append(f"{vs['Ambulift']} Ambu")
+        if "Mini Bus" in vs: header_parts.append(f"{vs['Mini Bus']} Mini Bus")
+        if "No Vehicle" in vs: header_parts.append(f"{vs['No Vehicle']} No-Vehicle")
+
+        header = " | ".join(header_parts)
+
+        print(
+            f"Flight {fl['Airline Code']}{fl['Flight Number']} {fl['Day']}"
+            f"| {total_prm} PRMs | {header} | Staff: {total_staff}"
+        )
+
+        # Per vehicle type details
+        for _, row in vehicle_summary.iterrows():
+            print(
+                f"  ➤ {row['Vehicle Type']}: "
+                f"{row['PRM_Type']} PRMs, "
+                f"{row['Staff_Type']} staff "
+                f"({row['Units']} units)"
+            )
+
+        print()
+
+
+        
