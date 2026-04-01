@@ -1,0 +1,238 @@
+#Scripts/minibus_FTE.py
+
+
+
+import sys
+import pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+import time
+import pandas as pd
+import numpy as np
+
+from modules.utils.query import query
+from modules.utils.dates import to_datetime
+from modules.utils.progress import step
+
+
+
+def load_ambulift_jobs(start: str, end: str) -> pd.DataFrame:
+    """
+    Load PRM Completed Services jobs for Ambulift only.
+    """
+
+    start_op = start.replace("-", "")
+    end_op   = end.replace("-", "")
+
+    df = query(
+        table="PRM.CompletedServicesByJob",
+        columns=[
+            "RequestID AS [Job ID]",
+            "EmployeeName AS [Employee]",
+            "VehicleTypeName AS [Vehicle Type]",
+            "startService_DateTime_Local AS [Job Start Time]",
+            "finishService_DateTime_Local AS [Job End Time]",
+            "StandCode AS [Stand]",
+        ],
+        where=[
+            "BillingPRM = 1",
+            "VehicleTypeName = 'Ambulift'",
+            "Operation_DateID_Local >= :start_op",
+            "Operation_DateID_Local < :end_op",
+        ],
+        params={
+            "start_op": start_op,
+            "end_op": end_op,
+        },
+        query_option="OPTION (RECOMPILE)",
+    )
+
+    df = to_datetime(df, ["Job Start Time", "Job End Time"])
+    return df
+
+
+
+
+
+def assign_shifts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assign Shift_ID per employee based on ≥8 hour gaps between jobs.
+    """
+
+    df = df.sort_values(["Employee", "Job Start Time"]).copy()
+
+    df["Prev_End"] = df.groupby("Employee")["Job End Time"].shift(1)
+    df["Gap_Hours"] = (
+        (df["Job Start Time"] - df["Prev_End"])
+        .dt.total_seconds() / 3600
+    )
+
+    df["New_Shift"] = (df["Gap_Hours"] >= 8) | (df["Gap_Hours"].isna())
+    df["Shift_ID"] = df.groupby("Employee")["New_Shift"].cumsum()
+
+    return df
+
+
+
+
+def build_shift_gap_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute gap counts and shift statistics per (Employee, Shift_ID).
+    """
+
+    rows = []
+
+    for (emp, shift_id), g in df.groupby(["Employee", "Shift_ID"]):
+        g = g.sort_values("Job Start Time")
+
+        gaps = (
+            g["Job Start Time"].iloc[1:].values
+            - g["Job End Time"].iloc[:-1].values
+        ) / np.timedelta64(1, "m")
+
+        gaps = gaps[gaps > 0]
+
+        rows.append({
+            "Employee": emp,
+            "Shift_ID": shift_id,
+            "Shift Start": g["Job Start Time"].min(),
+            "Shift End": g["Job End Time"].max(),
+            "Jobs in Shift": len(g),
+            "Shift Duration (mins)": (
+                g["Job End Time"].max()
+                - g["Job Start Time"].min()
+            ).total_seconds() / 60,
+            "Avg Gap (mins)": gaps.mean() if len(gaps) else 0,
+            "Max Gap (mins)": gaps.max() if len(gaps) else 0,
+            "Gaps ≥30 mins": (gaps >= 30).sum(),
+            "Gaps ≥45 mins": (gaps >= 45).sum(),
+            "Gaps ≥60 mins": (gaps >= 60).sum(),
+        })
+
+    return pd.DataFrame(rows)
+
+
+
+
+def build_hourly_ambulift_coverage(jobs_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expand Ambulift jobs into hourly bins and count distinct drivers per hour.
+    """
+
+    rows = []
+
+    for _, r in jobs_df.iterrows():
+        start = r["Job Start Time"].floor("H")
+        end = r["Job End Time"].ceil("H")
+
+        for hour in pd.date_range(start=start, end=end, freq="H", inclusive="left"):
+            rows.append({
+                "Hour": hour,
+                "Employee": r["Employee"],
+            })
+
+    hourly = pd.DataFrame(rows)
+
+    hourly_counts = (
+        hourly
+        .groupby("Hour")["Employee"]
+        .nunique()
+        .reset_index(name="Concurrent Ambulift Drivers")
+    )
+
+    return hourly_counts
+
+
+
+def add_hourly_staff_context(shift_gaps: pd.DataFrame,
+                             hourly_staff: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add average and max concurrent ambulift drivers per shift.
+    """
+
+    avg_staff = []
+    max_staff = []
+
+    for _, r in shift_gaps.iterrows():
+        mask = (
+            (hourly_staff["Hour"] >= r["Shift Start"].floor("H")) &
+            (hourly_staff["Hour"] <= r["Shift End"].ceil("H"))
+        )
+
+        subset = hourly_staff.loc[mask, "Concurrent Ambulift Drivers"]
+
+        avg_staff.append(subset.mean() if len(subset) else 0)
+        max_staff.append(subset.max() if len(subset) else 0)
+
+    out = shift_gaps.copy()
+    out["Avg Concurrent Ambulift Drivers"] = avg_staff
+    out["Max Concurrent Ambulift Drivers"] = max_staff
+
+    return out
+
+
+
+
+if __name__ == "__main__":
+
+    start = "2025-10-01"
+    end   = "2026-04-01"
+
+    t0 = time.perf_counter()
+
+    # ------------------------------------------------------------
+    # Load Ambulift jobs
+    # ------------------------------------------------------------
+    print("[1/4] Loading Ambulift jobs…")
+    prm_df = load_ambulift_jobs(start, end)
+    t1 = step(t0, f"Rows loaded: {len(prm_df):,}")
+
+    # ------------------------------------------------------------
+    # Assign shifts
+    # ------------------------------------------------------------
+    print("[2/4] Assigning shifts…")
+    prm_df = assign_shifts(prm_df)
+    t2 = step(t1, "Shift IDs assigned")
+
+    # ------------------------------------------------------------
+    # Build shift gap metrics
+    # ------------------------------------------------------------
+    print("[3/4] Computing shift gap metrics…")
+    shift_gaps = build_shift_gap_metrics(prm_df)
+
+    # Remove bad data rows
+    shift_gaps = shift_gaps[shift_gaps["Shift Duration (mins)"] >= 0]
+
+    t3 = step(t2, f"Shifts analysed: {len(shift_gaps):,}")
+
+    # ------------------------------------------------------------
+    # Hourly staffing
+    # ------------------------------------------------------------
+    print("[4/4] Computing hourly ambulift staffing…")
+    hourly_staff = build_hourly_ambulift_coverage(prm_df)
+    shift_gaps = add_hourly_staff_context(shift_gaps, hourly_staff)
+    t4 = step(t3, "Hourly staffing attached")
+
+    # ------------------------------------------------------------
+    # Readable summaries
+    # ------------------------------------------------------------
+    print("\n=== SHIFT-LEVEL GAP SUMMARY ===")
+    print(shift_gaps[[
+        "Jobs in Shift",
+        "Shift Duration (mins)",
+        "Gaps ≥30 mins",
+        "Gaps ≥45 mins",
+        "Gaps ≥60 mins",
+        "Max Gap (mins)",
+    ]].describe())
+
+    print("\n=== MINIBUS FERRY METRICS ===")
+    print(f"Avg gaps ≥45 mins per shift: {shift_gaps['Gaps ≥45 mins'].mean():.2f}")
+    print(f"% shifts with ≥1 gap ≥45 mins: {(shift_gaps['Gaps ≥45 mins'] > 0).mean() * 100:.1f}%")
+    print(f"Max gaps ≥45 mins in a shift: {shift_gaps['Gaps ≥45 mins'].max()}")
+
+    print("\n=== AMBULIFT STAFFING PER SHIFT ===")
+    print(shift_gaps[[
+        "Avg Concurrent Ambulift Drivers",
+        "Max Concurrent Ambulift Drivers"
+    ]].describe())
