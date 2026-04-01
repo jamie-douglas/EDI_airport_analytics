@@ -1,6 +1,6 @@
 
 import pandas as pd
-from modules.domain.prm.efficiency import get_prm_count_per_flight, get_employee_count_per_flight, get_wchc_s_count_per_flight, get_disregard_counts_per_flight, get_vehicle_count
+from modules.domain.prm.efficiency import get_prm_count_per_flight, get_employee_count_per_flight, get_wch_counts_per_flight, get_disregard_counts_per_flight, get_vehicle_count
 from modules.analytics.grouping import group_unique
 
 
@@ -26,7 +26,7 @@ def prepare_prm_flight_summary(prm_df: pd.DataFrame) -> pd.DataFrame:
 
     prm_counts = get_prm_count_per_flight(df, flight_cols)
     emp_counts = get_employee_count_per_flight(df, flight_cols)
-    wchc_s = get_wchc_s_count_per_flight(df, flight_cols)
+    wch_counts = get_wch_counts_per_flight(df, flight_cols)
     disregard = get_disregard_counts_per_flight(df, flight_cols)
     vc_long = get_vehicle_count(df, flight_cols)
     # vc_long = 
@@ -54,15 +54,13 @@ def prepare_prm_flight_summary(prm_df: pd.DataFrame) -> pd.DataFrame:
 
     
     # --- 3. PassengerType PRM breakdown (if exists) ---
+    
     if "PassengerType" in df.columns:
-        pax_type_long = (
-            group_unique(
-                df,
-                by_cols=flight_cols + ["PassengerType"],
-                id_col="Passenger ID"
-            )
-            .rename(columns={"Unique Count": "PassengerType Count"})
-        )
+        pax_type_long = group_unique(
+            df,
+            by_cols=flight_cols + ["PassengerType"],
+            id_col="Passenger ID"
+        ).rename(columns={"Unique Count": "PassengerType Count"})
 
         pax_type_pivot = (
             pax_type_long
@@ -75,14 +73,22 @@ def prepare_prm_flight_summary(prm_df: pd.DataFrame) -> pd.DataFrame:
             )
             .reset_index()
         )
+
+        # Ensure all expected PassengerType columns exist
+        expected_cols = ["Ambulift Only", "Mini Bus Only", "Both", "No Vehicle"]
+        for col in expected_cols:
+            if col not in pax_type_pivot.columns:
+                pax_type_pivot[col] = 0
+
     else:
         pax_type_pivot = None
+
 
     # --- Merge all summaries ---
     summary = (
         prm_counts
         .merge(emp_counts, on=flight_cols, how="left")
-        .merge(wchc_s, on=flight_cols, how="left")
+        .merge(wch_counts, on=flight_cols, how="left")
         .merge(disregard, on=flight_cols, how="left")
         .merge(vc_pivot, on=flight_cols, how="left")
     )
@@ -153,51 +159,70 @@ def challenge_summary(df_merged: pd.DataFrame,
     dict : challenge summary
     """
 
-    affected = df_merged[challenge_mask]
+    
+    affected = df_merged.loc[challenge_mask]
 
-    # ---- Flight counts ----
-    total_hist = df_merged.shape[0]
-    affected_hist = affected.shape[0]
-    pct_hist = affected_hist / total_hist if total_hist else 0
+    # ------------------------------------------------------------------
+    # Flight counts
+    # ------------------------------------------------------------------
+    total_hist = len(df_merged)
+    affected_hist = len(affected)
+    pct_hist = affected_hist / total_hist if total_hist else 0.0
 
-    # ---- Averages per affected flight ----
+    # ------------------------------------------------------------------
+    # Historical averages
+    # ------------------------------------------------------------------
     avg_prm = affected["PRM Count"].mean()
     avg_staff = affected["Employee Count"].mean()
     avg_wchc = affected["WCHC Count"].mean()
     avg_wchs = affected["WCHS Count"].mean()
+    avg_wchr = affected["WCHR Count"].mean()
 
-    # ---- PassengerType breakdown ----
-    if "PassengerType" in df_merged.columns:
+    # ------------------------------------------------------------------
+    # PassengerType breakdown (columns, not rows)
+    # ------------------------------------------------------------------
+    pax_cols = [
+        c for c in ["Ambulift Only", "Mini Bus Only", "Both", "No Vehicle"]
+        if c in df_merged.columns
+    ]
+
+    if pax_cols:
         pax_breakdown = (
-            affected.groupby("PassengerType")["PRM Count"]
-                    .mean()
-                    .to_dict()
+            affected[pax_cols]
+            .mean()
+            .round(2)
+            .to_dict()
         )
     else:
         pax_breakdown = {}
 
-    # ---- Base summary (historical only) ----
+    # ------------------------------------------------------------------
+    # Base (historic) summary
+    # ------------------------------------------------------------------
     summary = {
-        "Historical Flights": total_hist,
-        "Affected Flights": affected_hist,
-        "Affected %": pct_hist * 100,
-        "Avg PRMs per affected flight": avg_prm,
-        "Avg Employees per affected flight": avg_staff,
-        "Avg WCHC per flight": avg_wchc,
-        "Avg WCHS per flight": avg_wchs,
+        "Historical Flights": int(total_hist),
+        "Affected Flights": int(affected_hist),
+        "Affected %": round(pct_hist * 100, 2),
+        "Avg PRMs per affected flight": round(avg_prm, 2),
+        "Avg Employees per affected flight": round(avg_staff, 2),
+        "Avg WCHC per flight": round(avg_wchc, 2),
+        "Avg WCHS per flight": round(avg_wchs, 2),
+        "Avg WCHR per flight": round(avg_wchr, 2),
         "PassengerType Breakdown": pax_breakdown,
     }
 
-    # ---- Add forecast metrics only if available ----
+    # ------------------------------------------------------------------
+    # Forecast metrics (optional)
+    # ------------------------------------------------------------------
     if forecast_df is not None and len(forecast_df) > 0:
-
-        total_forecast = forecast_df.shape[0]
+        total_forecast = len(forecast_df)
         expected_forecast = pct_hist * total_forecast
 
         summary.update({
-            "Forecast Flights": total_forecast,
-            "Forecast Expected Affected %": pct_hist * 100,
-            "Forecast Expected Affected Flights": expected_forecast,
+            "Forecast Flights": int(total_forecast),
+            "Forecast Expected Affected %": round(pct_hist * 100, 2),
+            "Forecast Expected Affected Flights": int(round(expected_forecast)),
         })
 
     return summary
+

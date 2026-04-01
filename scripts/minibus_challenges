@@ -6,6 +6,7 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 import time
 import pandas as pd
+import numpy as np
 
 from modules.utils.progress import step
 from modules.domain.prm.minibus import passenger_level_flags
@@ -15,15 +16,9 @@ from modules.domain.prm.challenges import (
     challenge_summary
 )
 
-from modules.domain.prm.efficiency import (
-    get_prm_count_per_flight,
-    get_employee_count_per_flight,
-    get_wchc_s_count_per_flight,
-    get_disregard_counts_per_flight
-)
-
 from modules.utils.dates import to_datetime, add_date_parts
 from modules.utils.query import query
+from modules.config import JETBRIDGE_STANDS
 
 # =====================================================================
 # Loaders
@@ -164,48 +159,50 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     # 1. Load PRM Jobs
     # ------------------------------------------------------------
-    print("[1/6] Loading PRM jobs…")
+    print("[1/7] Loading PRM jobs…")
     prm_df = load_prm_data(start, end)
     t1 = step(t0, f"Loaded PRM rows: {len(prm_df):,}")
 
     # ------------------------------------------------------------
     # 2. Apply Passenger Flags
     # ------------------------------------------------------------
-    print("[2/6] Applying Passenger Flags…")
+    print("[2/7] Applying Passenger Flags…")
     prm_df = passenger_level_flags(prm_df)
     t2 = step(t1, f"Passenger Flags applied: {len(prm_df):,}")
 
     # ------------------------------------------------------------
     # 3. Prepare flight-level PRM summary
     # ------------------------------------------------------------
-    print("[3/6] Summarising PRM at flight level…")
+    print("[3/7] Summarising PRM at flight level…")
     prm_summary = prepare_prm_flight_summary(prm_df)
     t3 = step(t2, f"Flight-level PRM summary created: {len(prm_summary):,}")
 
     # ------------------------------------------------------------
     # 4. Load flight schedule
     # ------------------------------------------------------------
-    print("[4/6] Loading flight schedule (historic)…")
+    print("[4/7] Loading flight schedule (historic)…")
     flights_df = load_flight_data(start, end)
     t4 = step(t3, f"Flight schedule loaded: {len(flights_df):,}")
 
     # ------------------------------------------------------------
     # 5. Merge PRM summary with flight schedule
     # ------------------------------------------------------------
-    print("[5/6] Merging PRM summary with flight schedule…")
+    print("[5/7] Merging PRM summary with flight schedule…")
     merged_df = merge_prm_and_flights(prm_summary, flights_df)
     t5 = step(t4, f"Merged dataset ready: {len(merged_df):,}")
 
     # ------------------------------------------------------------
     # 6. Load & prepare forecast data
     # ------------------------------------------------------------
-    print("[6/6] Loading forecast flight schedule…")
+    print("[6/7] Loading forecast flight schedule…")
     forecast_df = load_future_flight_data(start, end)
     t6 = step(t5, f"Forecast flights loaded: {len(forecast_df):,}")
     
     # ------------------------------------------------------------
     # CHALLENGE #1 — United flights at Stand 10
     # ------------------------------------------------------------
+    print("[6/7] Loading challenge specific information…")
+
 
     def ch_united_stand10(df):
         """
@@ -223,7 +220,300 @@ if __name__ == "__main__":
         challenge_mask=mask_united_stand10
     )
 
-    print("\n=== CHALLENGE #1 — UNITED AT STAND 10 ===")
+    t7 = step(t6, f"\n=== CHALLENGE #1 — UNITED AT STAND 10 ===")
     for k, v in summary_united_stand10.items():
         print(f"{k}: {v}")
 
+
+    # ------------------------------------------------------------
+    # CHALLENGE #2 — Non‑Ryanair flights at constrained stands
+    #                     (15A / 15B / 17)
+    # ------------------------------------------------------------
+
+    def ch_non_ryanair_at_constrained_stands(df):
+        """
+        Challenge #2:
+        Flights operating at stands 15A, 15B, or 17
+        that are NOT Ryanair operated (FR / RK).
+        """
+        return (
+            (~df["Airline Code"].isin(["FR", "RK"])) &
+            (df["Stand"].isin(["15A", "15B", "17"]))
+        )
+
+
+    mask_non_ryanair_stands = ch_non_ryanair_at_constrained_stands(merged_df)
+
+    summary_non_ryanair_stands = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_non_ryanair_stands
+    )
+
+    t8 = step(t7, f"\n=== CHALLENGE #2 — NON‑RYANAIR FLIGHTS AT STANDS 15A / 15B / 17 ===")
+    for k, v in summary_non_ryanair_stands.items():
+        print(f"{k}: {v}")
+
+    
+    # ------------------------------------------------------------
+    # CHALLENGE #3 — Departure Gate 7 or 8 with >1 wheelchair PRM
+    #                     (WCHC / WCHS / WCHR)
+    # ------------------------------------------------------------
+
+    def ch_gate_7_8_multiple_wheelchairs(df):
+        """
+        Challenge #3:
+        Flights operating at Departure Gate 7 or 8
+        with more than one wheelchair PRM
+        (WCHC + WCHS + WCHR > 1).
+        """
+        return (
+            (df["Departure Gate"].isin(["7", "8"])) &
+            (
+                df["WCHC Count"]
+                + df["WCHS Count"]
+                + df["WCHR Count"]
+                > 1
+            )
+        )
+
+
+    mask_gate_7_8_multi_wc = ch_gate_7_8_multiple_wheelchairs(merged_df)
+
+    summary_gate_7_8_multi_wc = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_gate_7_8_multi_wc
+    )
+
+    t9 = step(
+        t8,
+        f"\n=== CHALLENGE #3 — GATE 7 / 8 WITH >1 WHEELCHAIR PRM ==="
+    )
+    for k, v in summary_gate_7_8_multi_wc.items():
+        print(f"{k}: {v}")
+
+    
+    # ------------------------------------------------------------
+    # CHALLENGE #4 — Domestic flights with WCHS or WCHC
+    #                     (WCHR irrelevant)
+    # ------------------------------------------------------------
+
+    def ch_domestic_wchs_or_wchc(df):
+        """
+        Challenge #4:
+        Domestic flights with at least one WCHS or WCHC passenger.
+        WCHR passengers may be present but are not relevant to this challenge.
+        """
+        return (
+            (df["Sector"] == "Domestic") &
+            ((df["WCHC Count"] + df["WCHS Count"]) >= 1)
+        )
+
+
+    mask_domestic_wchs_wchc = ch_domestic_wchs_or_wchc(merged_df)
+
+    summary_domestic_wchs_wchc = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_domestic_wchs_wchc
+    )
+
+    t10 = step(
+        t9,
+        f"\n=== CHALLENGE #4 — DOMESTIC FLIGHTS WITH WCHS OR WCHC ==="
+    )
+    for k, v in summary_domestic_wchs_wchc.items():
+        print(f"{k}: {v}")
+
+    
+    # ------------------------------------------------------------
+    # CHALLENGE #5 — Capacity breach: >1 Ambulift / Minibus required
+    #                  (2 WCHC or 6 seated PRMs per vehicle)
+    # ------------------------------------------------------------
+
+    def ch_vehicle_capacity_breach(df):
+        """
+        Challenge #5:
+        Flights where PRM demand exceeds the capacity of a single
+        Ambulift or Minibus, assuming:
+        • 2 WCHC per vehicle
+        • 6 seated PRMs per vehicle
+        """
+        
+        
+        # Treat missing counts as zero
+        wchc = df["WCHC Count"].fillna(0)
+        prms = df["PRM Count"].fillna(0)
+
+        # Wheelchair requirement (2 WCHC per vehicle)
+        veh_for_wchc = np.ceil(wchc / 2)
+
+        # Seated requirement (WCHC occupy chairs, rest are seated PRMs)
+        seated_prms = prms - wchc
+        veh_for_seated = np.ceil(seated_prms / 6)
+
+        # Required vehicles is the maximum of the two
+        required_vehicles = np.maximum(veh_for_wchc, veh_for_seated)
+
+        return required_vehicles > 1
+
+
+
+    mask_capacity_breach = ch_vehicle_capacity_breach(merged_df)
+
+    summary_capacity_breach = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_capacity_breach
+    )
+
+    t11 = step(
+        t10,
+        f"\n=== CHALLENGE #5 — VEHICLE CAPACITY BREACH (>1 VEHICLE REQUIRED) ==="
+    )
+    for k, v in summary_capacity_breach.items():
+        print(f"{k}: {v}")
+
+    
+    # ------------------------------------------------------------
+    # CHALLENGE #6 — Flights without a jetbridge
+    # ------------------------------------------------------------
+
+    def ch_no_jetbridge(df):
+        """
+        Challenge #6:
+        Flights operating at stands without a jetbridge.
+        Jetbridge stands are defined in config.JETBRIDGE_STANDS.
+        """
+        return ~df["Stand"].isin(JETBRIDGE_STANDS)
+
+
+    mask_no_jetbridge = ch_no_jetbridge(merged_df)
+
+    summary_no_jetbridge = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_no_jetbridge
+    )
+
+    t12 = step(
+        t11,
+        f"\n=== CHALLENGE #6 — FLIGHTS WITHOUT A JETBRIDGE ==="
+    )
+    for k, v in summary_no_jetbridge.items():
+        print(f"{k}: {v}")
+
+    
+    # # ------------------------------------------------------------
+    # # CHALLENGE #7 — Companion proxy:
+    # #                  Vehicles deployed exceed PRM capacity need
+    # # ------------------------------------------------------------
+
+    # def ch_companion_proxy(df):
+    #     """
+    #     Challenge #7:
+    #     Flights where more vehicles were deployed than required
+    #     by PRM demand alone, indicating likely companion transport.
+
+    #     Assumptions:
+    #     • 2 WCHC per vehicle
+    #     • 6 seated PRMs per vehicle
+    #     """
+
+    #     # Fill missing counts
+    #     prms = df["PRM Count"].fillna(0)
+    #     wchc = df["WCHC Count"].fillna(0)
+
+    #     # Vehicles required by PRMs
+    #     veh_for_wchc = np.ceil(wchc / 2)
+    #     seated_prms = prms - wchc
+    #     veh_for_seated = np.ceil(seated_prms / 6)
+
+    #     required_vehicles = np.maximum(veh_for_wchc, veh_for_seated)
+
+    #     # Actual vehicles used
+    #     actual_vehicles = df["Total Vehicle Count"].fillna(0)
+
+    #     # Companion proxy condition
+    #     return actual_vehicles > required_vehicles
+
+
+    # mask_companion_proxy = ch_companion_proxy(merged_df)
+
+    # summary_companion_proxy = challenge_summary(
+    #     df_merged=merged_df,
+    #     forecast_df=forecast_df,
+    #     challenge_mask=mask_companion_proxy
+    # )
+
+    # t13 = step(
+    #     t12,
+    #     f"\n=== CHALLENGE #7 — COMPANION PROXY (EXCESS VEHICLE DEPLOYMENT) ==="
+    # )
+    # for k, v in summary_companion_proxy.items():
+    #     print(f"{k}: {v}")
+
+
+    # ------------------------------------------------------------
+    # CHALLENGE #7 (REFINED) — Companion proxy:
+    #   Same-vehicle overdeployment vs PRM demand
+    # ------------------------------------------------------------
+
+    
+    def ch_companion_proxy_refined(df):
+        """
+        Refined companion proxy (final):
+
+        Flags flights where MORE vehicles of the SAME type were deployed
+        than PRM demand alone requires, with the critical condition that
+        a baseline need for that vehicle type existed.
+
+        Assumptions:
+        • Ambulift capacity: 2 × WCHC
+        • Minibus capacity: 6 seated PRMs
+        • A vehicle used when required = 0 does NOT count as excess
+        """
+
+        # Fill missing values
+        prms = df["PRM Count"].fillna(0)
+        wchc = df["WCHC Count"].fillna(0)
+
+        ambulifts_used = df.get("Ambulift", 0).fillna(0)
+        minibuses_used = df.get("Mini Bus", 0).fillna(0)
+
+        # Required vehicles by class
+        required_ambulifts = np.ceil(wchc / 2)
+
+        seated_prms = prms - wchc
+        required_minibuses = np.ceil(seated_prms / 6)
+
+        # Only count overdeployment where a baseline need existed
+        excess_ambulift = (
+            (required_ambulifts >= 1) &
+            (ambulifts_used > required_ambulifts)
+        )
+
+        excess_minibus = (
+            (required_minibuses >= 1) &
+            (minibuses_used > required_minibuses)
+        )
+
+        return excess_ambulift | excess_minibus
+
+
+
+    mask_companion_proxy_refined = ch_companion_proxy_refined(merged_df)
+
+    summary_companion_proxy_refined = challenge_summary(
+        df_merged=merged_df,
+        forecast_df=forecast_df,
+        challenge_mask=mask_companion_proxy_refined
+    )
+
+    t13 = step(
+        t12,
+        f"\n=== CHALLENGE #7 (REFINED) — COMPANION PROXY (SAME-VEHICLE OVERDEPLOYMENT) ==="
+    )
+    for k, v in summary_companion_proxy_refined.items():
+        print(f"{k}: {v}")

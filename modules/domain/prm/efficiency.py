@@ -1,3 +1,5 @@
+#modules/domain/prm/efficiency.py
+
 import pandas as pd
 
 from modules.utils.dates import to_datetime
@@ -94,293 +96,7 @@ def end_to_end_service_time(flags_df: pd.DataFrame, start=None, end=None):
 
     return results
 
-# def rolling_hour_vehicle_usage(prm_df: pd.DataFrame):
-#     """
-#     Computes:
-#     A) Hour-of day average rolling-hour PRM rates per Vehicle Type
-#     B) Overall rolling-hour average PRM rates per Vehicle Type (entire period)
-    
-#     Returns
-#     --------
-#     A_raw: long-format hour of day averages
-#     A_pivot: pivoted wide table with Vehicle Types as columns
-#     B: overall averages per Vehicle Type
-#     """
 
-#     #1. Bucket into 15 minute intervals
-#     df= bucket_time(prm_df, time_col="Job Start Time", freq="15min", out_col="Bucket")
-
-#     #Ensure Vehicle Type is filled
-#     df["Vehicle Type"] = df["Vehicle Type"].fillna("No Vehicle")
-
-#     #2. Count PRMs per vehicle type in each bucket
-#     bucket_counts=group_unique(df, by_cols=["Bucket", "Vehicle Type"], id_col="Passenger ID").rename(columns={"Unique Count": "PRMs"})
-
-#     #create continuous bucket grid before rolling
-    
-#     full_range = pd.DataFrame({
-#         "Bucket": pd.date_range(
-#             start=bucket_counts["Bucket"].min(),
-#             end=bucket_counts["Bucket"].max(),
-#             freq="15min"
-#         )
-#     })
-
-#     vehicle_types = bucket_counts["Vehicle Type"].unique()
-
-#     full_index = (
-#         full_range.assign(key=1)
-#         .merge(pd.DataFrame({"Vehicle Type": vehicle_types, "key":1}), on="key")
-#         .drop(columns="key")
-#     )
-
-#     bucket_counts = (
-#         full_index.merge(bucket_counts, on=["Bucket", "Vehicle Type"], how="left")
-#                 .fillna({"PRMs": 0})
-#     )
-
-#     #3. Compute rolling 1-hour sums (60 minutes, i.e., 4 x15 min buckets)
-#     rolling = rolling_sum(
-#         bucket_counts, 
-#         time_col="Bucket",
-#         value_col="PRMs",
-#         window="60min",
-#         out_col="RollingHourPRMs",
-#         groupby_keys=["Vehicle Type"]
-#     )
-#     # --- Add rolling hour start, end, and label --
-
-#     bucket_minutes = 15
-#     window_minutes = 60
-#     offset = window_minutes - bucket_minutes  # 45
-
-#     rolling["WindowStart"] = rolling["Bucket"] - pd.Timedelta(minutes=offset)
-#     rolling["WindowEnd"] = rolling["Bucket"] + pd.Timedelta(minutes=bucket_minutes)
-
-#     rolling["WindowLabel"] = (
-#         rolling["WindowStart"].dt.strftime("%H:%M")
-#         + "–" +
-#         rolling["WindowEnd"].dt.strftime("%H:%M")
-#     )
-
-
-#     #4A Hour of day average
-#     A_raw = group_average(
-#         rolling,
-#         by_cols=["WindowLabel", "Vehicle Type"],
-#         value_col="RollingHourPRMs",
-#         out_col="Avg PRMs per Rolling Hour"
-#     )
-
-#     # Pivot A (Hour x Vehicle Type)
-#     A_pivot = A_raw.pivot(
-#         index="WindowLabel",
-#         columns="Vehicle Type",
-#         values="Avg PRMs per Rolling Hour"
-#     ).reset_index()
-
-#     #Reorder vehicle types
-#     vehicle_order = ["Ambulift", "Mini Bus", "No Vehicle"]
-#     cols = ["WindowLabel"] + [c for c in vehicle_order if c in A_pivot.columns]
-#     A_pivot = A_pivot[cols]
-
-#     #4B OVerall average per vehicle type
-#     B = group_average(
-#         rolling, 
-#         by_cols=["Vehicle Type"],
-#         value_col="RollingHourPRMs",
-#         out_col="Avg PRMs per Rolling Hour"
-#     )
-
-#     return A_raw, A_pivot, B
-
-
-# def rolling_hour_vehicle_model_usage(prm_df: pd.DataFrame):
-#     """
-#     Computes rolling-hour PRM usage per Vehicle Type AND per individual Vehicle Model.
-
-#     Returns:
-#       A_raw   : long-format table (WindowLabel x Vehicle Model)
-#       A_pivot : pivot table (WindowLabel rows, Vehicle Models columns)
-#       B       : overall average PRMs/hour per Vehicle Model
-#     """
-
-#     # 1. Bucket into 15-minute intervals
-#     df = bucket_time(
-#         prm_df,
-#         time_col="Job Start Time",
-#         freq="15min",
-#         out_col="Bucket"
-#     )
-
-#     # Ensure Vehicle Type and Model fields exist
-#     df["Vehicle Type"] = df["Vehicle Type"].fillna("No Vehicle")
-#     df["Vehicle Model"] = df["Vehicle Model"].fillna("Unknown")
-
-
-#     # 2. Count unique PRMs per bucket x vehicle type x vehicle model
-#     bucket_counts = group_unique(
-#         df,
-#         by_cols=["Bucket", "Vehicle Type", "Vehicle Model"],
-#         id_col="Passenger ID"
-#     ).rename(columns={"Unique Count": "PRMs"})
-
-
-#     # 3. Create a continuous 15-min grid
-#     full_range = pd.DataFrame({
-#         "Bucket": pd.date_range(
-#             start=bucket_counts["Bucket"].min(),
-#             end=bucket_counts["Bucket"].max(),
-#             freq="15min"
-#         )
-#     })
-
-#     vehicle_combos = (
-#         bucket_counts[["Vehicle Type", "Vehicle Model"]]
-#         .drop_duplicates()
-#     )
-
-#     full_index = (
-#         full_range.assign(key=1)
-#         .merge(vehicle_combos.assign(key=1), on="key")
-#         .drop(columns="key")
-#     )
-
-#     bucket_counts = (
-#         full_index.merge(bucket_counts,
-#                          on=["Bucket", "Vehicle Type", "Vehicle Model"],
-#                          how="left")
-#                    .fillna({"PRMs": 0})
-#     )
-
-#     # 4. Rolling 1-hour sum per vehicle model
-#     rolling = rolling_sum(
-#         bucket_counts,
-#         time_col="Bucket",
-#         value_col="PRMs",
-#         window="60min",
-#         out_col="RollingHourPRMs",
-#         groupby_keys=["Vehicle Type", "Vehicle Model"]
-#     )
-
-#     # 5. Add rolling window labels
-#     bucket_minutes = 15
-#     window_minutes = 60
-#     offset = window_minutes - bucket_minutes  # 45
-
-#     rolling["WindowStart"] = rolling["Bucket"] - pd.Timedelta(minutes=offset)
-#     rolling["WindowEnd"] = rolling["Bucket"] + pd.Timedelta(minutes=bucket_minutes)
-
-#     rolling["WindowLabel"] = (
-#         rolling["WindowStart"].dt.strftime("%H:%M")
-#         + "–" +
-#         rolling["WindowEnd"].dt.strftime("%H:%M")
-#     )
-
-    
-#     # 5.--- Peak rolling-hour per vehicle model ---
-#     peak_results = []
-
-#     for (vt, vm), subdf in rolling.groupby(["Vehicle Type", "Vehicle Model"]):
-#         peak_val, w_start, w_end = peak_rolling_window(
-#             subdf,
-#             time_col="Bucket",
-#             roll_col="RollingHourPRMs",
-#             bucket_minutes=15,
-#             bucket_count=4,   # 4 × 15min = 60min rolling hour
-#         )
-
-#         peak_results.append({
-#             "Vehicle Type": vt,
-#             "Vehicle Model": vm,
-#             "Peak PRMs in Any Rolling Hour": peak_val,
-#             "Peak Window Start": w_start,
-#             "Peak Window End": w_end,
-#         })
-
-#     Peak_df = pd.DataFrame(peak_results)
-
-    
-#     # --- UTILISATION & active-hour throughput per vehicle ---
-#     utilisation_rows = []
-
-#     for (vt, vm), subdf in rolling.groupby(["Vehicle Type", "Vehicle Model"]):
-        
-#         total_windows = len(subdf)
-#         active_windows = (subdf["RollingHourPRMs"] > 0).sum()
-#         utilisation = active_windows / total_windows if total_windows else 0
-
-#         active_avg = (
-#             subdf.loc[subdf["RollingHourPRMs"] > 0, "RollingHourPRMs"].mean()
-#             if active_windows else 0
-#         )
-
-#         utilisation_rows.append({
-#             "Vehicle Type": vt,
-#             "Vehicle Model": vm,
-#             "Utilisation %": utilisation * 100,
-#             "Active-Hour Avg PRMs": active_avg,
-#             "Total Windows": total_windows,
-#             "Active Windows": active_windows
-#         })
-
-#     Utilisation_df = pd.DataFrame(utilisation_rows)
-
-
-
-#     # 6A. Hour-of-day averages (per Vehicle Model)
-#     A_raw = group_average(
-#         rolling,
-#         by_cols=["WindowLabel", "Vehicle Type", "Vehicle Model"],
-#         value_col="RollingHourPRMs",
-#         out_col="Avg PRMs per Rolling Hour"
-#     )
-
-#     # 6B. Pivot: WindowLabel × Vehicle Model
-#     A_pivot = A_raw.pivot(
-#         index="WindowLabel",
-#         columns="Vehicle Model",
-#         values="Avg PRMs per Rolling Hour"
-#     ).reset_index()
-
-#     # 6C. Overall average PRMs per vehicle model
-#     B = group_average(
-#         rolling,
-#         by_cols=["Vehicle Type", "Vehicle Model"],
-#         value_col="RollingHourPRMs",
-#         out_col="Avg PRMs per Rolling Hour"
-#     )
-
-    
-#     # --- MEDIAN & STD: overall (all hours) ---
-#     stats_rows = []
-
-#     for (vt, vm), subdf in rolling.groupby(["Vehicle Type", "Vehicle Model"]):
-
-#         all_vals = subdf["RollingHourPRMs"]
-
-#         median_all = all_vals.median()
-#         std_all = all_vals.std(ddof=0)  # population std (change to ddof=1 if you want sample std)
-
-#         # --- Active hours ---
-#         active_vals = all_vals[all_vals > 0]
-
-#         median_active = active_vals.median() if len(active_vals) else 0
-#         std_active = active_vals.std(ddof=0) if len(active_vals) else 0
-
-#         stats_rows.append({
-#             "Vehicle Type": vt,
-#             "Vehicle Model": vm,
-#             "Median PRMs (All Hours)": median_all,
-#             "StdDev PRMs (All Hours)": std_all,
-#             "Median PRMs (Active Hours)": median_active,
-#             "StdDev PRMs (Active Hours)": std_active
-#         })
-
-#     Stats_df = pd.DataFrame(stats_rows)
-
-
-#     return A_raw, A_pivot, B, Peak_df, Utilisation_df, Stats_df
 #----------------------------------------------------
 # VEHICLE USAGE FUNCTION AND HELPER FUNCTIONS
 #----------------------------------------------------
@@ -671,10 +387,15 @@ def get_employee_count_per_flight(df, flight_cols):
         .rename(columns={"Unique Count": "Employee Count"})
     )
 
-def get_wchc_s_count_per_flight(df, flight_cols):
+def get_wch_counts_per_flight(df, flight_cols):
     
     """
-    Count WCHC and WCHS passengers per flight.
+    Count wheelchair SSR Code passengers per flight.
+
+    Includes:
+    - WCHC Count
+    - WCHS Count
+    - WCHR Count
 
     Parameters
     ----------
@@ -690,19 +411,44 @@ def get_wchc_s_count_per_flight(df, flight_cols):
             * flight_cols
             WCHC Count
             WCHS Count
+            WCHR Count
     """
-    wchc = (df["SSR Code"] == "WCHC").astype(int)
-    wchs = (df["SSR Code"] == "WCHS").astype(int)
+    
+    wch = df[df["SSR Code"].isin(["WCHC", "WCHS", "WCHR"])].copy()
 
-    grouped = (
-        df.assign(_wchc=wchc, _wchs=wchs)
-          .groupby(flight_cols, dropna=False)[["_wchc", "_wchs"]]
-          .sum()
-          .reset_index()
-          .rename(columns={"_wchc": "WCHC Count", "_wchs": "WCHS Count"})
+    wchc = (
+        group_unique(
+            wch[wch["SSR Code"] == "WCHC"],
+            by_cols=flight_cols + ["Vehicle Type"],
+            id_col="Passenger ID"
+        )
+        .rename(columns={"Unique Count": "WCHC Count"})
     )
 
-    return grouped
+    wchs = (
+        group_unique(
+            wch[wch["SSR Code"] == "WCHS"],
+            by_cols=flight_cols + ["Vehicle Type"],
+            id_col="Passenger ID"
+        )
+        .rename(columns={"Unique Count": "WCHS Count"})
+    )
+
+    wchr = (
+        group_unique(
+            wch[wch["SSR Code"] == "WCHR"],
+            by_cols=flight_cols + ["Vehicle Type"],
+            id_col="Passenger ID"
+        )
+        .rename(columns={"Unique Count": "WCHR Count"})
+    )
+
+    return (
+        wchc.merge(wchs, on=flight_cols + ["Vehicle Type"], how="outer")
+            .merge(wchr, on=flight_cols + ["Vehicle Type"], how="outer")
+            .fillna(0)
+    )
+
 
 
 def get_disregard_counts_per_flight(df, flight_cols):
@@ -823,43 +569,6 @@ def get_employee_count_per_vehicle(df, flight_cols):
             df, by_cols=flight_cols + ["Vehicle Type"], id_col="Employee"
         ).rename(columns={"Unique Count": "Employee Count per Vehicle"})
     )
-
-
-def get_wchc_s_count_per_vehicle(df, flight_cols):
-    """
-    Count WCHC and WCHS passengers per (flight × vehicle type).
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input dataset containing SSR codes.
-    flight_cols : list[str]
-        Columns identifying a unique flight.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns:
-            * flight_cols
-            Vehicle Type
-            WCHC Count per Vehicle
-            WCHS Count per Vehicle
-    """
-    wchc = (df["SSR Code"] == "WCHC").astype(int)
-    wchs = (df["SSR Code"] == "WCHS").astype(int)
-
-    grouped = (
-        df.assign(_wchc=wchc, _wchs=wchs)
-          .groupby(flight_cols + ["Vehicle Type"], dropna=False)[["_wchc", "_wchs"]]
-          .sum()
-          .reset_index()
-          .rename(columns={
-              "_wchc": "WCHC Count per Vehicle",
-              "_wchs": "WCHS Count per Vehicle"
-          })
-    )
-
-    return grouped
 
 
 def get_prm_bin_stats(flight_totals, vehicle_breakdown, flight_cols):
