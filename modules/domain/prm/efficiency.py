@@ -5,6 +5,7 @@ import pandas as pd
 from modules.utils.dates import to_datetime
 from modules.analytics.grouping import group_average, group_sum, group_unique
 from modules.analytics.timeseries import bucket_time, rolling_sum, peak_rolling_window
+from modules.analytics.penetration import row_penetration
 
 #----------------------------------------------------
 # SERVICE TIME FUNCTIONS
@@ -232,9 +233,55 @@ def VM_utilisation(rolling_df):
             "Active Windows": active_windows
         })
 
-    Utilisation_df = pd.DataFrame(utilisation_rows)
+    utilisation_df = pd.DataFrame(utilisation_rows)
 
-    return Utilisation_df
+    
+    # ==================================================
+    # SUMMARY CALCULATIONS (weighted, active hours only)
+    # ==================================================
+
+    summaries = []
+
+    for vt_label, vt_filter in [
+        ("ALL AMBULIFTS", rolling_df["Vehicle Type"] == "Ambulift"),
+        ("ALL MINIBUSES", rolling_df["Vehicle Type"] == "Minibus"),
+        ("ALL VEHICLES", rolling_df["Vehicle Type"].notna()),
+    ]:
+        sub = rolling_df.loc[vt_filter].copy()
+        active_sub = sub[sub["RollingHourPRMs"] > 0]
+
+        total_active_windows = len(active_sub)
+        total_windows = len(sub)
+
+        avg_prms_active = (
+            active_sub["RollingHourPRMs"].sum() / total_active_windows
+            if total_active_windows else 0
+        )
+
+        utilisation = (
+            total_active_windows / total_windows
+            if total_windows else 0
+        )
+
+        summaries.append({
+            "Vehicle Type": vt_label,
+            "Vehicle Model": "ALL",
+            "Utilisation %": utilisation * 100,
+            "Active-Hour Avg PRMs": avg_prms_active,
+            "Total Windows": total_windows,
+            "Active Windows": total_active_windows
+        })
+
+    summary_df = pd.DataFrame(summaries)
+
+    # Combine detailed + summary
+    utilisation_df = pd.concat(
+        [utilisation_df, summary_df],
+        ignore_index=True
+    )
+
+    return utilisation_df
+
 
 def median_std_VM_PRMs(rolling_df):
     stats_rows = []
@@ -491,6 +538,105 @@ def get_disregard_counts_per_flight(df, flight_cols):
     return grouped
 
 
+def get_secondarySSR_count_penrate(ecac_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute secondary SSR counts and penetration rates within each primary PRM group.
+
+    The function normalises the pipe-delimited 'PRM Secondary String' column
+    (e.g. "WCMP|WCHS|MEDA") by exploding it into one secondary SSR per row,
+    then calculates:
+        - unique passenger counts per (Primary PRM, Secondary SSR)
+        - total unique passengers per Primary PRM
+        - penetration rate of each secondary SSR within its primary PRM
+
+    Parameters
+    ----------
+    ecac_df : pandas.DataFrame
+        Input PRM dataset containing at minimum the following columns:
+            - 'Passenger ID'
+            - 'Primary PRM'
+            - 'PRM Secondary String'
+
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame with one row per Primary PRM / Secondary SSR combination,
+        containing:
+            - Primary PRM
+            - Secondary SSR
+            - Secondary Count      (unique passengers with this secondary SSR)
+            - Primary Total        (total unique passengers with this primary PRM)
+            - Penetration Rate     (Secondary Count / Primary Total)
+    """
+
+    df = ecac_df.copy()
+
+    # ----------------------------
+    # Normalise secondary SSRs
+    # ----------------------------
+    df = df.dropna(subset=["PRM Secondary String"])
+    df["Secondary SSR"] = df["PRM Secondary String"].str.split(r"[,\|]", regex=True)
+    df = df.explode("Secondary SSR")
+
+    assert not df["Secondary SSR"].str.contains(",", na=False).any()
+
+    
+    df["Secondary SSR"] = df["Secondary SSR"].str.strip()
+    df = df[df["Secondary SSR"] != ""]
+    df = df[df["Secondary SSR"] != df["Primary PRM"]]
+
+    
+    print(
+        df["Secondary SSR"]
+        .value_counts()
+        .head(20)
+    )
+
+
+
+    # ----------------------------
+    # Count per Primary / Secondary
+    # ----------------------------
+    sec_counts = group_unique(
+        df,
+        by_cols=["Primary PRM", "Secondary SSR"],
+        id_col="PassengerID"
+    ).rename(columns={
+        "Unique Count": "Secondary Count"
+    })
+
+    # ----------------------------
+    # Primary PRM totals
+    # ----------------------------
+    prim_totals = group_unique(
+        ecac_df,
+        by_cols=["Primary PRM"],
+        id_col="PassengerID"
+    ).rename(columns={
+        "Unique Count": "Primary Total"
+    })
+
+    # ----------------------------
+    # Merge + penetration
+    # ----------------------------
+    out = sec_counts.merge(
+        prim_totals,
+        on="Primary PRM",
+        how="left"
+    )
+
+    out = row_penetration(
+        out,
+        numerator_col="Secondary Count",
+        denominator_col="Primary Total",
+        out_col="Penetration Rate"
+    )
+
+    return out.sort_values(
+        ["Primary PRM", "Secondary Count"],
+        ascending=[True, False]
+    )
+
 
 
 def get_vehicle_count(df, flight_cols):
@@ -672,7 +818,7 @@ def build_flight_prm_employee_summary(df):
     # ---- Flight totals ----
     prm_counts = get_prm_count_per_flight(df, flight_cols)
     employee_counts = get_employee_count_per_flight(df, flight_cols)
-    wchc_s_flight = get_wchc_s_count_per_flight(df, flight_cols)
+    wchc_s_flight = get_wch_counts_per_flight(df, flight_cols)
     disregard_flight = get_disregard_counts_per_flight(df, flight_cols)
 
     flight_totals = (
@@ -686,7 +832,7 @@ def build_flight_prm_employee_summary(df):
     prm_by_vehicle = get_prm_count_per_vehicle(df, flight_cols)
     emp_by_vehicle = get_employee_count_per_vehicle(df, flight_cols)
     vehicle_count = get_vehicle_count(df, flight_cols)
-    wchc_s_vehicle = get_wchc_s_count_per_vehicle(df, flight_cols)
+    wchc_s_vehicle = get_wch_counts_per_flight(df, flight_cols)
 
     vehicle_breakdown = (
         prm_by_vehicle

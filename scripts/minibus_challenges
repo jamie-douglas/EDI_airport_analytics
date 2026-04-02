@@ -13,8 +13,9 @@ from modules.domain.prm.minibus import passenger_level_flags
 from modules.domain.prm.challenges import (
     prepare_prm_flight_summary,
     merge_prm_and_flights,
-    challenge_summary
+    challenge_summary,
 )
+from modules.domain.prm.efficiency import get_secondarySSR_count_penrate
 
 from modules.utils.dates import to_datetime, add_date_parts
 from modules.utils.query import query
@@ -130,7 +131,7 @@ def load_future_flight_data(start: str, end: str) -> pd.DataFrame:
             "IsPassengerFlight"
 
         ],
-        where=[
+       where=[
             "ScheduledDateTime_Local >= :start",
             "ScheduledDateTime_Local < :end",
         ],
@@ -144,6 +145,30 @@ def load_future_flight_data(start: str, end: str) -> pd.DataFrame:
     df["Flight Number"] = df["Flight Number"].astype(str).str.lstrip("0")
 
     return df
+
+def load_avtech_data(start: str, end: str):
+    ecac_arrivals = pd.read_excel(
+        io="inputs/ECAC Arrivals 2025.xlsx", 
+        sheet_name="AvTech ECAC Arrivals", 
+        header=0, 
+        usecols=["Source.Name", "Date", "PassengerID", "Primary PRM", "PRM Secondary String", "Airline Code", "Flt Number"]
+     )
+    
+    ecac_departures = pd.read_excel(
+        io="inputs/ECAC Departures 2025.xlsx", 
+        sheet_name="AvTech ECAC Departures", 
+        header=0, 
+        usecols=["Source.Name", "Date", "PassengerID", "Primary PRM", "PRM Secondary String", "Airline Code", "Flt Number"]
+    )
+
+    ecac_S25 = pd.concat([ecac_arrivals, ecac_departures], axis=0, ignore_index = True)
+
+    ecac_S25 = ecac_S25[(ecac_S25["Date"]>=start) & (ecac_S25["Date"] < end)]
+    print(ecac_S25.head(5))
+
+
+    return ecac_S25
+
 
 # =====================================================================
 # Main Script
@@ -195,13 +220,20 @@ if __name__ == "__main__":
     # 6. Load & prepare forecast data
     # ------------------------------------------------------------
     print("[6/7] Loading forecast flight schedule…")
-    forecast_df = load_future_flight_data(start, end)
+    forecast_df = load_future_flight_data(start="2026-03-24", end="2026-10-24")
     t6 = step(t5, f"Forecast flights loaded: {len(forecast_df):,}")
+
+    # ------------------------------------------------------------
+    # 6. Load avtech ECAC detail data
+    # ------------------------------------------------------------
+    print("[7/8] Loading forecast ECAC data…")
+    ecac_df = load_avtech_data(start, end)
+    t6 = step(t5, f"Forecast flights loaded: {len(ecac_df):,}")
     
     # ------------------------------------------------------------
     # CHALLENGE #1 — United flights at Stand 10
     # ------------------------------------------------------------
-    print("[6/7] Loading challenge specific information…")
+    print("[8/8] Loading challenge specific information…")
 
 
     def ch_united_stand10(df):
@@ -517,3 +549,75 @@ if __name__ == "__main__":
     )
     for k, v in summary_companion_proxy_refined.items():
         print(f"{k}: {v}")
+
+    # ------------------------------------------------------------
+    # CHALLENGE #8 — WCHS SSR code with own chair. 
+    # ------------------------------------------------------------
+
+    def ch_wchs_own_chair(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Challenge:
+        Passengers whose Primary PRM is WCHS and who own a wheelchair
+        requiring a wheelchair space (WC* secondary SSR),
+        excluding WCHR and WCHC.
+        """
+
+        # ------------------------------------------
+        # Base secondary SSR breakdown (already clean)
+        # ------------------------------------------
+        SSR_df = get_secondarySSR_count_penrate(df)
+        wchs_df = SSR_df[SSR_df["Primary PRM"] == "WCHS"].copy()
+
+        # ------------------------------------------
+        # Passenger-level calculation for ANY WC*
+        # excluding WCHR / WCHC
+        # ------------------------------------------
+        sec_df = df.dropna(subset=["PRM Secondary String"]).copy()
+
+        sec_df["Secondary SSR"] = (
+            sec_df["PRM Secondary String"]
+            .str.split(r"[,\|]", regex=True)
+        )
+        sec_df = sec_df.explode("Secondary SSR")
+
+        sec_df["Secondary SSR"] = sec_df["Secondary SSR"].str.strip()
+
+        sec_df = sec_df[
+            (sec_df["Primary PRM"] == "WCHS") &
+            (sec_df["Secondary SSR"].str.startswith("WC")) &
+            (~sec_df["Secondary SSR"].isin(["WCHR", "WCHC"])) &
+            (sec_df["Secondary SSR"] != "WCHS")
+        ]
+
+        # Unique WCHS passengers with ANY qualifying WC* secondary
+        wc_any_count = sec_df["PassengerID"].nunique()
+
+        # Primary total (constant for WCHS)
+        primary_total = wchs_df["Primary Total"].iloc[0]
+
+        wc_any_penetration = wc_any_count / primary_total
+
+        # ------------------------------------------
+        # Append summary row
+        # ------------------------------------------
+        summary_row = pd.DataFrame([{
+            "Primary PRM": "WCHS",
+            "Secondary SSR": "ANY WC* (excl WCHR/WCHC)",
+            "Secondary Count": wc_any_count,
+            "Primary Total": primary_total,
+            "Penetration Rate": wc_any_penetration
+        }])
+
+        wchs_df = pd.concat([wchs_df, summary_row], ignore_index=True)
+
+        return wchs_df.sort_values("Secondary Count", ascending=False)
+
+
+    wchs_own_chair = ch_wchs_own_chair(ecac_df)
+
+    t14 = step(
+        t13,
+        f"\n=== CHALLENGE #8 — PASSENGERS WITH WCHS SSR CODE AND OWN WHEELCHAIR ==="
+    )
+    print(wchs_own_chair)
+    

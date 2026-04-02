@@ -219,7 +219,7 @@ if __name__ == "__main__":
     # HUMAN‑READABLE OPERATION SUMMARY
     # ------------------------------------------------------------
 
-    print("\n================ HUMAN‑READABLE SUMMARY ================\n")
+    print("\n================ READABLE SUMMARY ================\n")
 
     for _, fl in debug_flights.iterrows():
 
