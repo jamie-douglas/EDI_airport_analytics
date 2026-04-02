@@ -11,44 +11,119 @@ import pandas as pd
 import numpy as np
 
 from modules.utils.query import query
-from modules.utils.dates import to_datetime
+from modules.utils.dates import to_datetime, add_date_parts
 from modules.utils.progress import step
+from modules.domain.prm.efficiency import build_job_level_df, avg_travel_time_by_stand_and_location
+
+def load_prm_data(start: str, end: str) -> pd.DataFrame:
+    """ 
+    Load PRM Data where Billing PRM = 1, for time period 
+    
+    Parameters
+    ----------
+    start: str
+        Start of window (ISO format)
+    end: str
+        End of window (ISO format)
+    
+     Returns
+    ----------
+    pd.DataFrame
+        Dataframe of PRM Data with columns:
+        ['Job ID', 'Passenger ID', 'Operation Date', 'Vehicle Type', 'Operation Date_day', 'Operation Date_month', 'Operation Date_year']
+    """
+
+    
+    start_op = start.replace("-", "")   # "2025-01-01" → "20250101"
+    end_op   = end.replace("-", "")     # "2026-01-01" → "20260101"
 
 
+    df = query(
+        table="PRM.CompletedServicesByJob",
+        columns = [
+            "RequestID AS [Job ID]",
+            "PassengerID AS [Passenger ID]",
+            "FlightID AS [Flight ID]",
+            "AirlineCode_IATA AS [Airline Code]",
+            "FlightNumber AS [Flight Number]",
+            "Sector",
+            "ArrDep AS [A/D]",
+            "currentSSRCode AS [SSR Code]",
+            "startService_DateTime_Local AS [Job Start Time]",
+            "finishService_DateTime_Local AS [Job End Time]",
+            "disregardCode AS [Disregard Code]",
+            "scheduledDestinationConcourse AS [Scheduled DO Concourse]",
+            "scheduledDestinationLocation AS [Scheduled DO Location]",
+            "scheduledDestinationLocationType AS [Scheduled DO Location Type]",
+            "actualPickupLocation AS [Actual PU Location]",
+            "actualPickupConcourse AS [Actual PU Concourse]",
+            "actualPickupLocationType AS [Actual PU Location Type]",
+            "actualDestinationConcourse AS [Actual DO Concourse]",
+            "actualDestinationLocation AS [Actual DO Location]",
+            "actualDestinationLocationType AS [Actual DO Location Type]",
+            "EmployeeName AS [Employee]",
+            "VehicleShortName AS [Vehicle Model]",
+            "VehicleTypeName AS [Vehicle Type]",
+            "StandCode AS [Stand]"
+        ],
+        where = ["BillingPRM = 1",
+                 "Operation_DateID_Local >= :start_op",
+                 "Operation_DateID_Local < :end_op",
+        ],
+        params= {"start_op": start_op, "end_op": end_op},
+        query_option = "OPTION (RECOMPILE)",
+    )
+    
+    df = to_datetime(df, ["Job Start Time", "Job End Time"])
+    df = add_date_parts(df, col="Job Start Time", day=True)
+
+    return df
 
 def load_ambulift_jobs(start: str, end: str) -> pd.DataFrame:
     """
     Load PRM Completed Services jobs for Ambulift only.
     """
 
-    start_op = start.replace("-", "")
-    end_op   = end.replace("-", "")
+    df = load_prm_data(start, end)
+    df = df[df["Vehicle Type"] == "Ambulift"]
+    df = df[["Job ID", "Employee", "Vehicle Type", "Job Start Time", "Job End Time", "Stand"]]
 
-    df = query(
-        table="PRM.CompletedServicesByJob",
-        columns=[
-            "RequestID AS [Job ID]",
-            "EmployeeName AS [Employee]",
-            "VehicleTypeName AS [Vehicle Type]",
-            "startService_DateTime_Local AS [Job Start Time]",
-            "finishService_DateTime_Local AS [Job End Time]",
-            "StandCode AS [Stand]",
-        ],
-        where=[
-            "BillingPRM = 1",
-            "VehicleTypeName = 'Ambulift'",
-            "Operation_DateID_Local >= :start_op",
-            "Operation_DateID_Local < :end_op",
-        ],
-        params={
-            "start_op": start_op,
-            "end_op": end_op,
-        },
-        query_option="OPTION (RECOMPILE)",
-    )
-
-    df = to_datetime(df, ["Job Start Time", "Job End Time"])
     return df
+
+
+# def load_ambulift_jobs(start: str, end: str) -> pd.DataFrame:
+#     """
+#     Load PRM Completed Services jobs for Ambulift only.
+#     """
+
+#     start_op = start.replace("-", "")
+#     end_op   = end.replace("-", "")
+
+#     df = query(
+#         table="PRM.CompletedServicesByJob",
+#         columns=[
+#             "RequestID AS [Job ID]",
+#             "EmployeeName AS [Employee]",
+#             "VehicleTypeName AS [Vehicle Type]",
+#             "startService_DateTime_Local AS [Job Start Time]",
+#             "finishService_DateTime_Local AS [Job End Time]",
+#             "StandCode AS [Stand]",
+#         ],
+#         where=[
+#             "BillingPRM = 1",
+#             "VehicleTypeName = 'Ambulift'",
+#             "Operation_DateID_Local >= :start_op",
+#             "Operation_DateID_Local < :end_op",
+#         ],
+#         params={
+#             "start_op": start_op,
+#             "end_op": end_op,
+#         },
+#         query_option="OPTION (RECOMPILE)",
+#     )
+
+#     df = to_datetime(df, ["Job Start Time", "Job End Time"])
+#     return df
 
 
 
@@ -122,10 +197,10 @@ def build_hourly_ambulift_coverage(jobs_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
 
     for _, r in jobs_df.iterrows():
-        start = r["Job Start Time"].floor("H")
-        end = r["Job End Time"].ceil("H")
+        start = r["Job Start Time"].floor('h')
+        end = r["Job End Time"].ceil('h')
 
-        for hour in pd.date_range(start=start, end=end, freq="H", inclusive="left"):
+        for hour in pd.date_range(start=start, end=end, freq='h', inclusive="left"):
             rows.append({
                 "Hour": hour,
                 "Employee": r["Employee"],
@@ -155,8 +230,8 @@ def add_hourly_staff_context(shift_gaps: pd.DataFrame,
 
     for _, r in shift_gaps.iterrows():
         mask = (
-            (hourly_staff["Hour"] >= r["Shift Start"].floor("H")) &
-            (hourly_staff["Hour"] <= r["Shift End"].ceil("H"))
+            (hourly_staff["Hour"] >= r["Shift Start"].floor('h')) &
+            (hourly_staff["Hour"] <= r["Shift End"].ceil('h'))
         )
 
         subset = hourly_staff.loc[mask, "Concurrent Ambulift Drivers"]
@@ -236,3 +311,30 @@ if __name__ == "__main__":
         "Avg Concurrent Ambulift Drivers",
         "Max Concurrent Ambulift Drivers"
     ]].describe())
+
+    print("[4/4] Computing average travel time between stand and drop offs…")
+    full_prm_df = load_prm_data(start, end)
+
+    # Build job-level dataset (deduplicated by Job ID)
+    job_df = build_job_level_df(full_prm_df)
+
+    # Build the two requested pivot tables
+    ambulift_travel_pivot = avg_travel_time_by_stand_and_location(
+        job_df,
+        vehicle_type="Ambulift"
+    )
+
+    minibus_travel_pivot = avg_travel_time_by_stand_and_location(
+        job_df,
+        vehicle_type="Mini Bus"
+    )
+
+    t5 = step(t4, "Average travel times calculated")
+    print("=== AMBULIFT TRAVEL TIMES ===")
+    print(ambulift_travel_pivot)
+
+    print("\n=== MINIBUS TRAVEL TIMES ===")
+    print(minibus_travel_pivot)
+
+
+

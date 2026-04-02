@@ -164,7 +164,6 @@ def load_avtech_data(start: str, end: str):
     ecac_S25 = pd.concat([ecac_arrivals, ecac_departures], axis=0, ignore_index = True)
 
     ecac_S25 = ecac_S25[(ecac_S25["Date"]>=start) & (ecac_S25["Date"] < end)]
-    print(ecac_S25.head(5))
 
 
     return ecac_S25

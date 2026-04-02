@@ -244,7 +244,7 @@ def VM_utilisation(rolling_df):
 
     for vt_label, vt_filter in [
         ("ALL AMBULIFTS", rolling_df["Vehicle Type"] == "Ambulift"),
-        ("ALL MINIBUSES", rolling_df["Vehicle Type"] == "Minibus"),
+        ("ALL MINIBUSES", rolling_df["Vehicle Type"] == "Mini Bus"),
         ("ALL VEHICLES", rolling_df["Vehicle Type"].notna()),
     ]:
         sub = rolling_df.loc[vt_filter].copy()
@@ -852,3 +852,81 @@ def build_flight_prm_employee_summary(df):
     )
 
     return flight_totals, vehicle_breakdown, prm_bin_stats
+
+#----------------AVERAGE TRAVEL TIMES--------------------
+
+
+def build_job_level_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Deduplicate to one row per Job ID (vehicle movement),
+    removing duplicated employee rows.
+    """
+
+    job_cols = [
+        "Job ID",
+        "Vehicle Type",
+        "Stand",
+        "Actual DO Location",
+        "Job Start Time",
+        "Job End Time",
+    ]
+
+    # Keep one record per Job ID
+    job_df = (
+        df[job_cols]
+        .drop_duplicates(subset=["Job ID"])
+        .copy()
+    )
+
+    # Compute travel time in minutes
+    job_df["Travel Time (mins)"] = (
+        (job_df["Job End Time"] - job_df["Job Start Time"])
+        .dt.total_seconds() / 60
+    )
+
+    # Defensive: remove invalid / negative durations
+    job_df = job_df[job_df["Travel Time (mins)"] > 0]
+
+    return job_df
+
+def avg_travel_time_by_stand_and_location(
+    job_df: pd.DataFrame,
+    vehicle_type: str
+) -> pd.DataFrame:
+    """
+    Returns:
+    StandCode | Avg time to CTADoors | IA1Doors | IA2Doors | DomArrDoors
+    """
+
+    DO_LOCATIONS = [
+        "CTADoors",
+        "IA1Doors",
+        "IA2Doors",
+        "DomArrDoors",
+    ]
+
+    sub = job_df[
+        (job_df["Vehicle Type"] == vehicle_type) &
+        (job_df["Actual DO Location"].isin(DO_LOCATIONS))
+    ].copy()
+
+    pivot = (
+        sub
+        .groupby(["Stand", "Actual DO Location"], dropna=False)["Travel Time (mins)"]
+        .mean()
+        .reset_index()
+        .pivot(
+            index="Stand",
+            columns="Actual DO Location",
+            values="Travel Time (mins)"
+        )
+        .reset_index()
+    )
+
+    return pivot.rename(columns={
+        "Stand": "StandCode",
+        "CTADoors": "Avg travel time to CTADoors",
+        "IA1Doors": "Avg travel time to IA1Doors",
+        "IA2Doors": "Avg travel time to IA2Doors",
+        "DomArrDoors": "Avg travel time to DomArrDoors",
+    })
