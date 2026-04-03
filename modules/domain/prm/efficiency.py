@@ -245,7 +245,7 @@ def VM_utilisation(rolling_df):
     for vt_label, vt_filter in [
         ("ALL AMBULIFTS", rolling_df["Vehicle Type"] == "Ambulift"),
         ("ALL MINIBUSES", rolling_df["Vehicle Type"] == "Mini Bus"),
-        ("ALL VEHICLES", rolling_df["Vehicle Type"].notna()),
+        ("ALL VEHICLES", rolling_df["Vehicle Type"].isin(["Ambulift", "Mini Bus"]))
     ]:
         sub = rolling_df.loc[vt_filter].copy()
         active_sub = sub[sub["RollingHourPRMs"] > 0]
@@ -899,11 +899,12 @@ def avg_travel_time_by_stand_and_location(
     """
 
     DO_LOCATIONS = [
-        "CTADoors",
-        "IA1Doors",
-        "IA2Doors",
-        "DomArrDoors",
+        "CTA Doors",
+        "IA1 Doors",
+        "IA2 Doors",
+        "Dom Arr Doors",
     ]
+    print(job_df[job_df["Actual DO Location"].isin(DO_LOCATIONS)])
 
     sub = job_df[
         (job_df["Vehicle Type"] == vehicle_type) &

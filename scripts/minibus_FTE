@@ -13,7 +13,9 @@ import numpy as np
 from modules.utils.query import query
 from modules.utils.dates import to_datetime, add_date_parts
 from modules.utils.progress import step
+from modules.utils.excel import write_once_then_update
 from modules.domain.prm.efficiency import build_job_level_df, avg_travel_time_by_stand_and_location
+
 
 def load_prm_data(start: str, end: str) -> pd.DataFrame:
     """ 
@@ -336,5 +338,33 @@ if __name__ == "__main__":
     print("\n=== MINIBUS TRAVEL TIMES ===")
     print(minibus_travel_pivot)
 
+
+    output_path = "output/PRM/travel_time_summary.xlsx"
+
+    # Optional: round for presentation
+    ambulift_travel_pivot = ambulift_travel_pivot.round(2)
+    minibus_travel_pivot  = minibus_travel_pivot.round(2)
+
+    # Write / update Ambulift sheet
+    write_once_then_update(
+        path=output_path,
+        sheet="Ambulift Travel Times",
+        df=ambulift_travel_pivot,
+        anchor="A1",
+        include_header=True,
+        make_backup=True
+    )
+
+    # Write / update Minibus sheet
+    write_once_then_update(
+        path=output_path,
+        sheet="Minibus Travel Times",
+        df=minibus_travel_pivot,
+        anchor="A1",
+        include_header=True,
+        make_backup=True
+    )
+
+    print(f"✅ Travel time tables written to {output_path}")
 
 
