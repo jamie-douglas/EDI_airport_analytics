@@ -273,7 +273,9 @@ def main(
     outdir: Optional[str],
     print_saves: bool,
     to_csv: bool,
-    imm_slot: int
+    imm_slot: int,
+    a_threshold: Optional[float] = None,
+    b_threshold: Optional[float] = None,
 ) -> None:
 
     print("\nTACTICAL READINESS — Orchestration")
@@ -298,7 +300,10 @@ def main(
     sec_su = load_security(summer_start, summer_end)
     t1 = step(t0, f"Summer flights/security: {len(fl_su):,} / {len(sec_su):,}")
 
-    su_summary, su_A, su_B = daily_summary(fl_su)
+    if a_threshold is not None and b_threshold is not None:
+        su_summary, su_A, su_B = daily_summary(fl_su, a_threshold, b_threshold)
+    else:
+        su_summary, su_A, su_B = daily_summary(fl_su)
     thresholds = {"A": su_A, "B": su_B}
     t2 = step(t1, f"Thresholds derived: A={int(su_A):,}, B={int(su_B):,}")
 
@@ -472,9 +477,15 @@ if __name__ == "__main__":
     ap.add_argument("--outdir", default=None, help="Base output directory for plots.")
     ap.add_argument("--print-saves", action="store_true", help="Print a 'Saved:' line for every saved figure/table.")
     ap.add_argument("--csv", action="store_true", help="Export CSVs for Daily/Security/Immigration outputs.")
-    
+    ap.add_argument("--a-threshold", type=float, default=None, help="Custom threshold for A days (overrides Summer-derived). If provided, B-threshold must also be provided.")
+    ap.add_argument("--b-threshold", type=float, default=None, help="Custom threshold for B days (overrides Summer-derived). If provided, A-threshold must also be provided.")
 
     args = ap.parse_args()
+
+    
+    if (args.a_threshold is None) ^ (args.b_threshold is None):
+        ap.error("You must specify both --a-threshold and --b-threshold together.")
+
 
     weeks = [int(w.strip()) for w in args.weeks.split(",") if w.strip().isdigit()]
     main(
@@ -485,5 +496,7 @@ if __name__ == "__main__":
         outdir=args.outdir,
         print_saves=args.print_saves,
         to_csv=args.csv,
-        imm_slot=args.imm_slot
+        imm_slot=args.imm_slot,
+        a_threshold=args.a_threshold,
+        b_threshold=args.b_threshold,
     )

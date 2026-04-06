@@ -118,7 +118,7 @@ def plot_daily_pax_summary(
 
     ax.set_ylabel("Passengers")
     ax.set_xticks(range(len(df)))
-    ax.set_xticklabels(df["Date_Label"], rotation=45)
+    ax.set_xticklabels(df["Date_Label"], rotation=90)
 
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, frameon=False)
 
@@ -616,8 +616,8 @@ def plot_peak_international_immigration(
 
     
     # Capacity lines for IA1/IA2 aligned with opening hours
-    left_edges = x[time_col].to_numpy()
-    rightmost = left_edges[-1] + slot if len(left_edges) else pd.NaT
+    left_edges = x[time_col].to_numpy(dtype="datetime64[ns]")
+    rightmost = left_edges[-1] + np.timedelta64(slot.value, "ns") if len(left_edges) else np.datetime64("NaT")
     edges = np.append(left_edges, rightmost)
 
     cap_vals = x["Capacity"].astype(float).to_numpy()

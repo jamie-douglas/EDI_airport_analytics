@@ -136,10 +136,8 @@ def arrivals_per_hour(flights: pd.DataFrame) -> pd.DataFrame:
     df = bucket_time(df, time_col="Schedule", freq="h", out_col="Schedule_H")
 
     # 3) add date parts from the FLOORED timestamp; map to canonical 'Date'/'Hour'
-    df = add_date_parts(df, "Schedule_H")
-    df["Date"] = df["Schedule_H_date"]
-    df["Hour"] = df["Schedule_H_hour"]
-    df["Hour_Label"] = df["Schedule_H_hour_label"]
+    df = add_date_parts(df, "Schedule_H", day=True, hour=True, hour_label=True)
+    df["Date"] = df["Day"]
 
     # 4) full skeleton per day, 24 hours
     hours = pd.DataFrame({"Hour": range(24)})
@@ -163,10 +161,7 @@ def arrivals_per_hour(flights: pd.DataFrame) -> pd.DataFrame:
 
 
 
-from datetime import timedelta
-import pandas as pd
-from modules.utils.dates import to_datetime, add_date_parts
-from modules.analytics.timeseries import bucket_time, rolling_sum
+
 
 def arrivals_per_slots(flights: pd.DataFrame, slot_minutes: int = 15) -> pd.DataFrame:
     """
@@ -217,10 +212,8 @@ def arrivals_per_slots(flights: pd.DataFrame, slot_minutes: int = 15) -> pd.Data
     df = bucket_time(df, time_col="Immigration Arrival", freq=freq, out_col=time_col)
 
     # 4) derive canonical Date/Hour from the FLOORED timestamp
-    df = add_date_parts(df, time_col)
-    df["Date"] = df[f"{time_col}_date"]
-    df["Hour"] = df[f"{time_col}_hour"]
-    df["Hour_Label"] = df[f"{time_col}_hour_label"]
+    df = add_date_parts(df, time_col, day=True, hour=True, hour_label=True)
+    df["Date"] = df["Day"]
 
     # 5) totals per (Date, Time_{slot_minutes}, Sector) → wide
     totals = (
@@ -234,9 +227,7 @@ def arrivals_per_slots(flights: pd.DataFrame, slot_minutes: int = 15) -> pd.Data
     )
 
     # Add Hour and Hour_Label back to totals (derived from Time_{slot_minutes} to keep it canonical)
-    parts = add_date_parts(totals, time_col)
-    totals["Hour"] = parts[f"{time_col}_hour"]
-    totals["Hour_Label"] = parts[f"{time_col}_hour_label"]
+    parts = add_date_parts(totals, time_col, hour=True, hour_label=True)
 
     # 6) rolling 60-minute sum of International per day
     window = int(60/slot_minutes)
