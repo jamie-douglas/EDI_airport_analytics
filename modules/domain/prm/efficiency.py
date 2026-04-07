@@ -217,7 +217,7 @@ def average_arrival_time(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=
 
     prm_flight_merge = x.merge(y, on=["Flight ID", "Day", "Airline Code"], how="left") 
 
-    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Job Start Time"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
+    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Chocks DT"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
    
     #Average Wait time per vehicle type
     avg_by_vehicle = group_average(prm_flight_merge, by_cols=["Vehicle Type"], value_col="Arrival Time before Chocks", out_col="Average Arrival Time before chocks on (minutes)")
