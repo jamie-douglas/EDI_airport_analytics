@@ -92,7 +92,7 @@ def group_average(df: pd.DataFrame, by_cols: List[str], value_col: str,
         .reset_index()
     )
 
-def stats_grouping(df: pd.DataFrame, by_cols: List[str], value_col: str, prefix: Optional[str] = None) -> pd.DataFrame:
+def stats_grouping(df: pd.DataFrame, by_cols: List[str], value_col: str, out_prefix: Optional[str] = None) -> pd.DataFrame:
     """
     Groups by input columns common statitstical aggregates (mean, median, min, max, std) for a specified numeric column
     
@@ -134,13 +134,13 @@ def stats_grouping(df: pd.DataFrame, by_cols: List[str], value_col: str, prefix:
             .reset_index()
         )
 
-    if prefix:
+    if out_prefix:
         agg_df = agg_df.rename(columns={
-            "Mean": f"{prefix} Mean",
-            "Median": f"{prefix} Median",
-            "Min": f"{prefix} Min",
-            "Max": f"{prefix} Max",
-            "Std": f"{prefix} Std",
+            "Mean": f"{out_prefix} Mean",
+            "Median": f"{out_prefix} Median",
+            "Min": f"{out_prefix} Min",
+            "Max": f"{out_prefix} Max",
+            "Std": f"{out_prefix} Std",
         })
 
     return agg_df
