@@ -104,7 +104,7 @@ def average_wait_time(flags_df: pd.DataFrame, start=None, end=None):
     Parameters
     ---------
     flags_df:
-        pandas.DataFrame with columns ["Job Start Time", "Job End Time"], note: if passenger_flags is True this also needs the column ["PassengerType"]
+        pandas.DataFrame with columns ["Job Start Time", "Location Arrival DT", "PassengerType", "Vehicle Type"]
     start: str, end: str | default = False
         dates for using if wanting to filter to smaller time period
 
@@ -113,11 +113,12 @@ def average_wait_time(flags_df: pd.DataFrame, start=None, end=None):
     pandas.DataFrame with columns:
             PassengerType | Average End-to-end Service Time (minutes)
 
-    
+    Drops duplicate Job ID as to not count the same vehicle service time twice
 
     """
     x = flags_df.copy()
-    
+
+
     x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
 
     if start:
@@ -134,6 +135,95 @@ def average_wait_time(flags_df: pd.DataFrame, start=None, end=None):
 
     #Averae wait time by Vehicle Type x Passenger Type
     avg_by_vehicle_and_passengertype = group_average(x, by_cols=["Vehicle Type", "PassengerType"], value_col="Wait Time", out_col="Average Wait Time (minutes)")
+
+    return avg_by_vehicle, avg_by_vehicle_and_passengertype
+
+def avg_travel_time_by_stand_and_location(
+    job_df: pd.DataFrame,
+    vehicle_type: str
+) -> pd.DataFrame:
+    """
+    Returns:
+    StandCode | Avg time to CTADoors | IA1Doors | IA2Doors | DomArrDoors
+    """
+
+    DO_LOCATIONS = [
+        "CTA Doors",
+        "IA1 Doors",
+        "IA2 Doors",
+        "Dom Arr Doors",
+    ]
+    print(job_df[job_df["Actual DO Location"].isin(DO_LOCATIONS)])
+
+    sub = job_df[
+        (job_df["Vehicle Type"] == vehicle_type) &
+        (job_df["Actual DO Location"].isin(DO_LOCATIONS))
+    ].copy()
+
+    pivot = (
+        sub
+        .groupby(["Stand", "Actual DO Location"], dropna=False)["Travel Time (mins)"]
+        .mean()
+        .reset_index()
+        .pivot(
+            index="Stand",
+            columns="Actual DO Location",
+            values="Travel Time (mins)"
+        )
+        .reset_index()
+    )
+
+    return pivot.rename(columns={
+        "Stand": "StandCode",
+        "CTADoors": "Avg travel time to CTADoors",
+        "IA1Doors": "Avg travel time to IA1Doors",
+        "IA2Doors": "Avg travel time to IA2Doors",
+        "DomArrDoors": "Avg travel time to DomArrDoors",
+    })
+
+def average_arrival_time(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=None, end=None):
+    """
+    Takes a dataframe and returns the average arrival time for a vehicle type based on chocks on time, This is then differentiated between if it is on its own or combined with another vehicle. 
+    
+    Parameters
+    ---------
+    flags_df:
+        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Location Arrival DT", "PassengerType", "Vehicle Type"]
+    flight_df:
+        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Flight Number", "Chocks DT"]
+    start: str, end: str | default = False
+        dates for using if wanting to filter to smaller time period
+
+    Returns
+    ---------
+    pandas.DataFrame with columns:
+            PassengerType | Average End-to-end Service Time (minutes)
+
+    Drops duplicate Job ID as to not count the same vehicle service time twice
+
+    """
+    x = flags_df.copy()
+    z = flight_df.copy()
+
+    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
+    y = to_datetime(z, ["Chocks DT"])
+
+    if start:
+        x = x[x["Job Start Time"] >= start]
+    if end:
+        x = x[x["Job End Time"] < end]
+
+    x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
+
+    prm_flight_merge = x.merge(y, on=["Flight ID", "Day", "Airline Code"], how="left") 
+
+    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Job Start Time"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
+   
+    #Average Wait time per vehicle type
+    avg_by_vehicle = group_average(prm_flight_merge, by_cols=["Vehicle Type"], value_col="Arrival Time before Chocks", out_col="Average Arrival Time before chocks on (minutes)")
+
+    #Averae wait time by Vehicle Type x Passenger Type
+    avg_by_vehicle_and_passengertype = group_average(prm_flight_merge, by_cols=["Vehicle Type", "PassengerType"], value_col="Arrival Time before Chocks", out_col="Average Arrival Time before chocks on (minutes)")
 
     return avg_by_vehicle, avg_by_vehicle_and_passengertype
 
@@ -322,7 +412,6 @@ def VM_utilisation(rolling_df):
 
     return utilisation_df
 
-
 def median_std_VM_PRMs(rolling_df):
     stats_rows = []
 
@@ -420,10 +509,9 @@ def rolling_hour_vehicle_usage(prm_df: pd.DataFrame, vehicle_model=False):
 
     return A_raw, A_pivot, B, peak_df, utilisation_df, stats_df
 
- 
 
 #----------------------------------------------------
-# STAFF COUNT FUNCTIONS (BY FLIGHT/VEHICLE TYPE)
+# PER FLIGHT COUNT FUNCTIONS (BY FLIGHT/VEHICLE TYPE)
 #----------------------------------------------------
 
 
@@ -536,48 +624,6 @@ def get_wch_counts_per_flight(df, flight_cols):
             .fillna(0)
     )
 
-
-
-def get_disregard_counts_per_flight(df, flight_cols):
-    """
-    Count specific Disregard Codes per flight.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input dataset containing Disregard Code values.
-    flight_cols : list[str]
-        Columns identifying a unique flight.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Columns:
-            * flight_cols
-            No Assistance Count
-            No Show Count
-            Passenger self-boarding Count
-    """
-
-    noa  = (df["Disregard Code"] == "No Assistance").astype(int)
-    nos  = (df["Disregard Code"] == "No Show").astype(int)
-    psb  = (df["Disregard Code"] == "Passenger self-boarding").astype(int)
-
-    grouped = (
-        df.assign(_noa=noa, _nos=nos, _psb=psb)
-          .groupby(flight_cols, dropna=False)[["_noa", "_nos", "_psb"]]
-          .sum()
-          .reset_index()
-          .rename(columns={
-              "_noa": "No Assistance Count",
-              "_nos": "No Show Count",
-              "_psb": "Passenger self-boarding Count"
-          })
-    )
-
-    return grouped
-
-
 def get_secondarySSR_count_penrate(ecac_df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute secondary SSR counts and penetration rates within each primary PRM group.
@@ -677,7 +723,44 @@ def get_secondarySSR_count_penrate(ecac_df: pd.DataFrame) -> pd.DataFrame:
         ascending=[True, False]
     )
 
+def get_disregard_counts_per_flight(df, flight_cols):
+    """
+    Count specific Disregard Codes per flight.
 
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input dataset containing Disregard Code values.
+    flight_cols : list[str]
+        Columns identifying a unique flight.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns:
+            * flight_cols
+            No Assistance Count
+            No Show Count
+            Passenger self-boarding Count
+    """
+
+    noa  = (df["Disregard Code"] == "No Assistance").astype(int)
+    nos  = (df["Disregard Code"] == "No Show").astype(int)
+    psb  = (df["Disregard Code"] == "Passenger self-boarding").astype(int)
+
+    grouped = (
+        df.assign(_noa=noa, _nos=nos, _psb=psb)
+          .groupby(flight_cols, dropna=False)[["_noa", "_nos", "_psb"]]
+          .sum()
+          .reset_index()
+          .rename(columns={
+              "_noa": "No Assistance Count",
+              "_nos": "No Show Count",
+              "_psb": "Passenger self-boarding Count"
+          })
+    )
+
+    return grouped
 
 def get_vehicle_count(df, flight_cols):
     """
@@ -704,7 +787,6 @@ def get_vehicle_count(df, flight_cols):
         ).rename(columns={"Unique Count": "Vehicle Count"})
     )
 
-
 def get_prm_count_per_vehicle(df, flight_cols):
     """
     Compute unique PRM (Passenger) counts per (flight × vehicle type).
@@ -730,7 +812,6 @@ def get_prm_count_per_vehicle(df, flight_cols):
         ).rename(columns={"Unique Count": "PRM Count per Vehicle"})
     )
 
-
 def get_employee_count_per_vehicle(df, flight_cols):
     """
     Compute unique employee counts per (flight × vehicle type).
@@ -755,7 +836,6 @@ def get_employee_count_per_vehicle(df, flight_cols):
             df, by_cols=flight_cols + ["Vehicle Type"], id_col="Employee"
         ).rename(columns={"Unique Count": "Employee Count per Vehicle"})
     )
-
 
 def get_prm_bin_stats(flight_totals, vehicle_breakdown, flight_cols):
     """
@@ -810,8 +890,6 @@ def get_prm_bin_stats(flight_totals, vehicle_breakdown, flight_cols):
     )
 
     return result
-
-
 
 def build_flight_prm_employee_summary(df):
     """
@@ -895,7 +973,6 @@ def build_flight_prm_employee_summary(df):
 
 #----------------AVERAGE TRAVEL TIMES--------------------
 
-
 def build_job_level_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Deduplicate to one row per Job ID (vehicle movement),
@@ -929,45 +1006,4 @@ def build_job_level_df(df: pd.DataFrame) -> pd.DataFrame:
 
     return job_df
 
-def avg_travel_time_by_stand_and_location(
-    job_df: pd.DataFrame,
-    vehicle_type: str
-) -> pd.DataFrame:
-    """
-    Returns:
-    StandCode | Avg time to CTADoors | IA1Doors | IA2Doors | DomArrDoors
-    """
 
-    DO_LOCATIONS = [
-        "CTA Doors",
-        "IA1 Doors",
-        "IA2 Doors",
-        "Dom Arr Doors",
-    ]
-    print(job_df[job_df["Actual DO Location"].isin(DO_LOCATIONS)])
-
-    sub = job_df[
-        (job_df["Vehicle Type"] == vehicle_type) &
-        (job_df["Actual DO Location"].isin(DO_LOCATIONS))
-    ].copy()
-
-    pivot = (
-        sub
-        .groupby(["Stand", "Actual DO Location"], dropna=False)["Travel Time (mins)"]
-        .mean()
-        .reset_index()
-        .pivot(
-            index="Stand",
-            columns="Actual DO Location",
-            values="Travel Time (mins)"
-        )
-        .reset_index()
-    )
-
-    return pivot.rename(columns={
-        "Stand": "StandCode",
-        "CTADoors": "Avg travel time to CTADoors",
-        "IA1Doors": "Avg travel time to IA1Doors",
-        "IA2Doors": "Avg travel time to IA2Doors",
-        "DomArrDoors": "Avg travel time to DomArrDoors",
-    })
