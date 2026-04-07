@@ -5,6 +5,11 @@ import pandas as pd
 from typing import List, Optional, Union
 from modules.utils.dates import assign_effective_month
 
+# -----------------------------
+# GROUPING FUNCTIONS FOR GENERAL USE
+# -----------------------------
+
+
 def group_unique(df: pd.DataFrame, by_cols: List[str], id_col: str = "Passenger ID") -> pd.DataFrame:
     """
     Groups by one or more columns and computes the number of unique values of a specified ID column
@@ -28,7 +33,6 @@ def group_unique(df: pd.DataFrame, by_cols: List[str], id_col: str = "Passenger 
     )
 
     return out
-
 
 def group_sum(df: pd.DataFrame, by_cols: List[str], value_col: str,
               out_col: str) -> pd.DataFrame:
@@ -88,7 +92,63 @@ def group_average(df: pd.DataFrame, by_cols: List[str], value_col: str,
         .reset_index()
     )
 
+def stats_grouping(df: pd.DataFrame, by_cols: List[str], value_col: str, prefix: Optional[str] = None) -> pd.DataFrame:
+    """
+    Groups by input columns common statitstical aggregates (mean, median, min, max, std) for a specified numeric column
+    
+    Parameters
+    ----------
+    
+    df: pandas.DataFrame
+        Input DataFrame
+    by_cols: List of str
+        Grouping columns
+    value_col: str
+        Column to aggregate
+    prefix: str, optional
+        Optional prefix for output column names. If None, value_col is used as prefix.  
+    
+    Returns
+    ---------
+    pandas.DataFrame
+        Grouped DataFrame with columns:
+            by_cols...
+            {prefix} mean
+            {prefix} median
+            {prefix} min
+            {prefix} max
+            {prefix} std
 
+    """
+
+    
+    agg_df = (
+            df.groupby(by_cols, dropna=False)[value_col]
+            .agg(
+                Mean="mean",
+                Median="median",
+                Min="min",
+                Max="max",
+                Std="std",
+            )
+            .reset_index()
+        )
+
+    if prefix:
+        agg_df = agg_df.rename(columns={
+            "Mean": f"{prefix} Mean",
+            "Median": f"{prefix} Median",
+            "Min": f"{prefix} Min",
+            "Max": f"{prefix} Max",
+            "Std": f"{prefix} Std",
+        })
+
+    return agg_df
+
+
+# -----------------------------
+# EFFECTIVE MONTH GROUPING AND COUNTING (FOR ACROSS MONTH SPILLOVER CORRECTION)
+# -----------------------------
 def ensure_effective_month(
     df: pd.DataFrame,
     *,
@@ -115,7 +175,6 @@ def ensure_effective_month(
         out_col=out_col,
         window_start=window_start,
     )
-
 
 def group_unique_by_effective_month(
     df: pd.DataFrame,
@@ -150,7 +209,6 @@ def group_unique_by_effective_month(
            .rename(columns={"Effective Month": out_col})
     )
 
-
 def count_distinct_id_by_effective_month(
     df: pd.DataFrame,
     *,
@@ -173,7 +231,6 @@ def count_distinct_id_by_effective_month(
     )
 
     return int(eff[[id_col, "Effective Month"]].drop_duplicates().shape[0])
-
 
 def ensure_effective_month(
     df: pd.DataFrame,
@@ -219,7 +276,6 @@ def ensure_effective_month(
         out_col=out_col,
         window_start=window_start,
     )
-
 
 def group_unique_by_effective_month(
     df: pd.DataFrame,
@@ -270,7 +326,6 @@ def group_unique_by_effective_month(
            .rename(columns={"Effective Month": out_col})
     )
     return grouped
-
 
 def count_distinct_id_by_effective_month(
     df: pd.DataFrame,
