@@ -97,6 +97,46 @@ def end_to_end_service_time(flags_df: pd.DataFrame, start=None, end=None):
 
     return results
 
+def average_wait_time(flags_df: pd.DataFrame, start=None, end=None):
+    """
+    Takes a dataframe and returns the average wait time for a vehicle, differentiated between if it is on its own or combined with another vehicle. 
+    
+    Parameters
+    ---------
+    flags_df:
+        pandas.DataFrame with columns ["Job Start Time", "Job End Time"], note: if passenger_flags is True this also needs the column ["PassengerType"]
+    start: str, end: str | default = False
+        dates for using if wanting to filter to smaller time period
+
+    Returns
+    ---------
+    pandas.DataFrame with columns:
+            PassengerType | Average End-to-end Service Time (minutes)
+
+    
+
+    """
+    x = flags_df.copy()
+    
+    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
+
+    if start:
+        x = x[x["Job Start Time"] >= start]
+    if end:
+        x = x[x["Job End Time"] < end]
+
+    x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
+
+    x["Wait Time"] = (x["Job Start Time"] - x["Location Arrival DT"]).dt.total_seconds() / 60
+   
+    #Average Wait time per vehicle type
+    avg_by_vehicle = group_average(x, by_cols=["Vehicle Type"], value_col="Wait Time", out_col="Average Wait Time (minutes)")
+
+    #Averae wait time by Vehicle Type x Passenger Type
+    avg_by_vehicle_and_passengertype = group_average(x, by_cols=["Vehicle Type", "PassengerType"], value_col="Wait Time", out_col="Average Wait Time (minutes)")
+
+    return avg_by_vehicle, avg_by_vehicle_and_passengertype
+
 
 #----------------------------------------------------
 # VEHICLE USAGE FUNCTION AND HELPER FUNCTIONS
