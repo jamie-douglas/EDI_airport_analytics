@@ -266,7 +266,7 @@ def average_arrival_time(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=
 
     x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
 
-    prm_flight_merge = x.merge(y, on=["Flight ID", "Day", "Airline Code"], how="left") 
+    prm_flight_merge = x.merge(y, on=["Flight Number", "Day", "Airline Code"], how="left") 
 
     prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Chocks DT"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
    
