@@ -94,3 +94,14 @@ PRM_AIRSIDE_VALUES = [
 # STANDS WITH JETBRIDGES
 # --------------------------
 JETBRIDGE_STANDS = {"1","2","2A","3","3A","4","4A","9","9A","15","15A","16B","16","16A","18"}
+
+#--------------------------
+#DROP OFF POINT LOCATIONS
+#--------------------------
+
+DOOR_LOCATIONS = [
+    "CTA Doors",
+    "IA1 Doors",
+    "IA2 Doors",
+    "Dom Arr Doors",
+]

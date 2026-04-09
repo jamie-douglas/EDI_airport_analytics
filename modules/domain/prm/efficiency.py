@@ -1,11 +1,14 @@
 #modules/domain/prm/efficiency.py
 
 import pandas as pd
+from typing import Tuple, Optional, List
 
 from modules.utils.dates import to_datetime
 from modules.analytics.grouping import group_average, group_sum, group_unique, stats_grouping
 from modules.analytics.timeseries import bucket_time, rolling_sum, peak_rolling_window
 from modules.analytics.penetration import row_penetration
+
+from modules.config import DOOR_LOCATIONS
 
 #----------------------------------------------------
 # SERVICE TIME FUNCTIONS
@@ -97,47 +100,6 @@ def end_to_end_service_time(flags_df: pd.DataFrame, start=None, end=None):
 
     return results
 
-def average_wait_time(flags_df: pd.DataFrame, start=None, end=None):
-    """
-    Takes a dataframe and returns the average wait time for a vehicle, differentiated between if it is on its own or combined with another vehicle. 
-    
-    Parameters
-    ---------
-    flags_df:
-        pandas.DataFrame with columns ["Job Start Time", "Location Arrival DT", "PassengerType", "Vehicle Type"]
-    start: str, end: str | default = False
-        dates for using if wanting to filter to smaller time period
-
-    Returns
-    ---------
-    pandas.DataFrame with columns:
-            PassengerType | Average End-to-end Service Time (minutes)
-
-    Drops duplicate Job ID as to not count the same vehicle service time twice
-
-    """
-    x = flags_df.copy()
-
-
-    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
-
-    if start:
-        x = x[x["Job Start Time"] >= start]
-    if end:
-        x = x[x["Job End Time"] < end]
-
-    x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
-
-    x["Wait Time"] = (x["Job Start Time"] - x["Location Arrival DT"]).dt.total_seconds() / 60
-   
-    #Average Wait time per vehicle type
-    avg_by_vehicle = group_average(x, by_cols=["Vehicle Type"], value_col="Wait Time", out_col="Average Wait Time (minutes)")
-
-    #Averae wait time by Vehicle Type x Passenger Type
-    avg_by_vehicle_and_passengertype = group_average(x, by_cols=["Vehicle Type", "PassengerType"], value_col="Wait Time", out_col="Average Wait Time (minutes)")
-
-    return avg_by_vehicle, avg_by_vehicle_and_passengertype
-
 def wait_time_statistics(flags_df: pd.DataFrame, start=None, end=None):
     """
     Takes a dataframe and returns arrival waiting-time statistics for vehicles before chocks on.  
@@ -189,6 +151,384 @@ def wait_time_statistics(flags_df: pd.DataFrame, start=None, end=None):
 
     return wait_stats_by_vehicle, wait_stats_by_vehicle_and_passengertype
 
+def travel_between_jobs(
+        prm_df: pd.DataFrame,
+        vehicle_model_col: str = "Vehicle Model",
+        vehicle_type_col: str = "Vehicle Type",
+        day_col: str = "Day", 
+        arrival_col: str = "Location Arrival DT",
+        job_end_col: str = "Job End Time", 
+        destination_col: str = "Actual DO Location",
+        pickup_col: str = "Actual PU Location",
+        max_travel_minutes: int = 30) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    
+    
+    """ Calculates empirical travel-time statistics between job locations by analysing
+        gaps between consecutive jobs for the same vehicle on the same day.
+
+        For each vehicle-day combination:
+        - Jobs are ordered by Job Start Time
+        - Consecutive jobs are compared
+        - A movement is recorded only if:
+                Job Start Time (current) > Job End Time (previous)
+                AND gap >= min_gap_minutes
+                AND destination != pickup location
+
+        This infers real-world repositioning travel times around the airport. 
+        
+        
+    Parameters
+    ----------
+    jobs_df : pandas.DataFrame
+        Input job-level dataset containing one row per vehicle job.
+
+    
+    vehicle_model_col : str, default "Vehicle Model"
+        Physical vehicle identifier (used for sequencing jobs).
+
+    vehicle_type_col : str, default "Vehicle Type"
+        Operational vehicle class (used for aggregation).
+
+
+    day_col : str, default "Day"
+        Column identifying the operational day.
+
+    arrival_col : str, default "Location Arrival DT"
+        Arrival timestamp column.
+
+    job_end_col : str, default "Job End Time"
+        Job end timestamp column.
+
+    destination_col : str, default "Actual Destination"
+        Location where the previous job ended.
+
+    pickup_col : str, default "Actual Pickup Location"
+        Location where the next job starts.
+
+    max_travel_minutes : int, default 20
+        Maximum allowable gap (in minutes) between jobs to be treated
+        as genuine inter-job travel.
+
+    Returns
+    -------
+    
+    route_stats : pandas.DataFrame
+        Aggregated travel-time statistics by:
+            [Vehicle Type, From Location, To Location]
+
+    movements : pandas.DataFrame
+        Row-level inferred movements between jobs.
+
+    """
+
+    
+    
+    df = prm_df.copy()
+
+    # --- Ensure datetime fields ---
+    df = to_datetime(df, [arrival_col, job_end_col])
+
+    
+    # --- Drop rows with any required nulls ---
+    required_cols = [
+        vehicle_model_col,
+        vehicle_type_col,
+        day_col,
+        arrival_col,
+        job_end_col,
+        destination_col,
+        pickup_col,
+    ]
+
+    df = df.dropna(subset=required_cols)
+
+
+    # --- Sort jobs by physical vehicle ---
+    df = df.sort_values(
+        by=[vehicle_model_col, day_col, arrival_col]
+    )
+
+    # --- Group by physical vehicle + day ---
+    group_keys = [vehicle_model_col, day_col]
+
+    df["Prev Job End Time"] = df.groupby(group_keys)[job_end_col].shift(1)
+    df["Prev Destination"] = df.groupby(group_keys)[destination_col].shift(1)
+
+    # --- Valid inter-job movements only ---
+    movements = df[
+        (df["Prev Job End Time"].notna()) &
+        (df[arrival_col] > df["Prev Job End Time"])
+    ].copy()
+
+    # --- Calculate travel time ---
+    movements["Travel Time (min)"] = (
+        movements[arrival_col] - movements["Prev Job End Time"]
+    ).dt.total_seconds() / 60
+
+    # --- Apply clean-up rules ---
+    movements = movements[movements["Travel Time (min)"] <= max_travel_minutes]
+
+    movements["From Location"] = movements["Prev Destination"]
+    movements["To Location"] = movements[pickup_col]
+
+    movements = movements[
+        movements["From Location"] != movements["To Location"]
+    ]
+
+    # --- Aggregate by Vehicle Type (not Model) ---
+    route_stats = stats_grouping(
+        movements,
+        by_cols=[vehicle_type_col, "From Location", "To Location"],
+        value_col="Travel Time (min)",
+        out_prefix="Travel Time (min)",
+    )
+
+    # --- Add observation count ---
+    route_counts = (
+        movements
+        .groupby(
+            [vehicle_type_col, "From Location", "To Location"],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="Observation Count")
+    )
+
+    route_stats = route_stats.merge(
+        route_counts,
+        on=[vehicle_type_col, "From Location", "To Location"],
+        how="left",
+    )
+
+    return route_stats, movements
+
+
+def build_stand_performance_metrics(
+    job_df: pd.DataFrame,
+    movements_df: pd.DataFrame,
+    *,
+    stand_col: str = "Stand",
+    vehicle_type_col: str = "Vehicle Type",
+    job_start_col: str = "Job Start Time",
+    job_end_col: str = "Job End Time",
+    arrival_col: str = "Location Arrival DT",
+    do_location_col: str = "Actual DO Location",
+    max_travel_minutes: int = 30,
+) -> pd.DataFrame:
+    """
+    Builds stand-level performance metrics by combining:
+
+    1. Job-level metrics at the stand
+       - Wait time at stand  = Job Start - Actual Arrival
+       - Job duration at stand = Job End - Job Start
+
+    2. Travel FROM stand TO doors (job-based)
+       - Stand → CTA / IA1 / IA2 / Dom Arr Doors
+
+    3. Travel FROM doors TO stand (movement-based)
+       - CTA / IA1 / IA2 / Dom Arr → Stand
+
+    All metrics are aggregated by:
+        [Stand, Vehicle Type, Category, Counterparty]
+
+    Output is sorted by Stand (numeric order) then Vehicle Type.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns:
+        Stand | Vehicle Type | Metric | Counterparty | Mean | Median | Min | Max | Std Dev
+    """
+
+    # -------------------------------------------------
+    # PREP & CLEAN
+    # -------------------------------------------------
+    df = job_df.copy()
+
+    df = to_datetime(df, [job_start_col, job_end_col, arrival_col])
+
+    df = df.dropna(
+        subset=[
+            stand_col,
+            vehicle_type_col,
+            job_start_col,
+            job_end_col,
+            arrival_col,
+        ]
+    )
+
+    outputs = []
+    # -------------------------------------------------
+    # 1) JOB-LEVEL METRICS AT STAND
+    # -------------------------------------------------
+    df["Wait Time @ Stand (min)"] = (
+        df[job_start_col] - df[arrival_col]
+    ).dt.total_seconds() / 60
+
+    df["Job Duration @ Stand (min)"] = (
+        df[job_end_col] - df[job_start_col]
+    ).dt.total_seconds() / 60
+
+    for metric_col in [
+        "Wait Time @ Stand (min)",
+        "Job Duration @ Stand (min)",
+    ]:
+        long = df[[stand_col, vehicle_type_col, metric_col]].rename(
+            columns={metric_col:"Value"}
+        )
+        stats = stats_grouping(
+            long,
+            by_cols=[stand_col, vehicle_type_col],
+            value_col="Value",
+            out_prefix=None,
+        )
+        stats["Metric"] = metric_col
+        stats["Counterparty"] = None
+        outputs.append(stats)
+
+    # -------------------------------------------------
+    # 2) STAND → DOORS (JOB + TRAVEL TIME)
+    # -------------------------------------------------
+    stand_to_doors = df[
+        df[do_location_col].isin(DOOR_LOCATIONS)
+    ].copy()
+
+
+    std_long = stand_to_doors.assign(
+        Metric="Stand → Door Job + Travel Time (min)",
+        Counterparty=stand_to_doors[do_location_col],
+        Value = stand_to_doors["Job Duration @ Stand (min)"]
+    )[
+        [stand_col, vehicle_type_col, "Metric", "Counterparty", "Value"]
+    ]
+
+    std_stats = stats_grouping(
+        std_long,
+        by_cols=[stand_col, vehicle_type_col, "Metric", "Counterparty"],
+        value_col="Value",
+        out_prefix=None,
+    )
+
+    outputs.append(std_stats)
+
+    # -------------------------------------------------
+    # 3) DOORS → STAND (MOVEMENT-BASED TRAVEL)
+    # -------------------------------------------------
+    door_to_stand = movements_df[
+        movements_df["From Location"].isin(DOOR_LOCATIONS)
+    ].copy()
+
+    door_to_stand = door_to_stand[
+        door_to_stand["Travel Time (min)"] <= max_travel_minutes
+    ]
+
+    door_to_stand["Stand"] = (
+        door_to_stand["To Location"].astype(str).str.extract(r"^[A-Za-z]*([0-9]+[A-Za-z]?)")[0] # Extract numeric part of stand code
+    )
+
+    door_to_stand = door_to_stand.dropna(subset=["Stand"])
+
+    dts_long = door_to_stand.assign(
+        Metric="Door → Stand Travel Time (min)",
+        Counterparty=door_to_stand["From Location"],
+        Value=door_to_stand["Travel Time (min)"]
+    )[
+        ["Stand", vehicle_type_col, "Metric", "Counterparty", "Value"]
+    ]
+
+    dts_stats = stats_grouping(
+        dts_long,
+        by_cols=["Stand", vehicle_type_col, "Metric", "Counterparty"],
+        value_col="Value",
+        out_prefix=None,
+    )
+
+    outputs.append(dts_stats)
+
+    # -------------------------------------------------
+    # COMBINE ALL METRICS
+    # -------------------------------------------------
+    final = pd.concat(outputs, ignore_index=True)
+
+    #Sort by numeric stand order
+   
+    final["_StandNum"] = (
+        final["Stand"].astype(str).str.extract(r"(\d+)").astype(float)
+    )
+    final["_StandSuffix"] = (
+        final["Stand"].astype(str).str.extract(r"\d+([A-Za-z]?)").fillna("")
+    )
+
+    final = final.sort_values(
+        by=[
+            "_StandNum",
+            "_StandSuffix",
+            vehicle_type_col,
+            "Metric",
+            "Counterparty",
+        ]
+    ).drop(columns=["_StandNum", "_StandSuffix"])
+
+
+    return final
+
+
+
+def arrival_time_statistics(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=None, end=None):
+    """
+    Takes a dataframe and returns arrival waiting-time statistics for vehicles before chocks on.  
+    
+    Parameters
+    ---------
+    flags_df:
+        pandas.DataFrame with columns ["Flight Number", "Day", "Airline Code", "Location Arrival DT", "PassengerType", "Vehicle Type"]
+    flight_df:
+        pandas.DataFrame with columns ["Flight Number", "Day", "Airline Code", "Flight Number", "Chocks DT"]
+    start: str, end: str | default = False
+        dates for using if wanting to filter to smaller time period
+
+    Returns
+    ---------
+    mean, median, min, max arrival time (minutes) and standard deviation by Vehicle Type and by Vehicle Type x Passenger Type
+
+    Drops duplicate Job ID as to not count the same vehicle service time twice
+
+    """
+    x = flags_df.copy()
+    z = flight_df.copy()
+
+    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
+    y = to_datetime(z, ["Chocks DT"])
+
+    if start:
+        x = x[x["Job Start Time"] >= start]
+    if end:
+        x = x[x["Job End Time"] < end]
+
+    prm_flight_merge = x.merge(y, on=["Flight Number", "Day", "Airline Code"], how="left") 
+
+    prm_flight_merge.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
+
+    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Chocks DT"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
+   
+    #-------- Statistics by Vehicle Type ------
+    stats_by_vehicle = stats_grouping(
+        prm_flight_merge,
+        by_cols=["Vehicle Type"],
+        value_col="Arrival Time before Chocks",
+        out_prefix="Arrival Time before Chocks (min)"
+    )
+
+    #Stats by Vehicle Type x Passenger Type
+    stats_by_vehicle_and_passengertype = stats_grouping(
+        prm_flight_merge,
+        by_cols=["Vehicle Type", "PassengerType"],
+        value_col="Arrival Time before Chocks",
+        out_prefix="Arrival Time before Chocks (min)"
+    )
+
+    return stats_by_vehicle, stats_by_vehicle_and_passengertype
+
 def avg_travel_time_by_stand_and_location(
     job_df: pd.DataFrame,
     vehicle_type: str
@@ -231,108 +571,6 @@ def avg_travel_time_by_stand_and_location(
         "IA2Doors": "Avg travel time to IA2Doors",
         "DomArrDoors": "Avg travel time to DomArrDoors",
     })
-
-def average_arrival_time(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=None, end=None):
-    """
-    Takes a dataframe and returns the average arrival time for a vehicle type based on chocks on time, This is then differentiated between if it is on its own or combined with another vehicle. 
-    
-    Parameters
-    ---------
-    flags_df:
-        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Location Arrival DT", "PassengerType", "Vehicle Type"]
-    flight_df:
-        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Flight Number", "Chocks DT"]
-    start: str, end: str | default = False
-        dates for using if wanting to filter to smaller time period
-
-    Returns
-    ---------
-    pandas.DataFrame with columns:
-            PassengerType | Average End-to-end Service Time (minutes)
-
-    Drops duplicate Job ID as to not count the same vehicle service time twice
-
-    """
-    x = flags_df.copy()
-    z = flight_df.copy()
-
-    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
-    y = to_datetime(z, ["Chocks DT"])
-
-    if start:
-        x = x[x["Job Start Time"] >= start]
-    if end:
-        x = x[x["Job End Time"] < end]
-
-    x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
-
-    prm_flight_merge = x.merge(y, on=["Flight Number", "Day", "Airline Code"], how="left") 
-
-    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Chocks DT"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
-   
-    #Average Wait time per vehicle type
-    avg_by_vehicle = group_average(prm_flight_merge, by_cols=["Vehicle Type"], value_col="Arrival Time before Chocks", out_col="Average Arrival Time before chocks on (minutes)")
-
-    #Averae wait time by Vehicle Type x Passenger Type
-    avg_by_vehicle_and_passengertype = group_average(prm_flight_merge, by_cols=["Vehicle Type", "PassengerType"], value_col="Arrival Time before Chocks", out_col="Average Arrival Time before chocks on (minutes)")
-
-    return avg_by_vehicle, avg_by_vehicle_and_passengertype
-
-def arrival_time_statistics(flags_df: pd.DataFrame, flight_df: pd.DataFrame, start=None, end=None):
-    """
-    Takes a dataframe and returns arrival waiting-time statistics for vehicles before chocks on.  
-    
-    Parameters
-    ---------
-    flags_df:
-        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Location Arrival DT", "PassengerType", "Vehicle Type"]
-    flight_df:
-        pandas.DataFrame with columns ["Flight ID", "Day", "Airline Code", "Flight Number", "Chocks DT"]
-    start: str, end: str | default = False
-        dates for using if wanting to filter to smaller time period
-
-    Returns
-    ---------
-    mean, median, min, max arrival time (minutes) and standard deviation by Vehicle Type and by Vehicle Type x Passenger Type
-
-    Drops duplicate Job ID as to not count the same vehicle service time twice
-
-    """
-    x = flags_df.copy()
-    z = flight_df.copy()
-
-    x = to_datetime(x, ["Job Start Time", "Job End Time", "Location Arrival DT"])
-    y = to_datetime(z, ["Chocks DT"])
-
-    if start:
-        x = x[x["Job Start Time"] >= start]
-    if end:
-        x = x[x["Job End Time"] < end]
-
-    x.drop_duplicates(subset=["Job ID"], keep='first', inplace=True)
-
-    prm_flight_merge = x.merge(y, on=["Flight ID", "Day", "Airline Code"], how="left") 
-
-    prm_flight_merge["Arrival Time before Chocks"] = (prm_flight_merge["Chocks DT"] - prm_flight_merge["Location Arrival DT"]).dt.total_seconds() / 60
-   
-    #-------- Statistics by Vehicle Type ------
-    stats_by_vehicle = stats_grouping(
-        prm_flight_merge,
-        by_cols=["Vehicle Type"],
-        value_col="Arrival Time before Chocks",
-        out_prefix="Arrival Time before Chocks (min)"
-    )
-
-    #Stats by Vehicle Type x Passenger Type
-    stats_by_vehicle_and_passengertype = stats_grouping(
-        prm_flight_merge,
-        by_cols=["Vehicle Type", "PassengerType"],
-        value_col="Arrival Time before Chocks",
-        out_prefix="Arrival Time before Chocks (min)"
-    )
-
-    return stats_by_vehicle, stats_by_vehicle_and_passengertype
-
 
 #----------------------------------------------------
 # VEHICLE USAGE FUNCTION AND HELPER FUNCTIONS
