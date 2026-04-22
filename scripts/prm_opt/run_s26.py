@@ -16,7 +16,16 @@ from .config import PlanningToggles
 
 
 def run_s26_s1(df_flight_forecast, penetration_rates, ssr_mix, stand_zone_map, toggles: PlanningToggles = PlanningToggles()):
-    df_master = ingest_s26(df_flight_forecast, penetration_rates, ssr_mix, stand_zone_map)
+    
+    df_master = ingest_s26(
+        start,
+        end,
+        penetration_rates,
+        ssr_mix,
+        stand_plan,
+        service_time_params,
+    )
+
     # S26 has no Job Start/End; ingest sets Scheduled Flight DT and base_duration_mins.
     # build_jobs uses Scheduled Flight DT for t when Job Start Time isn't present.
     jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
@@ -28,7 +37,16 @@ def run_s26_s1(df_flight_forecast, penetration_rates, ssr_mix, stand_zone_map, t
 
 
 def run_s26_s2(df_flight_forecast, penetration_rates, ssr_mix, stand_zone_map, solver_name="highs", toggles: PlanningToggles = PlanningToggles()):
-    df_master = ingest_s26(df_flight_forecast, penetration_rates, ssr_mix, stand_zone_map)
+    
+    df_master = ingest_s26(
+        start,
+        end,
+        penetration_rates,
+        ssr_mix,
+        stand_plan,
+        service_time_params,
+    )
+
     jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
 
     tau = build_tau_from_jobs(jobs, toggles)

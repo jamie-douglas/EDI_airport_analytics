@@ -19,6 +19,7 @@ from .config import (
     SAFETY_STANDS,
     LIFT_GATES,
     VERTICAL_EXCEPTIONS,
+    STAND_ZONES,
 )
 
 
@@ -52,6 +53,22 @@ def build_jobs(
     # Direction
     # -------------------------
     x["dir"] = x["A/D"]
+
+    # -------------------------
+    # Stand Zone
+    # -------------------------
+    x["zone"] = x["Stand"].astype(str).map(STAND_ZONES)
+
+    # -------------------------
+    # Sector
+    # -------------------------
+
+    x["class"] = np.where(
+        x["Sector"].str.upper().str.contains("DOM"),
+        "Dom",
+        "Int"
+    )
+
 
     # -------------------------
     # Wheelchair slot (k_j)
