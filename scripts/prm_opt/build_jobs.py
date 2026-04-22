@@ -1,0 +1,149 @@
+
+"""
+prm_opt.build_jobs
+------------------
+Build the canonical PRM job table (J) used by the optimiser.
+
+This file enforces:
+- Correct vertical logic (SSR AND effective remote)
+- Gate 7/8 identification (Scenario 2 & 3)
+- SLA thresholds (with buffer)
+"""
+
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+
+from .config import (
+    PlanningToggles,
+    SAFETY_STANDS,
+    LIFT_GATES,
+    VERTICAL_EXCEPTIONS,
+)
+
+
+def build_jobs(
+    df_prm_master: pd.DataFrame,
+    bucket: str = "15min",
+    toggles: PlanningToggles = PlanningToggles(),
+) -> pd.DataFrame:
+    """
+    Build job-level optimisation table.
+
+    Each row = one PRM job j.
+
+    Required by Model Scope:
+    - j ∈ J
+    - f(j)
+    - d(j)
+    - t(j)
+    - vert(j), wc(j)
+    - lift gate indicator
+    """
+
+    x = df_prm_master.copy()
+
+    # -------------------------
+    # Time bucket
+    # -------------------------
+    x["t"] = x["Job Start Time"].dt.floor(bucket)
+
+    # -------------------------
+    # Direction
+    # -------------------------
+    x["dir"] = x["A/D"]
+
+    # -------------------------
+    # Wheelchair slot (k_j)
+    # -------------------------
+    x["needs_wc"] = (
+        (x["SSR Code"] == "WCHC") |
+        ((x["SSR Code"] == "WCHS") & (x["Has Own Chair"] == 1))
+    ).astype(int)
+
+    # -------------------------
+    # Effective remote
+    # -------------------------
+    x["is_effective_remote"] = x["IsEffectiveRemote"].astype(int)
+
+    # -------------------------
+    # Vertical requirement
+    # -------------------------
+    base_vertical = (
+        x["SSR Code"].isin(["WCHC", "WCHS"]) &
+        (x["is_effective_remote"] == 1)
+    )
+
+    exception_vertical = x.apply(
+        lambda r: (r["Airline Code"], str(r["Stand"])) in VERTICAL_EXCEPTIONS,
+        axis=1,
+    )
+
+    x["needs_vertical"] = (base_vertical | exception_vertical).astype(int)
+
+    # -------------------------
+    # Safety stand
+    # -------------------------
+    x["safety_stand"] = x["Stand"].astype(str).isin(SAFETY_STANDS).astype(int)
+
+    # -------------------------
+    # Gate 7/8 bottleneck flag
+    # -------------------------
+    if "Departure Gate" in x.columns:
+        x["lift_gate"] = x["Departure Gate"].astype(str).isin(LIFT_GATES).astype(int)
+    else:
+        x["lift_gate"] = 0
+
+    # -------------------------
+    # SLA limits with buffer
+    # -------------------------
+    x["sla_limit"] = np.where(
+        x["dir"] == "A",
+        20 - toggles.sla_buffer_mins,
+        30 - toggles.sla_buffer_mins,
+    )
+
+    # -------------------------
+    # Base duration (minutes busy)
+    # -------------------------
+    x["base_duration_mins"] = (
+        x["Job End Time"] - x["Job Start Time"]
+    ).dt.total_seconds() / 60
+    x["base_duration_mins"] = x["base_duration_mins"].clip(lower=0)
+
+    # -------------------------
+    # Spin indicator
+    # -------------------------
+    x["is_spin"] = (x["Turnaround PRM Count"] > 0).astype(int)
+
+    # -------------------------
+    # Stable flight key (f)
+    # -------------------------
+    x["flight_key"] = (
+        x["Airline Code"].astype(str)
+        + "_"
+        + x["Flight Number"].astype(str)
+        + "_"
+        + x["t"].astype(str)
+    )
+
+    jobs = x[
+        [
+            "Passenger ID",
+            "flight_key",
+            "t",
+            "dir",
+            "Stand",
+            "Airline Code",
+            "needs_wc",
+            "needs_vertical",
+            "safety_stand",
+            "lift_gate",
+            "sla_limit",
+            "base_duration_mins",
+            "is_spin",
+        ]
+    ].reset_index(drop=True)
+
+    jobs.index.name = "j"
+    return jobs
