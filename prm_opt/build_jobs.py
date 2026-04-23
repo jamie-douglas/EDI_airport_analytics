@@ -213,6 +213,7 @@ def build_jobs(
             "flight_key",
             "release_time",
             "t",
+            "s",
             "dir",
             "Stand",
             "Airline Code",
