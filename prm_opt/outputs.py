@@ -159,3 +159,79 @@ def extract_summary(model, jobs):
         "GapAmb": (max(amb_used) - current_amb) if amb_used else 0,
         "GapMini": (max(mini_used) - current_mini) if mini_used else 0,
     }
+
+
+import pandas as pd
+
+def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s"):
+    """
+    Build S1 baseline curves from policy decisions.
+
+    Returns:
+      - ambulift_curve (per bucket)
+      - minibus_curve  (per bucket)
+      - pusher_curve   (per bucket)
+      - driver_curve   (per bucket)  [drivers = amb + mini]
+    """
+
+    if decision_col not in jobs.columns:
+        raise ValueError(f"Missing {decision_col} in jobs")
+
+    # default 0
+    jobs = jobs.copy()
+    jobs["_amb"] = 0
+    jobs["_mini"] = 0
+    jobs["_push"] = 0
+
+    # Map policy outputs → vehicle use
+    # Current policy outputs: "No Vehicle", "Ambulift Only"
+    jobs.loc[jobs[decision_col] == "Ambulift Only", "_amb"] = 1
+    # If you later add minibus/push decisions, extend mapping here:
+    # jobs.loc[jobs[decision_col] == "Minibus", "_mini"] = 1
+    # jobs.loc[jobs[decision_col] == "Push", "_push"] = 1
+
+    # Aggregate per bucket
+    amb_curve = jobs.groupby(bucket_col)["_amb"].sum().sort_index()
+    mini_curve = jobs.groupby(bucket_col)["_mini"].sum().sort_index()
+    push_curve = jobs.groupby(bucket_col)["_push"].sum().sort_index()
+
+    # Drivers = 1 per ambulift + 1 per minibus (your rule)
+    drv_curve = (amb_curve + mini_curve).astype(int)
+
+    return {
+        "ambulift_curve": amb_curve,
+        "minibus_curve": mini_curve,
+        "pusher_curve": push_curve,
+        "driver_curve": drv_curve,
+    }
+
+
+def baseline_s1_summary(jobs, curves, current_amb=None, current_mini=None):
+    """
+    Produce an S2-style summary for S1.
+    """
+    amb_curve = curves["ambulift_curve"]
+    mini_curve = curves["minibus_curve"]
+    drv_curve = curves["driver_curve"]
+
+    peak_amb = int(amb_curve.max()) if len(amb_curve) else 0
+    peak_mini = int(mini_curve.max()) if len(mini_curve) else 0
+    peak_drv = int(drv_curve.max()) if len(drv_curve) else 0
+
+    out = {
+        "PeakAmb": peak_amb,
+        "PeakMini": peak_mini,
+        "PeakDrivers": peak_drv,
+        "PeakAmb_bucket": amb_curve.idxmax() if len(amb_curve) else None,
+        "PeakMini_bucket": mini_curve.idxmax() if len(mini_curve) else None,
+        "PeakDrivers_bucket": drv_curve.idxmax() if len(drv_curve) else None,
+    }
+
+    if current_amb is not None:
+        out["CurrentAmb"] = int(current_amb)
+        out["GapAmb"] = int(peak_amb - current_amb)
+    if current_mini is not None:
+        out["CurrentMini"] = int(current_mini)
+        out["GapMini"] = int(peak_mini - current_mini)
+
+    return out

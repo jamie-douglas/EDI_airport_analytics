@@ -47,6 +47,31 @@ def build_jobs(
 
     x = df_prm_master.copy()
 
+    
+    # --------------------------------------------------
+    # Defensive fill for flags coming from left joins
+    # --------------------------------------------------
+    for col in [
+        "Has Own Chair",
+        "IsEffectiveRemote",
+        "PRM Flight Count",
+        "Turnaround PRM Count",
+        "Concurrent Stress",
+    ]:
+        if col in x.columns:
+            x[col] = x[col].fillna(0)
+
+            
+    # --------------------------------------------------
+    # SSR numeric (used by policy_s1)
+    # --------------------------------------------------
+    if "SSR numeric" not in x.columns:
+        x["SSR numeric"] = x["SSR Code"].map(
+            {"WCHC": 3, "WCHS": 2}
+        ).fillna(1)
+
+
+
    
     # -------------------------
     # Time bucket (with optional preposition)
@@ -108,6 +133,8 @@ def build_jobs(
     # -------------------------
     # Wheelchair slot (k_j)
     # -------------------------
+    x["Has Own Chair"] = x["Has Own Chair"].fillna(0)
+
     x["needs_wc"] = (
         (x["SSR Code"] == "WCHC") |
         ((x["SSR Code"] == "WCHS") & (x["Has Own Chair"] == 1))
@@ -196,6 +223,13 @@ def build_jobs(
             "sla_limit",
             "base_duration_mins",
             "is_spin",
+            "SSR numeric",
+            "IsEffectiveRemote",
+            "IsArrival",
+            "Turnaround PRM Count",
+            "Concurrent Stress",
+            "PRM Flight Count",
+            "Has Own Chair"
         ]
     ].reset_index(drop=True)
 
