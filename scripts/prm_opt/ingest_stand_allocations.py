@@ -1,7 +1,7 @@
-# scripts/prm_opt/ingest_stand_allocations.py
 
 """
-
+prm_opt.ingest_stand_allocations
+--------------------------------
 Ingest and process stand allocation outputs for S26.
 
 These files represent realised / planned stand allocations
@@ -13,17 +13,7 @@ They are used in two ways:
      beyond July (rest of S26 season)
 
 No optimisation logic lives here – this is purely demand construction.
-
-Expected input files:
-  - stand_allocation-june.csv
-  - stand_allocation-july.csv
-
-These files contain turn-level stand allocations with both Arr_ and Dep_ columns.
-We explode each row into:
-  - one arrival stand assignment
-  - one departure stand assignment
 """
-
 
 from __future__ import annotations
 import pandas as pd
@@ -33,16 +23,22 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
     """
     Load and harmonise stand allocation CSVs.
 
+    Each CSV represents a full daily turn-level stand plan.
+    Each row contains both arrival and departure details.
+
     Output schema:
       FlightNumber
       ScheduledDateTime_Local
       Airline
       dir              ('A' or 'D')
-      class            ('Dom', 'Int', 'CTA')
+      class            ('Dom' or 'Int')
       stand
     """
 
-    frames = [pd.read_csv(p) for p in csv_paths]
+    frames = []
+    for p in csv_paths:
+        frames.append(pd.read_csv(p))
+
     raw = pd.concat(frames, ignore_index=True)
 
     # -------------------------
@@ -63,7 +59,7 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
             "Arr_Flight_No": "FlightNumber",
             "Arr_Scheduled_Date": "ScheduledDateTime_Local",
             "Arr_Operator": "Airline",
-            "DI_arr": "class_raw",
+            "DI_arr": "class",
         },
         inplace=True,
     )
@@ -87,7 +83,7 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
             "Dep_Flight_No": "FlightNumber",
             "Dep_Scheduled_Date": "ScheduledDateTime_Local",
             "Dep_Operator": "Airline",
-            "DI_dep": "class_raw",
+            "DI_dep": "class",
         },
         inplace=True,
     )
@@ -98,14 +94,21 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
     # -------------------------
     out = pd.concat([arrivals, departures], ignore_index=True)
 
+    # -------------------------
+    # CLEAN & NORMALISE
+    # -------------------------
     out = out.dropna(
-        subset=["FlightNumber", "ScheduledDateTime_Local", "stand"]
+        subset=[
+            "FlightNumber",
+            "ScheduledDateTime_Local",
+            "stand",
+        ]
     )
 
     out["FlightNumber"] = out["FlightNumber"].astype(str)
     out["ScheduledDateTime_Local"] = pd.to_datetime(out["ScheduledDateTime_Local"])
 
-    # Normalize stand naming
+    # Normalise stand naming (strip terminal suffixes etc.)
     out["stand"] = (
         out["stand"]
         .astype(str)
@@ -113,46 +116,36 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
         .str.strip()
     )
 
-    # --------------------------------------------------
-    # Class normalisation
-    #
-    # DOM    -> Dom
-    # INT    -> Int
-    # IRISH  -> CTA
-    # NIRISH -> CTA
-    #
-    # CTA MUST remain distinct for batching logic
-    # --------------------------------------------------
+    # Normalise Domestic / International labels
     out["class"] = (
-        out["class_raw"]
+        out["class"]
         .astype(str)
-        .str.upper()
-        .map({
-            "DOM": "Dom",
-            "INT": "Int",
-            "IRISH": "CTA",
-            "NIRISH": "CTA",
-        })
+        .str.strip()
+        .replace(
+            {
+                "DOM": "Dom",
+                "INT": "Int",
+                "IRISH": "Int",
+                "NIRISH": "Int",
+            }
+        )
     )
 
-    # Safety check: fail loudly if unexpected class appears
-    if out["class"].isna().any():
-        bad = out.loc[out["class"].isna(), "class_raw"].unique()
-        raise ValueError(f"Unmapped stand allocation classes: {bad}")
-
-    return out[
-        ["FlightNumber", "ScheduledDateTime_Local", "Airline", "dir", "class", "stand"]
-    ]
+    return out
 
 
 def build_stand_distribution(stand_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build empirical stand distributions for extrapolation.
+    Build empirical stand distributions for extrapolation
+    beyond July.
 
     Conditioning dimensions:
       Airline
       dir        (A/D)
-      class      (Dom / Int / CTA)
+      class      (Dom/Int)
+
+    Output:
+      Airline | dir | class | stand | prob
     """
 
     counts = (
