@@ -1,7 +1,5 @@
-
+# scripts/prm_opt/run_s25.py
 """
-prm_opt.run_s25
----------------
 Runs S25 scenarios.
 """
 

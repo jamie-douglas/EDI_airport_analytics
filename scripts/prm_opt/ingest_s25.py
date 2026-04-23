@@ -1,7 +1,6 @@
+# scripts/prm_opt/ingest_s25.py
 
 """
-prm_opt.ingest_s25
------------------
 Faithful refactor of S25 notebook ingestion.
 Builds df_prm_master identical in meaning and structure.
 """

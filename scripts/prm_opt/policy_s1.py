@@ -1,5 +1,22 @@
+# scripts/prm_opt/policy_s1.py
+
 
 def apply_policy_s1(jobs):
+    
+    """
+    Apply Scenario 1 (S25 baseline) decision policy.
+
+    This function encodes a decision tree learned from S25 data
+    and represents how vehicles were actually used operationally.
+
+    Output:
+      dict[job_index -> decision]
+
+    Decisions:
+      - "No Vehicle"
+      - "Ambulift Only"
+    """
+
     decisions = {}
 
     for j, r in jobs.iterrows():

@@ -1,13 +1,16 @@
-
+# scripts/prm_opt/build_jobs.py
 """
-prm_opt.build_jobs
-------------------
+
 Build the canonical PRM job table (J) used by the optimiser.
+
 
 This file enforces:
 - Correct vertical logic (SSR AND effective remote)
 - Gate 7/8 identification (Scenario 2 & 3)
 - SLA thresholds (with buffer)
+- Stand-zone mapping for batching (Scenario 3)
+- Domestic/International class derived from Sector
+
 """
 
 from __future__ import annotations
@@ -54,20 +57,39 @@ def build_jobs(
     # -------------------------
     x["dir"] = x["A/D"]
 
+    
     # -------------------------
-    # Stand Zone
+    # Stand zone for batching
     # -------------------------
-    x["zone"] = x["Stand"].astype(str).map(STAND_ZONES)
+    x["zone"] = x["Stand"].astype(str).map(STAND_ZONES).fillna("UNK")
 
-    # -------------------------
-    # Sector
-    # -------------------------
 
+
+    
+    # -------------------------
+    # Class (Dom / Int / CTA) from Sector
+    # -------------------------
+    sec = x["Sector"].astype(str).str.upper()
     x["class"] = np.where(
-        x["Sector"].str.upper().str.contains("DOM"),
+        sec.str.contains("DOM"),
         "Dom",
-        "Int"
+        np.where(sec.isin(["IRISH", "NIRISH"]), "CTA", "Int"),
     )
+
+
+    # -------------------------
+    # Policy / forecasting features (must exist for S25 + S26)
+    # -------------------------
+    # If these are missing you’ll get silent failures in policy_s1.
+    required = [
+        "Concurrent Stress",
+        "Turnaround PRM Count",
+        "IsArrival",
+        "PRM Flight Count",
+    ]
+    for c in required:
+        if c not in x.columns:
+            raise ValueError(f"Missing required column for jobs: {c}")
 
 
     # -------------------------

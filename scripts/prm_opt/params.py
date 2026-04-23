@@ -1,7 +1,7 @@
+# scripts/prm_opt/params.py
 
 """
-prm_opt.params
---------------
+
 Build optimisation parameters τ and capacity adjustments.
 
 Implements:
@@ -27,21 +27,19 @@ def build_tau_from_jobs(
     toggles: PlanningToggles,
 ) -> Dict[Tuple[int, str], float]:
     """
-    τ_{j,r}: busy minutes for job j and resource r.
+    τ_{j,m}: busy minutes for job j and mode m.
 
     Resources currently USED by optimisation:
       - "Amb"   : Ambulift vehicle busy minutes
       - "Mini"  : Minibus vehicle busy minutes
       - "Push"  : Pusher busy minutes (walking support)
 
-    Resources DEFERRED (kept for future staff optimisation):
-      - "Driver"
-      - "VehAg"
 
+    
     Notes:
-    - base_duration_mins is the observed S25 job duration.
-    - handover_overlap_mins is NOT baked into τ; it is added conditionally
-      in the optimisation when a transfer (Amb + Mini) is chosen.
+      - base_duration_mins already includes stochastic service time
+      - transfer overlap added in Pyomo when Mini + vertical is chosen
+
     """
 
     tau: Dict[Tuple[int, str], float] = {}
@@ -86,27 +84,46 @@ def build_spin_minutes(
     return spin_removed
 
 
-def build_vehicle_classes(include_future: bool = False) -> Dict[str, List[Dict]]:
+
+def build_vehicle_classes(
+    include_future: bool = False,
+) -> Dict[str, List[Dict]]:
     """
-    Build capacity classes from VEHICLE_MODELS by (type, seatcap, wccap).
-    Respects heterogeneous vehicle capacities.
+    Build heterogeneous capacity classes from VEHICLE_MODELS.
+
+    Groups vehicles by:
+      - vehicle type
+      - seat capacity
+      - wheelchair capacity
     """
-    def is_existing(spec): return float(spec.get("capex_hr", 0.0)) == 0.0
+
+    def is_existing(spec):
+        return float(spec.get("capex_hr", 0.0)) == 0.0
 
     buckets = defaultdict(lambda: defaultdict(int))
+
     for spec in VEHICLE_MODELS.values():
         if (not include_future) and (not is_existing(spec)):
             continue
+
         vtype = spec["type"]  # "Amb" or "Mini"
         seat = int(spec["seatcap"])
         wc = int(spec["wccap"])
         buckets[vtype][(seat, wc)] += 1
 
     classes: Dict[str, List[Dict]] = {}
+
     for vtype, combos in buckets.items():
         out = []
         for idx, ((seat, wc), cnt) in enumerate(sorted(combos.items())):
-            out.append({"class_id": f"{vtype}_C{idx}", "seatcap": seat, "wccap": wc, "count": int(cnt)})
+            out.append(
+                {
+                    "class_id": f"{vtype}_C{idx}",
+                    "seatcap": seat,
+                    "wccap": wc,
+                    "count": int(cnt),
+                }
+            )
         classes[vtype] = out
 
     return classes
@@ -116,21 +133,23 @@ def build_vehicle_classes(include_future: bool = False) -> Dict[str, List[Dict]]
 # DEFERRED PLACEHOLDERS (COMMENTS ONLY)
 # =========================================================
 
-# def build_ferry_minutes(jobs, shifts, ferry_time_minutes):
+# def build_ferry_minutes(...):
 #     """
-#     Deferred: remove minibus minutes in buckets where minibuses are used to ferry ambulift drivers.
-#     This will subtract from minibus time capacity, similar to spin_removed for ambulifts.
+#     Deferred: remove minibus minutes in buckets where minibuses
+#     are used to ferry ambulift drivers.
 #     """
 #     raise NotImplementedError
 #
-# def sample_delay_minutes(std_mins=15):
+# def sample_delay_minutes(...):
 #     """
-#     Deferred: ω scenario delay model (arrival variability). Used once SLA constraints are activated.
+#     Deferred: ω-scenario delay model.
+#     NOTE: arrival & service-time stochasticity currently handled
+#     upstream via Monte Carlo in ingest.
 #     """
 #     raise NotImplementedError
 #
 # def build_staff_break_minutes(...):
 #     """
-#     Deferred: staff/break constraints for drivers/agents/pushers (Model Scope staff capacity block).
+#     Deferred: driver / agent break constraints.
 #     """
 #     raise NotImplementedError

@@ -1,8 +1,6 @@
-
+# scripts/prm_opt/config.py
 
 """
-prm_opt.config
---------------
 Configuration aligned to Model Scope document
 
 Contains:

@@ -1,7 +1,6 @@
+# scripts/prm_opt/pyomo_model.py
 
 """
-prm_opt.pyomo_model
-------------------
 Scenario 2 optimisation (no pooling across flights).
 
 Implements Model Scope components:
@@ -121,6 +120,24 @@ def build_pyomo_model(
             return m.x[j, "Push"] == 0
         return pyo.Constraint.Skip
     m.SafetyStand = pyo.Constraint(m.J, rule=safety_rule)
+
+    
+    # --------------------------------------------------
+    # Domestic ARRIVALS restriction (as requested):
+    # Ambulift cannot be used as the HORIZONTAL mode for DOMESTIC ARRIVALS.
+    # This only restricts x[j,"Amb"] when class=="Dom" and dir=="A".
+    # It does NOT remove or alter the vertical component logic.
+    # --------------------------------------------------
+    def no_amb_horizontal_domestic_arrivals(m, j):
+        # build_jobs provides:
+        #   jobs["class"] in {"Dom","Int"} derived from Sector
+        #   jobs["dir"] in {"A","D"}
+        if str(jobs.loc[j, "class"]) == "Dom" and str(jobs.loc[j, "dir"]) == "A":
+            return m.x[j, "Amb"] == 0
+        return pyo.Constraint.Skip
+
+    m.NoAmbDomesticArrivals = pyo.Constraint(m.J, rule=no_amb_horizontal_domestic_arrivals)
+
 
     # Index jobs by (flight, t)
     jobs_by_ft = {ft: [] for ft in ft_pairs}

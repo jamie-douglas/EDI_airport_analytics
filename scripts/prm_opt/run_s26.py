@@ -1,7 +1,6 @@
+# scripts/prm_opt/run_s26.py
 
 """
-prm_opt.run_s26
----------------
 Runs S26 forecast scenarios.
 """
 
