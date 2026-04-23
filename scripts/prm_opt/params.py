@@ -67,6 +67,7 @@ def build_tau_from_jobs(
 
 
 
+
 def build_spin_minutes(
     jobs: pd.DataFrame,
     spin_lock_threshold_mins: int = 50,
@@ -74,14 +75,19 @@ def build_spin_minutes(
     """
     Spin lock capacity removed per time bucket.
 
-    Model Scope mapping:
-    - ambulift minutes unavailable due to spins/lock rules. 
+    With t/s split:
+    - Use 's' (original job-start bucket) if present so spin timing is not shifted earlier by preposition.
+    - Otherwise fall back to 't'.
     """
+    bucket_col = "s" if "s" in jobs.columns else "t"
+
     spin_removed: Dict[Any, float] = {}
-    for t, grp in jobs.groupby("t"):
+    for b, grp in jobs.groupby(bucket_col):
         spin_count = int(grp["is_spin"].sum())
-        spin_removed[t] = float(spin_count * spin_lock_threshold_mins)
+        spin_removed[pd.to_datetime(b)] = float(spin_count * spin_lock_threshold_mins)
+
     return spin_removed
+
 
 
 
@@ -96,6 +102,10 @@ def build_vehicle_classes(
       - seat capacity
       - wheelchair capacity
     """
+    
+    if not VEHICLE_MODELS:
+        raise ValueError("VEHICLE_MODELS is empty in config.py. Populate fleet registry before running optimisation.")
+
 
     def is_existing(spec):
         return float(spec.get("capex_hr", 0.0)) == 0.0
@@ -139,14 +149,7 @@ def build_vehicle_classes(
 #     are used to ferry ambulift drivers.
 #     """
 #     raise NotImplementedError
-#
-# def sample_delay_minutes(...):
-#     """
-#     Deferred: ω-scenario delay model.
-#     NOTE: arrival & service-time stochasticity currently handled
-#     upstream via Monte Carlo in ingest.
-#     """
-#     raise NotImplementedError
+
 #
 # def build_staff_break_minutes(...):
 #     """

@@ -1,4 +1,6 @@
+
 # scripts/prm_opt/run_s25.py
+
 """
 Runs S25 scenarios.
 """
@@ -12,12 +14,24 @@ from .params import build_tau_from_jobs, build_spin_minutes
 from .pyomo_model import build_pyomo_model
 from .config import PlanningToggles
 
+from .outputs import (
+    extract_summary,
+    extract_job_assignments,
+    extract_vehicle_allocations,
+    run_sanity_checks,
+)
+
+
 
 def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
     df_prm_master = ingest_s25(start, end)
     jobs = build_jobs(df_prm_master, bucket="15min", toggles=toggles)
-    jobs["s1_decision"] = jobs.index.map(apply_policy_s1(jobs))
+
+    decisions = apply_policy_s1(jobs)  # dict[j -> label]
+    jobs["s1_decision"] = jobs.index.map(decisions.get)
+
     return jobs
+
 
 
 def run_s25_s2(start, end, solver_name="highs", toggles: PlanningToggles = PlanningToggles()):
@@ -37,4 +51,20 @@ def run_s25_s2(start, end, solver_name="highs", toggles: PlanningToggles = Plann
     solver = pyo.SolverFactory(solver_name)
     solver.solve(model)
 
-    return model, jobs
+    # -----------------------------
+    # NEW OUTPUTS
+    # -----------------------------
+    summary = extract_summary(model, jobs)
+    job_df = extract_job_assignments(model, jobs)
+    vehicle_df = extract_vehicle_allocations(model)
+    checks = run_sanity_checks(job_df, vehicle_df)
+
+    return {
+        "model": model,
+        "jobs": jobs,
+        "summary": summary,
+        "job_assignments": job_df,
+        "vehicle_allocations": vehicle_df,
+        "sanity_checks": checks,
+    }
+

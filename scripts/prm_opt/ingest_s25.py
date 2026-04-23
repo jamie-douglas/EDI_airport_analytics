@@ -1,10 +1,5 @@
 # scripts/prm_opt/ingest_s25.py
 
-"""
-Faithful refactor of S25 notebook ingestion.
-Builds df_prm_master identical in meaning and structure.
-"""
-
 import numpy as np
 import pandas as pd
 from datetime import timedelta

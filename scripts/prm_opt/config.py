@@ -10,7 +10,7 @@ Contains:
 """
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Set, Tuple, List
 
 
@@ -23,6 +23,19 @@ from typing import Dict, Set, Tuple, List
 class PlanningToggles:
     sla_buffer_mins: int = 0
     handover_mins: int = 10   # transfer coordination overhead
+    
+    # Preposition buffers (minutes)
+    # These shift the release bucket earlier, enabling sensitivity tests:
+    preposition_arrival_mins: int = 5
+    preposition_departure_mins: int = 5
+
+    
+    # OPTIONAL placeholders for ferrying/break inefficiency later
+    # {bucket_timestamp: 1} means reserve 1 unit in that bucket
+    ferry_mini_reserved: dict = field(default_factory=dict)
+    ferry_drv_reserved: dict = field(default_factory=dict)
+
+
 
 
 
@@ -117,7 +130,7 @@ VEHICLE_MODELS: Dict[str, Dict] = {
 
 PENALTY = {
     "AMB_HORIZONTAL": 4.0,   # discourage using ambulift horizontally
-    "TRANSFER": 1.5,         # discourage handover unless helpful
+    "TRANSFER": 1.0,         # discourage handover unless helpful
     "PUSH": 3.0,             # pusher is least preferred
 }
 

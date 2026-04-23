@@ -47,10 +47,23 @@ def build_jobs(
 
     x = df_prm_master.copy()
 
+   
     # -------------------------
-    # Time bucket
+    # Time bucket (with optional preposition)
     # -------------------------
-    x["t"] = x["Job Start Time"].dt.floor(bucket)
+    # We interpret Job Start Time as the "release" moment for SLA.
+    # Preposition shifts this earlier to represent vehicles needing to be in place
+    # before the service is expected/required.
+    prepos = np.where(
+        x["A/D"] == "A",
+        toggles.preposition_arrival_mins,
+        toggles.preposition_departure_mins,
+    )
+
+    x["release_time"] = x["Job Start Time"] - pd.to_timedelta(prepos, unit="m")
+    x["t"] = x["release_time"].dt.floor(bucket)
+    x["s"] = x["Job Start Time"].dt.floor(bucket)
+
 
     # -------------------------
     # Direction
@@ -163,13 +176,15 @@ def build_jobs(
         + "_"
         + x["Flight Number"].astype(str)
         + "_"
-        + x["t"].astype(str)
+        + x["s"].astype(str)
     )
 
+    
     jobs = x[
         [
             "Passenger ID",
             "flight_key",
+            "release_time",
             "t",
             "dir",
             "Stand",
@@ -183,6 +198,7 @@ def build_jobs(
             "is_spin",
         ]
     ].reset_index(drop=True)
+
 
     jobs.index.name = "j"
     return jobs

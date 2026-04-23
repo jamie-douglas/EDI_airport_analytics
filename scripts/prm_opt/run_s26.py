@@ -1,20 +1,26 @@
-# scripts/prm_opt/run_s26.py
 
+# scripts/prm_opt/run_s26.py
 
 """
 Runs S26 forecast scenarios.
 """
 
 import pyomo.environ as pyo
-import pandas as pd
 
 from .ingest_s26 import ingest_s26
-from .ingest_stand_allocations import load_stand_allocations, build_stand_distribution
 from .build_jobs import build_jobs
 from .policy_s1 import apply_policy_s1
 from .params import build_tau_from_jobs, build_spin_minutes
 from .pyomo_model import build_pyomo_model
 from .config import PlanningToggles
+
+from .outputs import (
+    extract_summary,
+    extract_job_assignments,
+    extract_vehicle_allocations,
+    run_sanity_checks,
+)
+
 
 
 def run_s26_s1(
@@ -41,8 +47,9 @@ def run_s26_s1(
 
     jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
 
-    # Scenario 1 policy on forecast is a comparator only (features are synthetic)
-    jobs["s1_decision"] = jobs.index.map(apply_policy_s1(jobs))
+    decisions = apply_policy_s1(jobs)
+    jobs["s1_decision"] = jobs.index.map(decisions.get)
+
     return jobs
 
 
@@ -84,4 +91,19 @@ def run_s26_s2(
     solver = pyo.SolverFactory(solver_name)
     solver.solve(model)
 
-    return model, jobs
+    
+    summary = extract_summary(model, jobs)
+    job_df = extract_job_assignments(model, jobs)
+    vehicle_df = extract_vehicle_allocations(model)
+    checks = run_sanity_checks(job_df, vehicle_df)
+
+    return {
+        "model": model,
+        "jobs": jobs,
+        "summary": summary,
+        "job_assignments": job_df,
+        "vehicle_allocations": vehicle_df,
+        "sanity_checks": checks,
+    }
+
+
