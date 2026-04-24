@@ -71,6 +71,15 @@ def build_jobs(
         ).fillna(1)
 
 
+    
+    
+    # Fallback: if Job Start Time missing, use Scheduled Flight DT
+    if "Scheduled Flight DT" in x.columns:
+        x["Job Start Time"] = x["Job Start Time"].fillna(x["Scheduled Flight DT"])
+
+    x = x.dropna(subset=["Job Start Time"]).copy()
+
+
 
    
     # -------------------------
@@ -215,7 +224,9 @@ def build_jobs(
             "t",
             "s",
             "dir",
+            "zone",
             "Stand",
+            "class",
             "Airline Code",
             "needs_wc",
             "needs_vertical",

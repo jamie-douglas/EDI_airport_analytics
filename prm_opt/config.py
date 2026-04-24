@@ -35,6 +35,7 @@ class PlanningToggles:
     ferry_mini_reserved: dict = field(default_factory=dict)
     ferry_drv_reserved: dict = field(default_factory=dict)
 
+    max_late_mins: int = 120   # allow serving up to 2 hours past SLA (still penalised)
 
 
 
