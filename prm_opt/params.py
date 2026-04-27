@@ -17,6 +17,7 @@ from collections import defaultdict
 from typing import Dict, Tuple, Any, List
 
 import pandas as pd
+import math
 import numpy as np
 from .config import PlanningToggles, VEHICLE_MODELS
 
@@ -68,23 +69,50 @@ def build_tau_from_jobs(
 
 
 
+
 def build_spin_minutes(
     jobs: pd.DataFrame,
     spin_lock_threshold_mins: int = 50,
+    bucket_minutes: int = 15,
+    n_ambulifts: int = 11,   # <-- pass your real fleet count
 ) -> Dict[Any, float]:
     """
-    Spin lock capacity removed per time bucket.
+    Spin lock capacity removed per SERVICE time bucket.
 
-    With t/s split:
-    - Use 's' (original job-start bucket) if present so spin timing is not shifted earlier by preposition.
-    - Otherwise fall back to 't'.
+    Interpretation:
+    - Each spin event locks 1 ambulift for spin_lock_threshold_mins.
+    - That lock applies across multiple buckets (ceil(lock / bucket_minutes)).
+    - We translate locked ambulifts into removed minutes:
+        removed_minutes[b] = locked_amb[b] * bucket_minutes
+    - Cap removed minutes so it can never exceed total fleet minutes in a bucket.
     """
+
+    # Use 's' (scheduled) if present so spin timing isn't shifted by preposition.
     bucket_col = "s" if "s" in jobs.columns else "t"
 
+    # Ensure timestamps
+    s_ts = pd.to_datetime(jobs[bucket_col]).dt.floor(f"{bucket_minutes}min")
+
+    # We'll build locked ambulifts per bucket first
+    locked_amb: Dict[pd.Timestamp, int] = {}
+
+    # Number of buckets a spin occupies
+    lock_buckets = int(math.ceil(spin_lock_threshold_mins / bucket_minutes))
+
+    # For each job marked as spin, lock an ambulift for lock_buckets starting at its bucket time
+    # (This assumes each spin marker corresponds to an ambulift that becomes unavailable)
+    for start_time in s_ts[jobs["is_spin"] == 1]:
+        for k in range(lock_buckets):
+            b = start_time + pd.to_timedelta(k * bucket_minutes, unit="m")
+            locked_amb[b] = locked_amb.get(b, 0) + 1
+
+    # Convert locked ambulifts -> minutes removed and cap to physical max
+    cap_minutes = float(n_ambulifts * bucket_minutes)
     spin_removed: Dict[Any, float] = {}
-    for b, grp in jobs.groupby(bucket_col):
-        spin_count = int(grp["is_spin"].sum())
-        spin_removed[pd.to_datetime(b)] = float(spin_count * spin_lock_threshold_mins)
+
+    for b, locked in locked_amb.items():
+        removed = float(locked * bucket_minutes)
+        spin_removed[b] = min(removed, cap_minutes)
 
     return spin_removed
 

@@ -241,7 +241,8 @@ def build_jobs(
             "Turnaround PRM Count",
             "Concurrent Stress",
             "PRM Flight Count",
-            "Has Own Chair"
+            "Has Own Chair",
+            "IsAdhoc"
         ]
     ].reset_index(drop=True)
 

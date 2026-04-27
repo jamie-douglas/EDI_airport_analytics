@@ -167,6 +167,7 @@ def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
     """
     Build S1 baseline curves from policy decisions.
 
+    
     Returns:
       - ambulift_curve (per bucket)
       - minibus_curve  (per bucket)
@@ -177,25 +178,33 @@ def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
     if decision_col not in jobs.columns:
         raise ValueError(f"Missing {decision_col} in jobs")
 
-    # default 0
     jobs = jobs.copy()
     jobs["_amb"] = 0
     jobs["_mini"] = 0
     jobs["_push"] = 0
 
-    # Map policy outputs → vehicle use
-    # Current policy outputs: "No Vehicle", "Ambulift Only"
+    # Map decisions at job level
     jobs.loc[jobs[decision_col] == "Ambulift Only", "_amb"] = 1
-    # If you later add minibus/push decisions, extend mapping here:
-    # jobs.loc[jobs[decision_col] == "Minibus", "_mini"] = 1
-    # jobs.loc[jobs[decision_col] == "Push", "_push"] = 1
+    jobs.loc[jobs[decision_col] == "Mini Bus Only", "_mini"] = 1
 
-    # Aggregate per bucket
-    amb_curve = jobs.groupby(bucket_col)["_amb"].sum().sort_index()
-    mini_curve = jobs.groupby(bucket_col)["_mini"].sum().sort_index()
-    push_curve = jobs.groupby(bucket_col)["_push"].sum().sort_index()
+    jobs.loc[jobs[decision_col] == "Both", "_amb"] = 1
+    jobs.loc[jobs[decision_col] == "Both", "_mini"] = 1
 
-    # Drivers = 1 per ambulift + 1 per minibus (your rule)
+    jobs.loc[jobs[decision_col] == "Push", "_push"] = 1  # optional future
+
+    # Aggregate to flight-bucket so we count a dispatch once per flight per bucket
+    fb = (
+        jobs
+        .groupby([bucket_col, "flight_key"])[["_amb", "_mini", "_push"]]
+        .max()
+        .reset_index()
+    )
+
+    # Now sum across flights per bucket
+    amb_curve = fb.groupby(bucket_col)["_amb"].sum().sort_index()
+    mini_curve = fb.groupby(bucket_col)["_mini"].sum().sort_index()
+    push_curve = fb.groupby(bucket_col)["_push"].sum().sort_index()
+
     drv_curve = (amb_curve + mini_curve).astype(int)
 
     return {
@@ -204,6 +213,7 @@ def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
         "pusher_curve": push_curve,
         "driver_curve": drv_curve,
     }
+
 
 
 def baseline_s1_summary(jobs, curves, current_amb=None, current_mini=None):
