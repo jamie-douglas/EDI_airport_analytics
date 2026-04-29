@@ -54,12 +54,14 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
 def run_s25_s2(start, end, solver_name="highs", toggles: PlanningToggles = PlanningToggles()):
     df_prm_master = ingest_s25(start, end)
     jobs = build_jobs(df_prm_master, bucket="15min", toggles=toggles)
+    print(jobs.head())
 
     tau = build_tau_from_jobs(jobs, toggles)
 
     BUCKET_MINUTES = 15
 
     classes = build_vehicle_classes(include_future=False)
+    print(classes)
 
     N_AMB = sum(
         c["count"]

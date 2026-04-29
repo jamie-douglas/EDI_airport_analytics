@@ -135,36 +135,38 @@ def build_vehicle_classes(
         raise ValueError("VEHICLE_MODELS is empty in config.py. Populate fleet registry before running optimisation.")
 
 
-    def is_existing(spec):
-        return float(spec.get("capex_hr", 0.0)) == 0.0
+    classes: Dict[str, List[Dict]] = {"Amb": [], "Mini": []}
 
-    buckets = defaultdict(lambda: defaultdict(int))
+    # Current vehicles: each gets its own class_id as the model number
+    for model_num, spec in VEHICLE_MODELS.items():
+        vtype = spec["type"]
+        if float(spec.get("capex_hr", 0.0)) == 0.0:
+            classes[vtype].append({
+                "class_id": model_num,
+                "seatcap": int(spec["seatcap"]),
+                "wccap": int(spec["wccap"]),
+                "count": 1,
+            })
 
-    for spec in VEHICLE_MODELS.values():
-        if (not include_future) and (not is_existing(spec)):
-            continue
+    if include_future:
+        # Future vehicles: group by model type, unlimited count
+        future_models = {}
+        for model_num, spec in VEHICLE_MODELS.items():
+            vtype = spec["type"]
+            if float(spec.get("capex_hr", 0.0)) > 0.0:
+                key = model_num  # Use model type string as class_id
+                if key not in future_models:
+                    future_models[key] = {
+                        "class_id": key,
+                        "seatcap": int(spec["seatcap"]),
+                        "wccap": int(spec["wccap"]),
+                        "count": 1000,  # Arbitrary large number for unlimited
+                    }
+        for v in future_models.values():
+            classes[vtype].append(v)
 
-        vtype = spec["type"]  # "Amb" or "Mini"
-        seat = int(spec["seatcap"])
-        wc = int(spec["wccap"])
-        buckets[vtype][(seat, wc)] += 1
-
-    classes: Dict[str, List[Dict]] = {}
-
-    for vtype, combos in buckets.items():
-        out = []
-        for idx, ((seat, wc), cnt) in enumerate(sorted(combos.items())):
-            out.append(
-                {
-                    "class_id": f"{vtype}_C{idx}",
-                    "seatcap": seat,
-                    "wccap": wc,
-                    "count": int(cnt),
-                }
-            )
-        classes[vtype] = out
-
-    return classes
+    # Remove empty lists for types not present
+    return {k: v for k, v in classes.items() if v}
 
 
 # =========================================================
