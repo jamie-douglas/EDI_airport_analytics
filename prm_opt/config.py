@@ -68,7 +68,7 @@ VERTICAL_EXCEPTIONS: Set[Tuple[str, str]] = {
 # Gate 7 / 8 lift constraint
 # =========================================================
 
-LIFT_GATES: Set[str] = {"7", "8"}
+LIFT_STANDS: Set[str] = {"7", "8"}
 
 LIFT_CYCLE_MINS = 2.0          # minutes per WCH
 LIFT_CAPACITY_MINS = 60.0      # per hour bucket
@@ -93,32 +93,32 @@ WCHS_OWN_CHAIR_PROB: float = 0.109
 VEHICLE_MODELS: Dict[str, Dict] = {
 
     # ---------------- Ambulifts (current fleet) ----------------
-    "AMB_14111": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_14112": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_OMN135": {"type": "Amb", "seatcap": 3, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_OMN079": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_OMN080": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_14161": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_14162": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_14163": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79803": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79802": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79801": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79804": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79805": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
-    "AMB_79900": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 0},
+    "AMB_14111": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_14112": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_OMN135": {"type": "Amb", "seatcap": 3, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_OMN079": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_OMN080": {"type": "Amb", "seatcap": 6, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_14161": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_14162": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_14163": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79803": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79802": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79801": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79804": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79805": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
+    "AMB_79900": {"type": "Amb", "seatcap": 7, "wccap": 1, "staff": 2, "capex_hr": 500000 / (5 * 365 * 24), "is_future": False},
 
     # ---------------- Minibuses (current fleet) ----------------
-    "MB_WJ160DR": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 0},
-    "MB_WJ160DT": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 0},
-    "MB_WJ160FD": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 0},
+    "MB_WJ160DR": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 80000 / (5 * 365 * 24), "is_future": False},
+    "MB_WJ160DT": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 80000 / (5 * 365 * 24), "is_future": False},
+    "MB_WJ160FD": {"type": "Mini", "seatcap": 6, "wccap": 2, "staff": 2, "capex_hr": 80000 / (5 * 365 * 24), "is_future": False},
 
     # ---------------- Future purchase options ----------------
     "MB_EV_10": {"type": "Mini", "seatcap": 10, "wccap": 1, "staff": 2,
-                 "capex_hr": 80000 / (5 * 365 * 24)},
+                 "capex_hr": 80000 / (5 * 365 * 24), "is_future": True},
 
     "MB_EV_18": {"type": "Mini", "seatcap": 18, "wccap": 1, "staff": 2,
-                 "capex_hr": 80000 / (5 * 365 * 24)},
+                 "capex_hr": 80000 / (5 * 365 * 24), "is_future": True},
 }
 
 

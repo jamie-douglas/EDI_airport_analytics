@@ -112,7 +112,7 @@ def run_s25_s2(start, end, solver_name="highs", toggles: PlanningToggles = Plann
     #model.MiniWcCap.deactivate()
 
     # # 6. Maximum lateness
-    model.MaxLateCap.deactivate()
+    #model.MaxLateCap.deactivate()
                     
 
     # DO NOT set solver.config.stream_solver (not supported here)

@@ -45,7 +45,7 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
     # ARRIVALS
     # -------------------------
     arrivals = raw[
-        [
+        [   "TurnID",
             "Arr_Flight_No",
             "Arr_Scheduled_Date",
             "Arr_Operator",
@@ -69,7 +69,7 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
     # DEPARTURES
     # -------------------------
     departures = raw[
-        [
+        [   "TurnID",
             "Dep_Flight_No",
             "Dep_Scheduled_Date",
             "Dep_Operator",

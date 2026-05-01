@@ -118,29 +118,24 @@ def build_spin_minutes(
 
 
 
-
-def build_vehicle_classes(
-    include_future: bool = False,
-) -> Dict[str, List[Dict]]:
+def build_vehicle_classes(include_future: bool = False) -> Dict[str, List[Dict]]:
     """
     Build heterogeneous capacity classes from VEHICLE_MODELS.
 
-    Groups vehicles by:
-      - vehicle type
-      - seat capacity
-      - wheelchair capacity
+    Current fleet:
+      - each physical vehicle is its own class_id, count=1
+    Future options:
+      - each model type is a class_id, count=1000 (effectively unlimited)
     """
-    
     if not VEHICLE_MODELS:
         raise ValueError("VEHICLE_MODELS is empty in config.py. Populate fleet registry before running optimisation.")
 
-
     classes: Dict[str, List[Dict]] = {"Amb": [], "Mini": []}
 
-    # Current vehicles: each gets its own class_id as the model number
+    # Current vehicles: each entry is one physical unit unless marked is_future=True
     for model_num, spec in VEHICLE_MODELS.items():
         vtype = spec["type"]
-        if float(spec.get("capex_hr", 0.0)) == 0.0:
+        if not bool(spec.get("is_future", False)):
             classes[vtype].append({
                 "class_id": model_num,
                 "seatcap": int(spec["seatcap"]),
@@ -150,23 +145,23 @@ def build_vehicle_classes(
 
     if include_future:
         # Future vehicles: group by model type, unlimited count
-        future_models = {}
+        future_models: Dict[tuple, Dict] = {}
         for model_num, spec in VEHICLE_MODELS.items():
             vtype = spec["type"]
-            if float(spec.get("capex_hr", 0.0)) > 0.0:
-                key = model_num  # Use model type string as class_id
+            if bool(spec.get("is_future", False)):
+                key = (vtype, model_num)
                 if key not in future_models:
                     future_models[key] = {
-                        "class_id": key,
+                        "class_id": model_num,
                         "seatcap": int(spec["seatcap"]),
                         "wccap": int(spec["wccap"]),
-                        "count": 1000,  # Arbitrary large number for unlimited
+                        "count": 1000,
                     }
-        for v in future_models.values():
+        for (vtype, _), v in future_models.items():
             classes[vtype].append(v)
 
-    # Remove empty lists for types not present
     return {k: v for k, v in classes.items() if v}
+
 
 
 # =========================================================

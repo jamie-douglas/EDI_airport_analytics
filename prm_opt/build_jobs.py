@@ -20,7 +20,7 @@ import numpy as np
 from .config import (
     PlanningToggles,
     SAFETY_STANDS,
-    LIFT_GATES,
+    LIFT_STANDS,
     VERTICAL_EXCEPTIONS,
     STAND_ZONES,
 )
@@ -97,6 +97,47 @@ def build_jobs(
     x["release_time"] = x["Job Start Time"] - pd.to_timedelta(prepos, unit="m")
     x["t"] = x["release_time"].dt.floor(bucket)
     x["s"] = x["Job Start Time"].dt.floor(bucket)
+
+    
+    
+    # -------------------------
+    # SLA start time (works for S25 + S26)
+    # -------------------------
+    # S25 columns: "Chocks DT", "Scheduled Flight DT"
+    # S26 columns: "Chocks_Est", "ScheduledDateTime_Local"
+    if "Chocks DT" in x.columns:
+        chocks_col = "Chocks DT"
+    elif "Chocks_Est" in x.columns:
+        chocks_col = "Chocks_Est"
+    else:
+        chocks_col = None
+
+    if "Scheduled Flight DT" in x.columns:
+        sched_col = "Scheduled Flight DT"
+    elif "ScheduledDateTime_Local" in x.columns:
+        sched_col = "ScheduledDateTime_Local"
+    else:
+        sched_col = "Job Start Time"  # fallback
+
+    if chocks_col is not None:
+        x["sla_start_time"] = np.where(
+            x["A/D"] == "A",
+            pd.to_datetime(x[chocks_col]).fillna(pd.to_datetime(x[sched_col])),
+            pd.to_datetime(x[sched_col]),
+        )
+    else:
+        x["sla_start_time"] = pd.to_datetime(x[sched_col])
+
+    x["sla_start_time"] = pd.to_datetime(x["sla_start_time"])
+
+    # Optional hard deadline for departures
+    dep_buffer = getattr(toggles, "dep_boarding_buffer_mins", 0)
+    x["hard_deadline_time"] = np.where(
+        x["A/D"] == "D",
+        x["Scheduled Flight DT"] - pd.to_timedelta(dep_buffer, unit="m"),
+        pd.NaT
+    )
+    x["hard_deadline_time"] = pd.to_datetime(x["hard_deadline_time"])
 
 
     # -------------------------
@@ -177,10 +218,14 @@ def build_jobs(
     # -------------------------
     # Gate 7/8 bottleneck flag
     # -------------------------
-    if "Departure Gate" in x.columns:
-        x["lift_gate"] = x["Departure Gate"].astype(str).isin(LIFT_GATES).astype(int)
-    else:
-        x["lift_gate"] = 0
+    
+    x["stand_clean"] = (
+        x["Stand"].astype(str)
+        .str.replace("-T1", "", regex=False)
+        .str.strip()
+    )
+    x["lift_gate"] = x["stand_clean"].isin(LIFT_STANDS).astype(int)
+
 
     # -------------------------
     # SLA limits with buffer
@@ -236,13 +281,17 @@ def build_jobs(
             "base_duration_mins",
             "is_spin",
             "SSR numeric",
+            "SSR Code",
             "IsEffectiveRemote",
             "IsArrival",
             "Turnaround PRM Count",
             "Concurrent Stress",
             "PRM Flight Count",
             "Has Own Chair",
-            "IsAdhoc"
+            "IsAdhoc",
+            "Chocks DT",
+            "Scheduled Flight DT",
+
         ]
     ].reset_index(drop=True)
 

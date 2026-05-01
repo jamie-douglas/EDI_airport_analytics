@@ -159,6 +159,7 @@ def prm_breakdowns (prm_df: pd.DataFrame, ssr_col: str = "SSR Code", booking_col
     by_ssr["% of PRM Demand"] *= 100.0
     by_ssr["Total PRM"] = int(total_prm_unique)
     by_ssr = by_ssr.drop(columns = ["_denom_total"]).sort_values(ssr_col).reset_index(drop=True)
+    by_ssr = by_ssr.sort_values("% of PRM Demand", ascending=False).reset_index(drop=True)
 
     # #By SSR Code (Adjusted)
     # by_ssr = _count_pairs(eff, ssr_col, "Unique Count")

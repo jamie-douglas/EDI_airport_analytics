@@ -250,6 +250,8 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
                 "Concurrent Stress",
                 "Minutes on Chocks",
                 "PRM Flight Count",
+                "Chocks DT",
+                "Scheduled Flight DT",
             ]
         ],
         on=["Flight Number", "Airline Code", "Day"],

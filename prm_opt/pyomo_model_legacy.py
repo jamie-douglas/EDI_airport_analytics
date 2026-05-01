@@ -123,6 +123,11 @@ def build_pyomo_model(
     # Use the job-specific SLA limit already computed in build_jobs
     L_j = {j: float(jobs.loc[j, "sla_limit"]) for j in jobs.index}
 
+    
+    sla_start_b = {j: pd.to_datetime(jobs.loc[j, "sla_start_time"]).floor(f"{BUCKET_MINUTES}min") for j in jobs.index}
+    sla_start_idx = {j: b_to_idx[sla_start_b[j]] for j in jobs.index}
+
+
 
     # -----------------------------
     # Vehicle classes (heterogeneous fleet)
@@ -192,24 +197,26 @@ def build_pyomo_model(
         
         sla_pen = LAMBDA * sum(m.y[j] for j in m.J)
 
-        # Small regularizer so staff doesn't float arbitrarily high
-        STAFF_W = 1.0
-        staff_reg = STAFF_W * sum(m.H_drv[b] + m.H_vehag[b] + m.H_push[b] for b in m.B)
-
-        future_vehicle_keys = [
-            (vtype, c["class_id"])
-            for vtype, lst in classes.items()
-            for c in lst
-            if VEHICLE_MODELS.get(c["class_id"].replace("_C", "_"), {}).get("capex_hr", 0) > 0
-        ]
-
-        FUTURE_VEHICLE_PENALTY = sum(
-            VEHICLE_MODELS.get(cid.replace("_C", "_"), {}).get("capex_hr", 0) *
-            sum(m.k[(vtype, cid), fb] for fb in m.FB)
-            for (vtype, cid) in future_vehicle_keys
+        
+        # Wage-weighted staffing penalty (swap to real £/hr later)
+        WAGE = {"Drv": 1.0, "VehAg": 1.0, "Push": 1.0}
+        staff_reg = sum(
+            WAGE["Drv"]  * m.H_drv[b] +
+            WAGE["VehAg"]* m.H_vehag[b] +
+            WAGE["Push"] * m.H_push[b]
+            for b in m.B
         )
 
-        return trips + soft + sla_pen + staff_reg + FUTURE_VEHICLE_PENALTY
+        # Capex penalty for ALL vehicles (current + future)
+        # NOTE: This assumes VEHICLE_MODELS has capex_hr for each class_id (current and future)
+        VEHICLE_CAPEX = sum(
+            float(VEHICLE_MODELS.get(cid, {}).get("capex_hr", 0.0)) *
+            sum(m.k[(vtype, cid), fb] for fb in m.FB)
+            for (vtype, cid) in m.VC
+        )
+
+        return trips + soft + sla_pen + staff_reg + VEHICLE_CAPEX
+
 
 
 
@@ -252,24 +259,55 @@ def build_pyomo_model(
         return pyo.Constraint.Skip
     m.NoServiceBeforeRelease = pyo.Constraint(m.J, m.B, rule=no_service_before_release)
 
+    
+    
+    hard_deadline_idx = {}
+    has_deadline = "hard_deadline_time" in jobs.columns
+
+    for j in jobs.index:
+        if not has_deadline:
+            hard_deadline_idx[j] = None
+            continue
+        t_dead = jobs.loc[j, "hard_deadline_time"]
+        hard_deadline_idx[j] = None if pd.isna(t_dead) else b_to_idx[pd.to_datetime(t_dead).floor(f"{BUCKET_MINUTES}min")]
+
+
+    def no_service_after_deadline(m, j, b):
+        idx = hard_deadline_idx.get(j, None)
+        if idx is None:
+            return pyo.Constraint.Skip
+        if b_to_idx[b] > idx:
+            return m.A[j, b] == 0
+        return pyo.Constraint.Skip
+
+    m.NoServiceAfterDeadline = pyo.Constraint(m.J, m.B, rule=no_service_after_deadline)
+
+
     # SLA breach definition: delay <= L_j + M*y
     def sla_rule(m, j):
-        delay = sum((b_to_idx[b] - release_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)
+        delay = sum((b_to_idx[b] - sla_start_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)
         return delay <= L_j[j] + M_BIG * m.y[j]
     m.SLA = pyo.Constraint(m.J, rule=sla_rule)
 
     
-    if max_late_mins >= 0:###
-        def max_late_cap(m, j):###
-            delay = sum((b_to_idx[b] - release_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)###
-            return delay <= L_j[j] + max_late_mins###
-        m.MaxLateCap = pyo.Constraint(m.J, rule=max_late_cap)###
+    if max_late_mins >= 0:
+        def max_late_cap(m, j):
+            
+            # optional: only enforce max lateness for arrivals (recommended if departures get a hard deadline)
+            if str(jobs.loc[j, "dir"]) != "A":
+                 return pyo.Constraint.Skip
+
+            delay = sum((b_to_idx[b] - sla_start_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)
+            return delay <= L_j[j] + max_late_mins
+
+        m.MaxLateCap = pyo.Constraint(m.J, rule=max_late_cap)
 
 
     # Safety stands: disallow push unless Ryanair
     def safety_rule(m, j):
-        if int(jobs.loc[j, "safety_stand"]) == 1 and str(jobs.loc[j, "Airline Code"]) not in RYANAIR_CODES:
-            return m.x[j, "Push"] == 0
+        if int(jobs.loc[j, "safety_stand"]) == 1 and int(jobs.loc[j, "needs_vertical"]) ==1:
+            if str(jobs.loc[j, "Airline Code"]) not in RYANAIR_CODES:
+                return m.x[j, "Push"] == 0
         return pyo.Constraint.Skip
     m.SafetyStand = pyo.Constraint(m.J, rule=safety_rule)
 
@@ -491,27 +529,5 @@ def build_pyomo_model(
 
     m.LiftCap = pyo.Constraint(m.B, rule=lift_cap)
 
-    # --- 80% ultilisation constraint to prevent over-reliance on future vehicles (can be relaxed if needed) ---
-    CURRENT_UTIL_THRESHOLD = 0.8
-
-    for vtype, lst in classes.items():
-        current_cids = [c["class_id"] for c in lst if VEHICLE_MODELS.get(c["class_id"].replace("_C", "_"), {}).get("capex_hr", 0) == 0]
-        future_cids = [c["class_id"] for c in lst if VEHICLE_MODELS.get(c["class_id"].replace("_C", "_"), {}).get("capex_hr", 0) > 0]
-        for b in m.B:
-            def future_vehicle_constraint(m, vtype=vtype, current_cids=current_cids, future_cids=future_cids, b=b):
-                current_used = sum(
-                    m.k[(vtype, cid), (f, b)]
-                    for cid in current_cids for f in m.F if (f, b) in m.FB
-                )
-                future_used = sum(
-                    m.k[(vtype, cid), (f, b)]
-                    for cid in future_cids for f in m.F if (f, b) in m.FB
-                )
-                total_current = sum(
-                    m.count[(vtype, cid)]
-                    for cid in current_cids
-                )
-                return future_used <= 1e6 * (current_used >= CURRENT_UTIL_THRESHOLD * total_current)
-            setattr(m, f"FutureVehicleConstraint_{vtype}_{str(b)}", pyo.Constraint(rule=future_vehicle_constraint))
 
     return m

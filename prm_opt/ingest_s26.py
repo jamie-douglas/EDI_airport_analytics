@@ -7,7 +7,7 @@ import pandas as pd
 from datetime import timedelta
 
 from modules.utils.query import query
-from prm_opt.config import STAND_ZONES, WCHS_OWN_CHAIR_PROB
+from prm_opt.config import STAND_ZONES, WCHS_OWN_CHAIR_PROB, NO_JETBRIDGE_AIRLINES
 
 
 def load_future_flights(start: str, end: str) -> pd.DataFrame:
@@ -125,7 +125,11 @@ def pair_turnarounds(df_flights: pd.DataFrame, max_gap_mins: int = 240) -> pd.Da
       - For each arrival, find earliest subsequent departure with same Airline and Class within max_gap.
       - Each departure can only be paired once.
     """
-    df = df_flights.sort_values("Chocks_Est").reset_index(drop=True)
+    
+    df = df_flights.sort_values("Chocks_Est").copy()
+    df["orig_idx"] = df.index
+    df = df.reset_index(drop=True)
+
 
     used_dep = set()
     pair_id = [-1] * len(df)
@@ -156,8 +160,13 @@ def pair_turnarounds(df_flights: pd.DataFrame, max_gap_mins: int = 240) -> pd.Da
             pair_id[chosen] = pid
             pid += 1
 
+    
     df["turn_pair_id"] = pair_id
-    return df
+    out = df.set_index("orig_idx")[["turn_pair_id"]]
+    return df_flights.join(out, how="left").assign(
+        turn_pair_id=lambda x: x["turn_pair_id"].fillna(-1).astype(int)
+    )
+
 
 
 def ingest_s26(
@@ -238,8 +247,41 @@ def ingest_s26(
     # Concurrent stress (computed AFTER stochastic chocks)
     df_flights["Concurrent Stress"] = compute_concurrent_stress(df_flights, chocks_col="Chocks_Est")
 
-    # Turnaround pairing (A/D pair)
-    df_flights = pair_turnarounds(df_flights, max_gap_mins=turnaround_max_gap_mins)
+    
+    # ---------------------------------------------------------
+    # Turnaround pairing: use TurnID from stand plan when available,
+    # otherwise fall back to heuristic pairing.
+    # ---------------------------------------------------------
+
+    # 1) Bring TurnID onto df_flights (matches how assign_stand does its exact lookup)
+    if stand_actuals is not None and "TurnID" in stand_actuals.columns:
+        turn_map = stand_actuals[["FlightNumber", "ScheduledDateTime_Local", "dir", "TurnID"]].drop_duplicates()
+        df_flights = df_flights.merge(
+            turn_map,
+            left_on=["FlightNumber", "ScheduledDateTime_Local", "dir"],
+            right_on=["FlightNumber", "ScheduledDateTime_Local", "dir"],
+            how="left",
+        )
+    else:
+        df_flights["TurnID"] = None
+
+    # 2) Initialise turn_pair_id
+    df_flights["turn_pair_id"] = -1
+
+    # 3) Deterministic pairing using TurnID (for months you have the plan)
+    has_turn = df_flights["TurnID"].notna()
+    if has_turn.any():
+        codes, _ = pd.factorize(df_flights.loc[has_turn, "TurnID"])
+        df_flights.loc[has_turn, "turn_pair_id"] = codes
+
+    # 4) Heuristic fallback for flights with no TurnID
+    remaining = df_flights[df_flights["turn_pair_id"] == -1].copy()
+    if len(remaining) > 0:
+        remaining = pair_turnarounds(remaining, max_gap_mins=turnaround_max_gap_mins)
+        offset = int(df_flights["turn_pair_id"].max()) + 1
+        remaining.loc[remaining["turn_pair_id"] >= 0, "turn_pair_id"] += offset
+        df_flights.loc[remaining.index, "turn_pair_id"] = remaining["turn_pair_id"]
+
 
     # Lookups for penetration and SSR mix
     pen_lookup = penetration_rates.set_index(["Airline Code", "CountryName"])["penetration"].to_dict()
@@ -391,7 +433,7 @@ def ingest_s26(
                 "Chocks_Est": f["Chocks_Est"],
                 "SSR Code": ssr,
                 "Has Own Chair": has_own,
-                "IsEffectiveRemote": int(str(stand) not in STAND_ZONES),
+                "IsEffectiveRemote": int(airline in NO_JETBRIDGE_AIRLINES),
                 "PRM Flight Count": prm_flight_count,
                 "Concurrent Stress": concurrent_stress,
                 "Turnaround PRM Count": turnaround_prm_count,
