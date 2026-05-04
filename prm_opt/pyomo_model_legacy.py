@@ -81,21 +81,37 @@ def build_pyomo_model(
     # - jobs["t"] can be earlier than jobs["s"] (preposition)
     # - model must still allow service at the normal "s" times
     # - model must allow delays up to SLA (or breaches)
-    #
-    # So we build a continuous bucket timeline from min(t) to max(s) + slack.
+
+    
     t_min = pd.to_datetime(jobs["t"]).min()
     s_max = pd.to_datetime(jobs["s"]).max()
     max_sla = float(pd.to_numeric(jobs["sla_limit"]).max())
-    # slack_buckets = int((max_sla // BUCKET_MINUTES) + 2)
-    
-    # extend horizon to allow late service beyond SLA when needed
-    extra_mins = max_sla + float(max_late_mins) ###
-    slack_buckets = int((extra_mins // BUCKET_MINUTES) + 2)###
 
-    end_time = s_max + pd.to_timedelta(slack_buckets * BUCKET_MINUTES, unit="m")
+    # include SLA start anchors in horizon start if present
+    if "sla_start_time" in jobs.columns:
+        sla_min = pd.to_datetime(jobs["sla_start_time"]).dropna().min()
+    else:
+        sla_min = t_min
 
-    B_list = list(pd.date_range(start=t_min, end=end_time, freq=f"{BUCKET_MINUTES}min"))
+    # include hard deadlines in horizon end if present
+    if "hard_deadline_time" in jobs.columns:
+        deadline_max = pd.to_datetime(jobs["hard_deadline_time"]).dropna().max()
+    else:
+        deadline_max = s_max
+
+    # Start at the earliest relevant time bucket
+    start_time = min(t_min, sla_min).floor(f"{BUCKET_MINUTES}min")
+
+    # End at latest scheduled/deadline plus enough slack for SLA + max_late
+    extra_mins = max_sla + float(max_late_mins)
+    slack_buckets = int((extra_mins // BUCKET_MINUTES) + 2)
+
+    end_anchor = max(s_max, deadline_max).floor(f"{BUCKET_MINUTES}min")
+    end_time = end_anchor + pd.to_timedelta(slack_buckets * BUCKET_MINUTES, unit="m")
+
+    B_list = list(pd.date_range(start=start_time, end=end_time, freq=f"{BUCKET_MINUTES}min"))
     b_to_idx = {b: i for i, b in enumerate(B_list)}
+
 
     # -----------------------------
     # Sets
@@ -124,8 +140,22 @@ def build_pyomo_model(
     L_j = {j: float(jobs.loc[j, "sla_limit"]) for j in jobs.index}
 
     
-    sla_start_b = {j: pd.to_datetime(jobs.loc[j, "sla_start_time"]).floor(f"{BUCKET_MINUTES}min") for j in jobs.index}
+    
+    # Robust SLA start bucket: fall back to scheduled bucket "s" if sla_start_time is missing
+    sla_start_b = {}
+    for j in jobs.index:
+        ts = jobs.loc[j, "sla_start_time"] if "sla_start_time" in jobs.columns else pd.NaT
+
+        # If missing, fall back to scheduled bucket 's' (best operational fallback)
+        if pd.isna(ts):
+            ts = jobs.loc[j, "s"] if "s" in jobs.columns else jobs.loc[j, "t"]
+
+        # Floor to bucket and store
+        sla_start_b[j] = pd.to_datetime(ts).floor(f"{BUCKET_MINUTES}min")
+
+    # Now safe to index
     sla_start_idx = {j: b_to_idx[sla_start_b[j]] for j in jobs.index}
+
 
 
 

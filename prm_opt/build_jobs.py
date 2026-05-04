@@ -128,7 +128,10 @@ def build_jobs(
     else:
         x["sla_start_time"] = pd.to_datetime(x[sched_col])
 
+    
+    x["sla_start_time"] = x["sla_start_time"].fillna(x["Job Start Time"])
     x["sla_start_time"] = pd.to_datetime(x["sla_start_time"])
+
 
     # Optional hard deadline for departures
     dep_buffer = getattr(toggles, "dep_boarding_buffer_mins", 0)
@@ -291,7 +294,8 @@ def build_jobs(
             "IsAdhoc",
             "Chocks DT",
             "Scheduled Flight DT",
-
+            "sla_start_time",
+            "hard_deadline_time",
         ]
     ].reset_index(drop=True)
 

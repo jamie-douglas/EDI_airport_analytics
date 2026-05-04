@@ -56,6 +56,12 @@ def run_s25_s2(start, end, solver_name="highs", toggles: PlanningToggles = Plann
     jobs = build_jobs(df_prm_master, bucket="15min", toggles=toggles)
     print(jobs.head())
 
+    
+    print("Missing sla_start_time:", jobs["sla_start_time"].isna().sum())
+    print("Missing Scheduled Flight DT:", jobs["Scheduled Flight DT"].isna().sum())
+    print("Missing Chocks DT:", jobs["Chocks DT"].isna().sum())
+
+
     tau = build_tau_from_jobs(jobs, toggles)
 
     BUCKET_MINUTES = 15
