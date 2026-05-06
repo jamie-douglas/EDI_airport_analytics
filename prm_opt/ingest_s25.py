@@ -177,6 +177,30 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     df_prm = load_prm_data(start, end)
     df_prm["SSR numeric"] = df_prm["SSR Code"].apply(map_ssr)
 
+    
+    # segment-level active busy minutes (row-by-row)
+    df_prm["segment_mins"] = (df_prm["Job End Time"] - df_prm["Job Start Time"]).dt.total_seconds() / 60.0
+    df_prm["segment_mins"] = df_prm["segment_mins"].clip(lower=0)
+
+    # typical busy mins by SSR+dir+vehicle
+    veh_svc = (
+        df_prm.groupby(["SSR Code", "A/D", "Vehicle Type"])["segment_mins"]
+            .median()
+            .reset_index()
+    )
+
+    veh_svc_wide = (
+        veh_svc.pivot_table(index=["SSR Code", "A/D"], columns="Vehicle Type", values="segment_mins", aggfunc="first")
+            .reset_index()
+    )
+
+    veh_svc_wide["tau_amb_mins"]  = veh_svc_wide.get("Ambulift", 0.0)
+    veh_svc_wide["tau_mini_mins"] = veh_svc_wide.get("Mini Bus", 0.0)
+    veh_svc_wide["tau_push_mins"] = veh_svc_wide.get("No Vehicle", 0.0)
+
+    veh_svc_wide = veh_svc_wide[["SSR Code", "A/D", "tau_amb_mins", "tau_mini_mins", "tau_push_mins"]]
+
+
     # Passenger-level flags 
     df_prm_flags = passenger_level_flags(df_prm)
 
@@ -224,6 +248,19 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         .reset_index()
     )
 
+    
+    df_prm_grouped = df_prm_grouped.merge(
+        veh_svc_wide,
+        on=["SSR Code", "A/D"],
+        how="left",
+    )
+
+    # fallbacks if any SSR+dir combo is missing
+    df_prm_grouped["tau_amb_mins"]  = df_prm_grouped["tau_amb_mins"].fillna(20.0)
+    df_prm_grouped["tau_mini_mins"] = df_prm_grouped["tau_mini_mins"].fillna(20.0)
+    df_prm_grouped["tau_push_mins"] = df_prm_grouped["tau_push_mins"].fillna(20.0)
+
+
     # PRM Flight Count
     flight_prm_count = (
         df_prm_flags.groupby(["Flight Number", "Airline Code", "Day"])[
@@ -239,23 +276,197 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         how="left",
     ).fillna({"PRM Flight Count": 0})
 
-    # Merge passenger + flight
+    
+
+
+        
+    # Merge passenger + flight (robust: join on scheduled time and direction, not Day)
     df_prm_master = df_prm_grouped.merge(
         df_flights[
             [
                 "Flight Number",
                 "Airline Code",
-                "Day",
+                "A/D",
+                "Scheduled Flight DT",
                 "IsEffectiveRemote",
                 "Concurrent Stress",
                 "Minutes on Chocks",
                 "PRM Flight Count",
                 "Chocks DT",
             ]
-        ],
-        on=["Flight Number", "Airline Code", "Day"],
+        ].drop_duplicates(subset=["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"]),
+        on=["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"],
         how="left",
+        validate="m:1",  # optional but recommended
     )
+
+
+
+    # # Merge passenger + flight
+    # df_prm_master = df_prm_grouped.merge(
+    #     df_flights[
+    #         [
+    #             "Flight Number",
+    #             "Airline Code",
+    #             "Day",
+    #             "IsEffectiveRemote",
+    #             "Concurrent Stress",
+    #             "Minutes on Chocks",
+    #             "PRM Flight Count",
+    #             "Chocks DT",
+    #         ]
+    #     ],
+    #     on=["Flight Number", "Airline Code", "Day"],
+    #     how="left",
+    # )
+
+   
+   
+    # ==========================================================
+    # Unmatched Flight Diagnostics & Filtering
+    # ----------------------------------------------------------
+    # Purpose:
+    # 1) Keep only PRM records within the requested run window (by Scheduled Flight DT).
+    # 2) Diagnose why some PRM flight keys cannot be linked to FlightPerformance.
+    # 3) Optionally drop PRM rows linked to "unresolvable" flight keys so the optimiser
+    #    operates only on records anchored to flight timing (e.g., Chocks DT).
+    #
+    # Definitions:
+    # - "Unmatched" = PRM row has no joined Chocks DT after merging to df_flights.
+    # - We classify unmatched keys into:
+    #   A) no_flight_candidate: no FlightPerformance row exists for the same airline+flight+A/D
+    #   B) scheduled_dt_mismatch: a FlightPerformance candidate exists for airline+flight+A/D,
+    #      but Scheduled Flight DT differs (often repeated flight numbers on different days)
+    #   C) missing_scheduled_dt_in_prm: PRM row has no Scheduled Flight DT
+    # ==========================================================
+
+    # -------------------------
+    # 0) Filter PRM records to the run window (Scheduled Flight DT)
+    # -------------------------
+    run_start = pd.to_datetime(start)
+    run_end = pd.to_datetime(end)
+
+    # Keep rows where Scheduled Flight DT is known and inside [start, end)
+    # (This removes out-of-window scheduled flights such as 29-03-2025 when your run starts later.)
+    df_prm_master = df_prm_master[
+        df_prm_master["Scheduled Flight DT"].notna()
+        & (df_prm_master["Scheduled Flight DT"] >= run_start)
+        & (df_prm_master["Scheduled Flight DT"] < run_end)
+    ].copy()
+
+    # -------------------------
+    # 1) Identify unmatched rows (join failed => missing Chocks DT)
+    # -------------------------
+    unmatched_rows = df_prm_master[df_prm_master["Chocks DT"].isna()].copy()
+    print("\nUnmatched passenger rows after merge (missing Chocks DT):", len(unmatched_rows))
+
+    key_cols = ["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT"]
+    unmatched_keys = unmatched_rows[key_cols].drop_duplicates().copy()
+    print("Unique unmatched flight keys:", len(unmatched_keys))
+
+    if len(unmatched_keys) > 0:
+        # -------------------------
+        # 2) Candidate search ignoring Scheduled Flight DT (diagnosis)
+        # -------------------------
+        cand = unmatched_keys.merge(
+            df_flights[["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT", "Chocks DT"]],
+            on=["Airline Code", "Flight Number", "A/D"],
+            how="left",
+            suffixes=("_prm", "_flt"),
+        )
+
+        # If Scheduled Flight DT on the flight side is missing, there are no candidates at all
+        cand["has_candidate"] = cand["Scheduled Flight DT_flt"].notna()
+
+        # Scheduled-time delta (minutes) for candidate rows
+        cand["delta_mins"] = (
+            cand["Scheduled Flight DT_flt"] - cand["Scheduled Flight DT_prm"]
+        ).dt.total_seconds() / 60.0
+        cand["abs_delta_mins"] = cand["delta_mins"].abs()
+
+        # Closest candidate per unmatched key (if any candidates exist)
+        closest = (
+            cand[cand["has_candidate"]]
+            .sort_values("abs_delta_mins")
+            .groupby(["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT_prm"], as_index=False)
+            .first()
+        )
+
+        # -------------------------
+        # 3) Build a reason-coded report per unmatched key
+        # -------------------------
+        reason = unmatched_keys.rename(columns={"Scheduled Flight DT": "Scheduled Flight DT_prm"}).copy()
+        reason["reason"] = "unknown"
+
+        # A) missing scheduled dt in PRM (rare after window filter, but kept for safety)
+        reason.loc[reason["Scheduled Flight DT_prm"].isna(), "reason"] = "missing_scheduled_dt_in_prm"
+
+        # B) no candidates (same airline+flight+A/D not present in df_flights)
+        no_cand = (
+            cand[~cand["has_candidate"]][["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT_prm"]]
+            .drop_duplicates()
+        )
+        no_cand["reason"] = "no_flight_candidate"
+
+        reason = reason.merge(
+            no_cand,
+            on=["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT_prm"],
+            how="left",
+            suffixes=("", "_r"),
+        )
+        reason["reason"] = reason["reason_r"].combine_first(reason["reason"])
+        reason.drop(columns=["reason_r"], inplace=True)
+
+        # C) candidates exist but scheduled dt mismatch (store closest match info)
+        reason = reason.merge(
+            closest[[
+                "Airline Code", "Flight Number", "A/D",
+                "Scheduled Flight DT_prm", "Scheduled Flight DT_flt",
+                "delta_mins"
+            ]],
+            on=["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT_prm"],
+            how="left",
+        )
+
+        mask_has = reason["Scheduled Flight DT_flt"].notna()
+        mask_exact = mask_has & (reason["delta_mins"].abs() < 0.5)
+        mask_mismatch = mask_has & ~mask_exact
+
+        reason.loc[mask_exact, "reason"] = "exact_match_should_have_joined"
+        reason.loc[mask_mismatch, "reason"] = "scheduled_dt_mismatch"
+
+        print("\nUnmatched key reasons:")
+        print(reason["reason"].value_counts(dropna=False))
+
+        print("\nSample unmatched keys with reasons (top 50):")
+        print(reason.sort_values(["reason", "Airline Code", "Scheduled Flight DT_prm"]).head(50))
+
+        # -------------------------
+        # 4) Drop categories you do not want downstream
+        # -------------------------
+        drop_reasons = {"no_flight_candidate", "scheduled_dt_mismatch"}
+
+        df_prm_master = df_prm_master.merge(
+            reason.rename(columns={"Scheduled Flight DT_prm": "Scheduled Flight DT"})[
+                ["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT", "reason"]
+            ],
+            on=["Airline Code", "Flight Number", "A/D", "Scheduled Flight DT"],
+            how="left",
+        )
+
+        before = len(df_prm_master)
+        df_prm_master = df_prm_master[
+            df_prm_master["reason"].isna() | ~df_prm_master["reason"].isin(drop_reasons)
+        ].copy()
+        after = len(df_prm_master)
+
+        print(f"\nDropped {before - after} passenger rows due to reasons {drop_reasons}")
+
+        df_prm_master.drop(columns=["reason"], inplace=True)
+
+
+
+    # -------------------------
 
     # Turnaround PRM Count (faithful logic)
     arrivals = df_flights[df_flights["A/D"] == "A"][

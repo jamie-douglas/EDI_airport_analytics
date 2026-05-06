@@ -30,12 +30,18 @@ class PlanningToggles:
     preposition_departure_mins: int = 5
 
     
+       
+    # Spillover control: max number of buckets a single job’s minutes can span
+    spill_bucket_cap: int = 12   # 12 * 15min = 3 hours
+
+    # Standby (handover) minutes — applied only for combined jobs (NOT if horizontal is Amb)
+    standby_dep_vert_mins: float = 5.0   # departures: standby on vertical side
+    standby_arr_horiz_mins: float = 5.0  # arrivals: standby on horizontal side
+
     # OPTIONAL placeholders for ferrying/break inefficiency later
     # {bucket_timestamp: 1} means reserve 1 unit in that bucket
     ferry_mini_reserved: dict = field(default_factory=dict)
     ferry_drv_reserved: dict = field(default_factory=dict)
-
-    max_late_mins: int = 120   # allow serving up to 2 hours past SLA (still penalised)
 
 
 

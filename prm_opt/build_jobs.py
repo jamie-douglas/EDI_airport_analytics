@@ -133,14 +133,33 @@ def build_jobs(
     x["sla_start_time"] = pd.to_datetime(x["sla_start_time"])
 
 
-    # Optional hard deadline for departures
-    dep_buffer = getattr(toggles, "dep_boarding_buffer_mins", 0)
+   
+    # -------------------------
+    # Hard deadline time (departures): never earlier than release_time
+    # -------------------------
+    dep_buffer = int(getattr(toggles, "dep_boarding_buffer_mins", 0) or 0)
+
+    # Choose scheduled column name robustly (S25 vs S26)
+    if "Scheduled Flight DT" in x.columns:
+        sched_col = "Scheduled Flight DT"
+    elif "ScheduledDateTime_Local" in x.columns:
+        sched_col = "ScheduledDateTime_Local"
+    else:
+        sched_col = "Job Start Time"
+
+    sched = pd.to_datetime(x[sched_col])
+
+    # "Raw" deadline: scheduled minus buffer (buffer=0 means scheduled)
+    deadline_raw = sched - pd.to_timedelta(dep_buffer, unit="m")
+
+    # Ensure feasibility: deadline cannot be earlier than release_time
     x["hard_deadline_time"] = np.where(
         x["A/D"] == "D",
-        x["Scheduled Flight DT"] - pd.to_timedelta(dep_buffer, unit="m"),
-        pd.NaT
+        np.maximum(pd.to_datetime(deadline_raw), pd.to_datetime(x["release_time"])),
+        pd.NaT,
     )
     x["hard_deadline_time"] = pd.to_datetime(x["hard_deadline_time"])
+
 
 
     # -------------------------
@@ -296,6 +315,9 @@ def build_jobs(
             "Scheduled Flight DT",
             "sla_start_time",
             "hard_deadline_time",
+            "tau_amb_mins",
+            "tau_mini_mins",
+            "tau_push_mins",
         ]
     ].reset_index(drop=True)
 
