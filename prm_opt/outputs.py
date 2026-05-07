@@ -45,27 +45,28 @@ def extract_job_assignments(model, jobs):
 # =========================================================
 # B) VEHICLE ALLOCATION (RAW, BY FLIGHT & BUCKET)
 # =========================================================
+
 def extract_vehicle_allocations(model):
     """
     One row per (vehicle type, class, flight, bucket) where count > 0.
-    This lets you see EXACTLY what the model dispatched.
+    SAFE for sparse FB: iterates only over model.FB.
     """
     rows = []
 
     for (vt, cid) in model.VC:
-        for f in model.F:
-            for b in model.B:
-                n = int(round(pyo.value(model.k[(vt, cid), (f, b)]) or 0))
-                if n > 0:
-                    rows.append({
-                        "vehicle_type": vt,
-                        "class_id": cid,
-                        "flight_key": f,
-                        "bucket": b,
-                        "count": n,
-                    })
+        for (f, b) in model.FB:   # <-- KEY CHANGE: only valid (flight,bucket) pairs
+            n = int(round(pyo.value(model.k[(vt, cid), (f, b)]) or 0))
+            if n > 0:
+                rows.append({
+                    "vehicle_type": vt,
+                    "class_id": cid,
+                    "flight_key": f,
+                    "bucket": b,
+                    "count": n,
+                })
 
     return pd.DataFrame(rows)
+
 
 
 # =========================================================
@@ -134,27 +135,38 @@ def extract_summary(model, jobs):
     sla_arr = 1.0 - y.loc[arr_idx].mean() if len(arr_idx) else np.nan
     sla_dep = 1.0 - y.loc[dep_idx].mean() if len(dep_idx) else np.nan
 
-    # Fleet used per bucket (total across flights/classes)
+    
+    # Fleet used per bucket (total across flights/classes) — SAFE for sparse FB
     amb_used = []
     mini_used = []
     drv_used = []
 
+    # Build a map: bucket -> flights that actually exist in sparse FB
+    fb_by_bucket = {}
+    for (f, b) in model.FB:
+        fb_by_bucket.setdefault(b, []).append(f)
+
     for b in B:
+        flights_b = fb_by_bucket.get(b, [])
+
         amb = sum(
             int(round(pyo.value(model.k[(vt, cid), (f, b)]) or 0))
             for (vt, cid) in model.VC if vt == "Amb"
-            for f in model.F
+            for f in flights_b
         )
+
         mini = sum(
             int(round(pyo.value(model.k[(vt, cid), (f, b)]) or 0))
             for (vt, cid) in model.VC if vt == "Mini"
-            for f in model.F
+            for f in flights_b
         )
+
         drv = int(round(pyo.value(model.H_drv[b]) or 0))
 
         amb_used.append(amb)
         mini_used.append(mini)
         drv_used.append(drv)
+
 
     peak_amb = max(amb_used) if amb_used else 0
     peak_mini = max(mini_used) if mini_used else 0
@@ -188,19 +200,31 @@ def extract_summary(model, jobs):
 
 
 
-import pandas as pd
 
-def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s"):
+def baseline_s1_vehicle_curves(
+    jobs,
+    decision_col="s1_decision",
+    bucket_col="s",
+    *,
+    count_no_vehicle_as_push: bool = False,
+):
     """
     Build S1 baseline curves from policy decisions.
 
-    
+    Assumptions (your stated reporting convention):
+      - 1 Driver per dispatched vehicle (Amb or Mini)
+      - 1 Vehicle Agent per dispatched vehicle (Amb or Mini)
+      - Pushers: 1 per job if decision == "Push"
+      - OPTIONAL: treat "No Vehicle" as requiring a pusher (count_no_vehicle_as_push=True)
+
     Returns:
       - ambulift_curve (per bucket)
       - minibus_curve  (per bucket)
       - pusher_curve   (per bucket)
       - driver_curve   (per bucket)  [drivers = amb + mini]
+      - veh_agent_curve(per bucket)  [veh_agents = amb + mini]
     """
+    import pandas as pd
 
     if decision_col not in jobs.columns:
         raise ValueError(f"Missing {decision_col} in jobs")
@@ -217,7 +241,10 @@ def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
     jobs.loc[jobs[decision_col] == "Both", "_amb"] = 1
     jobs.loc[jobs[decision_col] == "Both", "_mini"] = 1
 
-    jobs.loc[jobs[decision_col] == "Push", "_push"] = 1  # optional future
+    jobs.loc[jobs[decision_col] == "Push", "_push"] = 1
+
+    if count_no_vehicle_as_push:
+        jobs.loc[jobs[decision_col] == "No Vehicle", "_push"] = 1
 
     # Aggregate to flight-bucket so we count a dispatch once per flight per bucket
     fb = (
@@ -227,19 +254,22 @@ def baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
         .reset_index()
     )
 
-    # Now sum across flights per bucket
+    # Sum across flights per bucket
     amb_curve = fb.groupby(bucket_col)["_amb"].sum().sort_index()
     mini_curve = fb.groupby(bucket_col)["_mini"].sum().sort_index()
     push_curve = fb.groupby(bucket_col)["_push"].sum().sort_index()
 
-    drv_curve = (amb_curve + mini_curve).astype(int)
+    driver_curve = (amb_curve + mini_curve).astype(int)
+    veh_agent_curve = (amb_curve + mini_curve).astype(int)
 
     return {
         "ambulift_curve": amb_curve,
         "minibus_curve": mini_curve,
         "pusher_curve": push_curve,
-        "driver_curve": drv_curve,
+        "driver_curve": driver_curve,
+        "veh_agent_curve": veh_agent_curve,
     }
+
 
 
 
@@ -471,6 +501,159 @@ def print_run_report(report: dict, *, show_hours: int = 24, show_top: int = 10):
         vp = checks["vertical_with_push"]
         print(f"\n  Vertical jobs with Push horizontally — count={len(vp)} (top {show_top}):")
         print(vp.head(show_top).to_string(index=False) if len(vp) else "  (none)")
+
+    print("\nDone.")
+    print("=" * 78)
+
+
+def peak_day_hourly_s1_report(
+    jobs: pd.DataFrame,
+    curves: dict,
+    *,
+    day_from: str = "s",          # "s" scheduled bucket (recommended) or "t" release bucket
+    hour_method: str = "max",     # "max" = worst 15-min in the hour (recommended)
+):
+    """
+    Scenario 1 report equivalent of peak_day_hourly_fleet_report(), but built from
+    baseline policy curves (ambulift_curve/minibus_curve/driver_curve) instead of k allocations.
+
+    Returns dict with:
+      - peak_day (date)
+      - peak_day_job_count (int)
+      - bucket_level (DataFrame at 15-min granularity for that day)
+      - hourly (DataFrame at hourly granularity aggregated from bucket_level)
+      - current_fleet (dict)
+      - peaks (dict)
+    """
+    from .params import build_vehicle_classes  # local import avoids circular imports
+
+    if day_from not in jobs.columns:
+        raise ValueError(f"jobs missing column '{day_from}'. Use day_from='s' or 't'.")
+
+    # 1) Peak day by number of PRM jobs (same definition as S2)
+    tmp = jobs.copy()
+    tmp["_day"] = pd.to_datetime(tmp[day_from]).dt.date
+    day_counts = tmp.groupby("_day").size()
+    peak_day = day_counts.idxmax()
+    peak_day_job_count = int(day_counts.max())
+
+    # 2) Pull curves (15-min) and filter to peak day
+    amb_curve = curves["ambulift_curve"].copy()
+    mini_curve = curves["minibus_curve"].copy()
+    drv_curve = curves["driver_curve"].copy()
+
+    amb_curve.index = pd.to_datetime(amb_curve.index)
+    mini_curve.index = pd.to_datetime(mini_curve.index)
+    drv_curve.index = pd.to_datetime(drv_curve.index)
+
+    amb_day = amb_curve[amb_curve.index.date == peak_day]
+    mini_day = mini_curve[mini_curve.index.date == peak_day]
+    drv_day = drv_curve[drv_curve.index.date == peak_day]
+
+    # Align into a single 15-min table (fill missing buckets with 0)
+    bucket_level = pd.DataFrame({
+        "Amb_req": amb_day,
+        "Mini_req": mini_day,
+        "Drivers_req": drv_day,
+    }).fillna(0).sort_index()
+
+    # 3) Bucket -> Hour aggregation
+    if hour_method == "max":
+        hourly = bucket_level.resample("H").max()
+    elif hour_method == "mean":
+        hourly = bucket_level.resample("H").mean()
+    elif hour_method == "sum":
+        hourly = bucket_level.resample("H").sum()
+    else:
+        raise ValueError("hour_method must be one of: 'max', 'mean', 'sum'")
+
+    # 4) Current fleet (exclude future) + gaps
+    classes_current = build_vehicle_classes(include_future=False)
+    current_amb = sum(int(c["count"]) for c in classes_current.get("Amb", []))
+    current_mini = sum(int(c["count"]) for c in classes_current.get("Mini", []))
+
+    bucket_level["Amb_gap"] = (bucket_level["Amb_req"] - current_amb).clip(lower=0)
+    bucket_level["Mini_gap"] = (bucket_level["Mini_req"] - current_mini).clip(lower=0)
+
+    hourly["Amb_gap"] = (hourly["Amb_req"] - current_amb).clip(lower=0)
+    hourly["Mini_gap"] = (hourly["Mini_req"] - current_mini).clip(lower=0)
+
+    peaks = {
+        "peak_15min_amb_req": int(bucket_level["Amb_req"].max()) if len(bucket_level) else 0,
+        "peak_15min_mini_req": int(bucket_level["Mini_req"].max()) if len(bucket_level) else 0,
+        "peak_hour_amb_req": int(hourly["Amb_req"].max()) if len(hourly) else 0,
+        "peak_hour_mini_req": int(hourly["Mini_req"].max()) if len(hourly) else 0,
+        "gap_amb_peak_hour": int(max(0, hourly["Amb_req"].max() - current_amb)) if len(hourly) else 0,
+        "gap_mini_peak_hour": int(max(0, hourly["Mini_req"].max() - current_mini)) if len(hourly) else 0,
+    }
+
+    return {
+        "peak_day": peak_day,
+        "peak_day_job_count": peak_day_job_count,
+        "current_fleet": {"Amb": current_amb, "Mini": current_mini},
+        "bucket_level": bucket_level,
+        "hourly": hourly,
+        "peaks": peaks,
+    }
+
+
+def build_run_report_s1(out_s1: dict, *, day_from: str = "s", hour_method: str = "max"):
+    """
+    Mirror S2 build_run_report(), but for S1.
+    Uses policy curves instead of vehicle_allocations.
+    """
+    curves = {
+        "ambulift_curve": out_s1["ambulift_curve"],
+        "minibus_curve": out_s1["minibus_curve"],
+        "driver_curve": out_s1["driver_curve"],
+    }
+    if "veh_agent_curve" in out_s1:
+        curves["veh_agent_curve"] = out_s1["veh_agent_curve"]
+    if "pusher_curve" in out_s1:
+        curves["pusher_curve"] = out_s1["pusher_curve"]
+
+    report = {
+        "status": "s1_policy",
+        "summary": out_s1.get("summary", {}),
+        "jobs": out_s1["jobs"],
+        "curves": curves,
+    }
+
+    report["peak_day_report"] = peak_day_hourly_s1_report(
+        jobs=out_s1["jobs"],
+        curves=curves,
+        day_from=day_from,
+        hour_method=hour_method,
+    )
+
+    return report
+
+
+def print_run_report_s1(report: dict, *, show_hours: int = 24):
+    print("\n" + "=" * 78)
+    print("PRM OPT — Scenario 1 (Policy Baseline) Output")
+    print("=" * 78)
+
+    summ = report.get("summary", {})
+    print("\n[1] Horizon Summary (Peak across horizon; gaps vs CURRENT fleet)")
+    for k in ["PeakAmb","PeakMini","PeakDrivers","PeakVehAgents","CurrentAmb","CurrentMini","GapAmb","GapMini"]:
+        if k in summ:
+            print(f"  {k:14s}: {summ[k]}")
+
+    peak = report.get("peak_day_report", {})
+    print("\n[2] Peak Day (most PRM jobs) — Hourly Requirement + Gaps")
+    print(f"  Peak day: {peak.get('peak_day')} | jobs={peak.get('peak_day_job_count')}")
+    cf = peak.get("current_fleet", {})
+    print(f"  Current fleet: Amb={cf.get('Amb')} | Mini={cf.get('Mini')}")
+    pk = peak.get("peaks", {})
+    if pk:
+        print(f"  Peak hour req : Amb={pk.get('peak_hour_amb_req')} | Mini={pk.get('peak_hour_mini_req')}")
+        print(f"  Peak hour gap : Amb={pk.get('gap_amb_peak_hour')} | Mini={pk.get('gap_mini_peak_hour')}")
+
+    hourly = peak.get("hourly", None)
+    if isinstance(hourly, pd.DataFrame) and len(hourly):
+        print("\n  Hourly table (first rows):")
+        print(hourly.head(show_hours).to_string())
 
     print("\nDone.")
     print("=" * 78)

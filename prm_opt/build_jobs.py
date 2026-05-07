@@ -238,7 +238,7 @@ def build_jobs(
     x["safety_stand"] = x["Stand"].astype(str).isin(SAFETY_STANDS).astype(int)
 
     # -------------------------
-    # Gate 7/8 bottleneck flag
+    # Stand 7/8 bottleneck flag
     # -------------------------
     
     x["stand_clean"] = (
@@ -323,6 +323,7 @@ def build_jobs(
             "IsEffectiveRemote",
             "IsArrival",
             "Turnaround PRM Count",
+            "Turnaround Vertical Count",
             "Concurrent Stress",
             "PRM Flight Count",
             "Has Own Chair",
@@ -334,7 +335,6 @@ def build_jobs(
             "tau_amb_mins",
             "tau_mini_mins",
             "tau_push_mins",
-            "TurnaroundVertical PRM Count",
             "Minutes on Chocks",
         ]
     ].reset_index(drop=True)

@@ -446,7 +446,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         df_prm_master.drop(columns=["reason"], inplace=True)
 
 
-        # Vertical PRM count per flight (simple proxy: WCHC/WCHS AND effective remote)
+    # Vertical PRM count per flight (simple proxy: WCHC/WCHS AND effective remote)
     df_prm_master["VerticalCandidate"] = (
         df_prm_master["SSR Code"].isin(["WCHC", "WCHS"])
         & (df_prm_master["IsEffectiveRemote"] == 1)
@@ -494,36 +494,35 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         & (turnaround_bridge["Gap"] < 4)
     ]
 
+    
     lookup_A = turnaround_bridge[
-        ["Flight Number_ARR", "Scheduled Flight DT_ARR", "Airline Code", "PRM Flight Count_DEP", "Vertical PRM Count_DEP"]
-    ].rename(
-        columns={
-            "Flight Number_ARR": "Flight Number",
-            "Scheduled Flight DT_ARR": "Scheduled Flight DT",
-            "PRM Flight Count_ARR": "Turnaround PRM Count",
-            "Vertical PRM Count_ARR": "Turnaround Vertical PRM Count",
-        }
-    )
+        ["Flight Number_ARR", "Scheduled Flight DT_ARR", "Airline Code",
+        "PRM Flight Count_DEP", "Vertical PRM Count_DEP"]
+    ].rename(columns={
+        "Flight Number_ARR": "Flight Number",
+        "Scheduled Flight DT_ARR": "Scheduled Flight DT",
+        "PRM Flight Count_DEP": "Turnaround PRM Count",
+        "Vertical PRM Count_DEP": "Turnaround Vertical Count",
+    })
 
     lookup_D = turnaround_bridge[
-        ["Flight Number_DEP", "Scheduled Flight DT_DEP", "Airline Code", "PRM Flight Count_ARR", "Vertical PRM Count_ARR"]
-    ].rename(
-        columns={
-            "Flight Number_DEP": "Flight Number",
-            "Scheduled Flight DT_DEP": "Scheduled Flight DT",
-            "PRM Flight Count_DEP": "Turnaround PRM Count",
-            "Vertical PRM Count_DEP": "Turnaround Vertical PRM Count",
-        }
-    )
+        ["Flight Number_DEP", "Scheduled Flight DT_DEP", "Airline Code",
+        "PRM Flight Count_ARR", "Vertical PRM Count_ARR"]
+    ].rename(columns={
+        "Flight Number_DEP": "Flight Number",
+        "Scheduled Flight DT_DEP": "Scheduled Flight DT",
+        "PRM Flight Count_ARR": "Turnaround PRM Count",
+        "Vertical PRM Count_ARR": "Turnaround Vertical Count",
+    })
 
-
-    turnaround_lookup = pd.concat([lookup_A, lookup_D])
+    turnaround_lookup = pd.concat([lookup_A, lookup_D], ignore_index=True)
 
     df_prm_master = df_prm_master.merge(
         turnaround_lookup,
         on=["Flight Number", "Airline Code", "Scheduled Flight DT"],
         how="left",
-    ).fillna({"Turnaround PRM Count": 0, "Turnaround Vertical PRM Count": 0})
+    ).fillna({"Turnaround PRM Count": 0, "Turnaround Vertical Count": 0})
+
 
     # Final flags
     df_prm_master["IsArrival"] = (df_prm_master["A/D"] == "A").astype(int)

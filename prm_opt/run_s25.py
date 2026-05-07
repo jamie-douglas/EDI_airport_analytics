@@ -706,7 +706,14 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
     jobs["s1_decision"] = jobs.index.map(decisions.get)
 
     # Baseline curves (use scheduled bucket "s" for comparability)
-    curves = baseline_s1_vehicle_curves(jobs, decision_col="s1_decision", bucket_col="s")
+    
+    curves = baseline_s1_vehicle_curves(
+        jobs,
+        decision_col="s1_decision",
+        bucket_col="s",
+        count_no_vehicle_as_push=True,
+    )
+
 
     # Current fleet totals (same method as optimisation: from VEHICLE_MODELS)
     classes = build_vehicle_classes(include_future=False)

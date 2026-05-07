@@ -561,25 +561,52 @@ def build_pyomo_model(
     # Fleet exclusivity per bucket:
     # each vehicle class has a fixed count and cannot be allocated to > count across flights in a bucket
     # -----------------------------
-    def fleet_exclusive(m, vtype, cid, b):
-        #used = sum(m.k[(vtype, cid), (f, b)] for f in m.F)
-        used = sum(m.k[(vtype, cid), (f, b)] for f in fb_by_b.get(b, [])) ###
+    # def fleet_exclusive(m, vtype, cid, b):
+    #     used = sum(m.k[(vtype, cid), (f, b)] for f in m.F)
+    #     cap = int(m.count[(vtype, cid)])
+    #     return used <= cap
+    
+    def fleet_exclusive(m, vtype, cid, b):###
+        flights_b = fb_by_b.get(b, [])###
+        if not flights_b:###
+            return pyo.Constraint.Feasible  ###
+
+        used = pyo.quicksum(m.k[(vtype, cid), (f, b)] for f in flights_b)
         cap = int(m.count[(vtype, cid)])
         return used <= cap
+
+
     m.FleetExclusive = pyo.Constraint(m.VC, m.B, rule=lambda m, vtype, cid, b: fleet_exclusive(m, vtype, cid, b))
 
     # Total minibus cap with ferry reservation (optional)
-    def total_mini_cap_with_ferry(m, b):
-        total_used = sum(
-            m.k[("Mini", cid), (f, b)]
-            for (vt, cid) in m.VC if vt == "Mini"
-            #for f in m.F
-            for f in fb_by_b.get(b, []) ###
+    # def total_mini_cap_with_ferry(m, b):
+    #     total_used = sum(
+    #         m.k[("Mini", cid), (f, b)]
+    #         for (vt, cid) in m.VC if vt == "Mini"
+    #         #for f in m.F
+    #         for f in fb_by_b.get(b, []) ###
+    #     )
+    #     total_cap = sum(int(m.count[("Mini", cid)]) for (vt, cid) in m.VC if vt == "Mini")
+    #     reserve = int(ferry_mini_reserved.get(b, 0))
+    #     return total_used <= total_cap - reserve
+    # m.TotalMiniCapWithFerry = pyo.Constraint(m.B, rule=total_mini_cap_with_ferry)
+    
+    def total_mini_cap_with_ferry(m, b): ###
+        flights_b = fb_by_b.get(b, [])###
+        if not flights_b:###
+            return pyo.Constraint.Feasible  # <-- otherwise 0 <= (cap-reserve) becomes bool###
+
+        total_used = pyo.quicksum(###
+            m.k[("Mini", cid), (f, b)]###
+            for (vt, cid) in m.VC if vt == "Mini"###
+            for f in flights_b###
         )
-        total_cap = sum(int(m.count[("Mini", cid)]) for (vt, cid) in m.VC if vt == "Mini")
-        reserve = int(ferry_mini_reserved.get(b, 0))
-        return total_used <= total_cap - reserve
-    m.TotalMiniCapWithFerry = pyo.Constraint(m.B, rule=total_mini_cap_with_ferry)
+        total_cap = sum(int(m.count[("Mini", cid)]) for (vt, cid) in m.VC if vt == "Mini")###
+        reserve = int(ferry_mini_reserved.get(b, 0))###
+        return total_used <= total_cap - reserve###
+
+    m.TotalMiniCapWithFerry = pyo.Constraint(m.B, rule=total_mini_cap_with_ferry)###
+
 
     # ---------------------------------------------------------------------
     # Time capacity per bucket (minutes) WITH SPILLOVER + combined-only standby
