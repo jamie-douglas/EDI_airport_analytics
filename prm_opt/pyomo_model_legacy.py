@@ -174,6 +174,8 @@ def build_pyomo_model(
     BUCKET_MINUTES = 15
     M_BIG = 10_000
 
+    MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
+
     # Optional placeholders (do nothing unless provided)
     ferry_mini_reserved = getattr(toggles, "ferry_mini_reserved", {}) or {}
     ferry_drv_reserved = getattr(toggles, "ferry_drv_reserved", {}) or {}
@@ -223,8 +225,8 @@ def build_pyomo_model(
     flights = sorted(jobs["flight_key"].unique())
     m.F = pyo.Set(initialize=flights)
 
-    # Flight x bucket pairs
-    m.FB = pyo.Set(dimen=2, initialize=[(f, b) for f in flights for b in B_list])
+    # # Flight x bucket pairs
+    # m.FB = pyo.Set(dimen=2, initialize=[(f, b) for f in flights for b in B_list])
 
     # -----------------------------
     # SLA parameters
@@ -243,6 +245,117 @@ def build_pyomo_model(
             ts = jobs.loc[j, "s"] if "s" in jobs.columns else jobs.loc[j, "t"]
         sla_start_b[j] = pd.to_datetime(ts).floor(f"{BUCKET_MINUTES}min")
     sla_start_idx = {j: b_to_idx[sla_start_b[j]] for j in jobs.index}
+
+     # Hard deadline (departures): disallow service after deadline bucket
+    hard_deadline_idx = {}
+    has_deadline = "hard_deadline_time" in jobs.columns
+    for j in jobs.index:
+        if not has_deadline:
+            hard_deadline_idx[j] = None
+            continue
+        t_dead = jobs.loc[j, "hard_deadline_time"]
+        hard_deadline_idx[j] = None if pd.isna(t_dead) else b_to_idx[pd.to_datetime(t_dead).ceil(f"{BUCKET_MINUTES}min")]
+
+    
+    # -----------------------------
+    # Build sparse Flight x Bucket set (m.FB) to avoid flights × full-horizon explosion
+    # -----------------------------
+    MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
+
+    # Latest feasible service index for each job (used to bound per-flight bucket windows)
+    latest_idx = {}
+    for j in jobs.index:
+        # Departures: hard deadline if present
+        if str(jobs.loc[j, "dir"]) == "D" and hard_deadline_idx.get(j) is not None:
+            latest_idx[j] = int(hard_deadline_idx[j])
+        else:
+            # Arrivals (or no deadline): cap latest service to SLA start + SLA limit + MAX_LATE_MINS
+            latest_time = sla_start_b[j] + pd.to_timedelta(float(L_j[j] + MAX_LATE_MINS), unit="m")
+            latest_time = pd.to_datetime(latest_time).ceil(f"{BUCKET_MINUTES}min")
+            latest_idx[j] = min(int(b_to_idx.get(latest_time, len(B_list) - 1)), len(B_list) - 1)
+
+    # Group jobs per flight
+    jobs_by_f = {f: [] for f in flights}
+    for j in jobs.index:
+        jobs_by_f[jobs.loc[j, "flight_key"]].append(j)
+
+    # Build sparse (f,b) pairs
+    fb_pairs = []
+    for f in flights:
+        Jf = jobs_by_f.get(f, [])
+        if not Jf:
+            continue
+        lo = min(release_idx[j] for j in Jf)
+        hi = max(latest_idx[j] for j in Jf)
+        hi = min(hi, len(B_list) - 1)
+        for bi in range(lo, hi + 1):
+            fb_pairs.append((f, idx_to_b[bi]))
+
+    
+    # -----------------------------
+    # DEBUG: sanity-check sparse FB construction
+    # -----------------------------
+    print("\n[FB sparse debug]")
+    print("  flights:", len(flights))
+    print("  buckets:", len(B_list))
+    print("  FB pairs:", len(fb_pairs))
+    print("  avg buckets per flight:", round(len(fb_pairs) / max(1, len(flights)), 2))
+
+    # Any flight missing FB coverage?
+    missing_f = [f for f in flights if f not in jobs_by_f or len(jobs_by_f[f]) == 0]
+    if missing_f:
+        print("  WARNING: flights with no jobs (will be ignored):", len(missing_f))
+
+    # Check window lengths distribution
+    lens = []
+    for f in flights:
+        Jf = jobs_by_f.get(f, [])
+        if not Jf:
+            continue
+        lo = min(release_idx[j] for j in Jf)
+        hi = max(latest_idx[j] for j in Jf)
+        lens.append(hi - lo + 1)
+
+    if lens:
+        print("  window buckets per flight: min/median/max =", min(lens), int(pd.Series(lens).median()), max(lens))
+        # Flag huge windows (means MAX_LATE_MINS too large or deadlines missing)
+        big = sum(1 for L in lens if L > 24 * 4)  # > 24 hours at 15-min buckets
+        print("  flights with >24h service window:", big)
+
+
+    m.FB = pyo.Set(dimen=2, initialize=fb_pairs)
+
+    
+    # --- DEBUG: FB covers all possible start buckets for each flight ---
+    # (Only needed if you use sparse FB; harmless otherwise)
+
+    if isinstance(m.FB, pyo.Set) and m.FB.dimen == 2:
+        fb_set = set(m.FB.data())  # (f,b) tuples
+        # quick map: for each flight, list buckets it has FB
+        fb_buckets_by_f = {}
+        for f, b in fb_set:
+            fb_buckets_by_f.setdefault(f, set()).add(b)
+
+        # For each job, check that its flight has FB entry at its release bucket
+        missing = []
+        for j in jobs.index:
+            f = jobs.loc[j, "flight_key"]
+            b0 = pd.to_datetime(jobs.loc[j, "t"]).floor(f"{BUCKET_MINUTES}min")
+            if f in fb_buckets_by_f and b0 not in fb_buckets_by_f[f]:
+                missing.append((j, f, b0))
+
+        print("\n[FB coverage debug]")
+        print("  missing (flight, release_bucket) coverage:", len(missing))
+        if missing:
+            print("  examples:", missing[:10])
+
+
+    
+    # Helpful index: flights available in each bucket (only those (f,b) in FB)
+    fb_by_b = {b: [] for b in B_list}
+    for (f, b) in fb_pairs:
+        fb_by_b[b].append(f)
+
 
     # -----------------------------
     # Vehicle classes (heterogeneous fleet)
@@ -357,15 +470,6 @@ def build_pyomo_model(
         return pyo.Constraint.Skip
     m.NoServiceBeforeRelease = pyo.Constraint(m.J, m.B, rule=no_service_before_release)
 
-    # Hard deadline (departures): disallow service after deadline bucket
-    hard_deadline_idx = {}
-    has_deadline = "hard_deadline_time" in jobs.columns
-    for j in jobs.index:
-        if not has_deadline:
-            hard_deadline_idx[j] = None
-            continue
-        t_dead = jobs.loc[j, "hard_deadline_time"]
-        hard_deadline_idx[j] = None if pd.isna(t_dead) else b_to_idx[pd.to_datetime(t_dead).ceil(f"{BUCKET_MINUTES}min")]
 
     def no_service_after_deadline(m, j, b):
         idx = hard_deadline_idx.get(j, None)
@@ -458,7 +562,8 @@ def build_pyomo_model(
     # each vehicle class has a fixed count and cannot be allocated to > count across flights in a bucket
     # -----------------------------
     def fleet_exclusive(m, vtype, cid, b):
-        used = sum(m.k[(vtype, cid), (f, b)] for f in m.F)
+        #used = sum(m.k[(vtype, cid), (f, b)] for f in m.F)
+        used = sum(m.k[(vtype, cid), (f, b)] for f in fb_by_b.get(b, [])) ###
         cap = int(m.count[(vtype, cid)])
         return used <= cap
     m.FleetExclusive = pyo.Constraint(m.VC, m.B, rule=lambda m, vtype, cid, b: fleet_exclusive(m, vtype, cid, b))
@@ -468,7 +573,8 @@ def build_pyomo_model(
         total_used = sum(
             m.k[("Mini", cid), (f, b)]
             for (vt, cid) in m.VC if vt == "Mini"
-            for f in m.F
+            #for f in m.F
+            for f in fb_by_b.get(b, []) ###
         )
         total_cap = sum(int(m.count[("Mini", cid)]) for (vt, cid) in m.VC if vt == "Mini")
         reserve = int(ferry_mini_reserved.get(b, 0))
@@ -567,10 +673,12 @@ def build_pyomo_model(
     # Staff constraints per bucket
     # -----------------------------
     def amb_used(m, b):
-        return sum(m.k[("Amb", cid), (f, b)] for (vt, cid) in m.VC if vt == "Amb" for f in m.F)
+        #return sum(m.k[("Amb", cid), (f, b)] for (vt, cid) in m.VC if vt == "Amb" for f in m.F)
+        return sum(m.k[("Amb", cid), (f, b)] for (vt, cid) in m.VC if vt == "Amb" for f in fb_by_b.get(b, [])) ###
 
     def mini_used(m, b):
-        return sum(m.k[("Mini", cid), (f, b)] for (vt, cid) in m.VC if vt == "Mini" for f in m.F)
+        #return sum(m.k[("Mini", cid), (f, b)] for (vt, cid) in m.VC if vt == "Mini" for f in m.F)
+        return sum(m.k[("Mini", cid), (f, b)] for (vt, cid) in m.VC if vt == "Mini" for f in fb_by_b.get(b, [])) ###
 
     def drv_staff(m, b):
         required = amb_used(m, b) + mini_used(m, b) + int(ferry_drv_reserved.get(b, 0))

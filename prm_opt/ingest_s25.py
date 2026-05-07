@@ -301,25 +301,6 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     )
 
 
-
-    # # Merge passenger + flight
-    # df_prm_master = df_prm_grouped.merge(
-    #     df_flights[
-    #         [
-    #             "Flight Number",
-    #             "Airline Code",
-    #             "Day",
-    #             "IsEffectiveRemote",
-    #             "Concurrent Stress",
-    #             "Minutes on Chocks",
-    #             "PRM Flight Count",
-    #             "Chocks DT",
-    #         ]
-    #     ],
-    #     on=["Flight Number", "Airline Code", "Day"],
-    #     how="left",
-    # )
-
    
    
     # ==========================================================
@@ -465,15 +446,34 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         df_prm_master.drop(columns=["reason"], inplace=True)
 
 
+        # Vertical PRM count per flight (simple proxy: WCHC/WCHS AND effective remote)
+    df_prm_master["VerticalCandidate"] = (
+        df_prm_master["SSR Code"].isin(["WCHC", "WCHS"])
+        & (df_prm_master["IsEffectiveRemote"] == 1)
+    ).astype(int)
+
+    flight_vert_count = (
+        df_prm_master.groupby(["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"])["VerticalCandidate"]
+        .sum()
+        .reset_index(name="Vertical PRM Count")
+    )
+
+    # Merge vertical count onto df_flights so the turnaround bridge can see it
+    df_flights = df_flights.merge(
+        flight_vert_count,
+        on=["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"],
+        how="left",
+    ).fillna({"Vertical PRM Count": 0})
+
 
     # -------------------------
 
-    # Turnaround PRM Count (faithful logic)
+    # Turnaround PRM Count 
     arrivals = df_flights[df_flights["A/D"] == "A"][
-        ["Flight Number", "Airline Code", "Turnaround Flight Number", "PRM Flight Count", "Scheduled Flight DT"]
+        ["Flight Number", "Airline Code", "Turnaround Flight Number", "PRM Flight Count", "Vertical PRM Count", "Scheduled Flight DT"]
     ]
     departures = df_flights[df_flights["A/D"] == "D"][
-        ["Flight Number", "Airline Code", "Turnaround Flight Number", "PRM Flight Count", "Scheduled Flight DT"]
+        ["Flight Number", "Airline Code", "Turnaround Flight Number", "PRM Flight Count", "Vertical PRM Count", "Scheduled Flight DT"]
     ]
 
     turnaround_bridge = arrivals.merge(
@@ -495,24 +495,27 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     ]
 
     lookup_A = turnaround_bridge[
-        ["Flight Number_ARR", "Scheduled Flight DT_ARR", "Airline Code", "PRM Flight Count_ARR"]
+        ["Flight Number_ARR", "Scheduled Flight DT_ARR", "Airline Code", "PRM Flight Count_DEP", "Vertical PRM Count_DEP"]
     ].rename(
         columns={
             "Flight Number_ARR": "Flight Number",
             "Scheduled Flight DT_ARR": "Scheduled Flight DT",
             "PRM Flight Count_ARR": "Turnaround PRM Count",
+            "Vertical PRM Count_ARR": "Turnaround Vertical PRM Count",
         }
     )
 
     lookup_D = turnaround_bridge[
-        ["Flight Number_DEP", "Scheduled Flight DT_DEP", "Airline Code", "PRM Flight Count_DEP"]
+        ["Flight Number_DEP", "Scheduled Flight DT_DEP", "Airline Code", "PRM Flight Count_ARR", "Vertical PRM Count_ARR"]
     ].rename(
         columns={
             "Flight Number_DEP": "Flight Number",
             "Scheduled Flight DT_DEP": "Scheduled Flight DT",
             "PRM Flight Count_DEP": "Turnaround PRM Count",
+            "Vertical PRM Count_DEP": "Turnaround Vertical PRM Count",
         }
     )
+
 
     turnaround_lookup = pd.concat([lookup_A, lookup_D])
 
@@ -520,7 +523,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         turnaround_lookup,
         on=["Flight Number", "Airline Code", "Scheduled Flight DT"],
         how="left",
-    ).fillna({"Turnaround PRM Count": 0})
+    ).fillna({"Turnaround PRM Count": 0, "Turnaround Vertical PRM Count": 0})
 
     # Final flags
     df_prm_master["IsArrival"] = (df_prm_master["A/D"] == "A").astype(int)

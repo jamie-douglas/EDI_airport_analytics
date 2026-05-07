@@ -269,7 +269,23 @@ def build_jobs(
     # -------------------------
     # Spin indicator
     # -------------------------
-    x["is_spin"] = (x["Turnaround PRM Count"] > 0).astype(int)
+    
+    spin_thr = int(getattr(toggles, "spin_turnaround_threshold_mins", 60) or 60)
+
+    # Quick turnaround based on Minutes on Chocks (S25 only)
+    quick_turn = False
+    if "Minutes on Chocks" in x.columns:
+        quick_turn = (x["Minutes on Chocks"].fillna(9999).astype(float) <= spin_thr)
+
+    # Arrival leg vertical exists (job-level proxy)
+    arr_has_vertical = (x["dir"] == "A") & (x["needs_vertical"] == 1)
+
+    # Departure leg vertical exists (from ingest-supplied turnaround vertical count)
+    dep_has_vertical = (x.get("Turnaround Vertical Count", 0).fillna(0).astype(float) > 0)
+
+    # Spin triggers ONLY on ARRIVAL rows (prevents double counting)
+    x["is_spin"] = ( (x["dir"] == "A") & quick_turn & arr_has_vertical & dep_has_vertical ).astype(int)
+
 
     # -------------------------
     # Stable flight key (f)
@@ -318,6 +334,8 @@ def build_jobs(
             "tau_amb_mins",
             "tau_mini_mins",
             "tau_push_mins",
+            "TurnaroundVertical PRM Count",
+            "Minutes on Chocks",
         ]
     ].reset_index(drop=True)
 

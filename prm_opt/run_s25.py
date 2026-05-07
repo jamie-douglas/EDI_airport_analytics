@@ -164,6 +164,27 @@ def pre_solve_debug(
         print("Top 10 spin_removed buckets (bucket, removed_mins, cap_mins):")
         for b, v in top:
             print(" ", b, "|", round(v, 1), "/", round(cap_per_bucket, 1))
+    
+    
+    # ---- spin definition sanity (jobs-level) ----
+    if "is_spin" in jobs.columns:
+        spin = jobs[jobs["is_spin"] == 1]
+        print("\n[Spin flag debug]")
+        print("  is_spin rows:", len(spin))
+        if len(spin):
+            print("  is_spin by dir:")
+            print(spin["dir"].value_counts(dropna=False))
+            if "Minutes on Chocks" in jobs.columns:
+                print("  Minutes on Chocks (spin rows) min/median/max:",
+                    float(spin["Minutes on Chocks"].min()),
+                    float(spin["Minutes on Chocks"].median()),
+                    float(spin["Minutes on Chocks"].max()))
+            if "Turnaround Vertical Count" in jobs.columns:
+                print("  Turnaround Vertical Count (spin rows) min/median/max:",
+                    float(spin["Turnaround Vertical Count"].min()),
+                    float(spin["Turnaround Vertical Count"].median()),
+                    float(spin["Turnaround Vertical Count"].max()))
+        
 
 
     # ---- very rough necessary capacity checks (optional) ----
@@ -291,9 +312,26 @@ def pre_solve_debug(
         cols = [c for c in cols if c in jobs.columns]
         print(jobs.loc[off_grid_deadline, cols].head(20))
 
+
     # -----------------------------
     # 2B) Identify "tight window" jobs: earliest==latest (forced into one bucket)
     # -----------------------------
+    K_CAP = int(getattr(toggles, "spill_bucket_cap", 12) or 12)
+    
+    def _split_mins(total_mins: float, bucket_mins: int, k_cap: int):
+        total = max(0.0, float(total_mins))
+        if total <= 1e-9:
+            return []
+        k = min(int(math.ceil(total / float(bucket_mins))), int(k_cap))
+        out, rem = [], total
+        for _ in range(k):
+            use = min(float(bucket_mins), rem)
+            out.append(use)
+            rem -= use
+            if rem <= 1e-9:
+                break
+        return out
+
     tight = (t_bucket == latest_bucket) & latest_bucket.notna()
     print("\nTight-window jobs (must be served in exactly one bucket):", int(tight.sum()))
     if tight.any():
@@ -327,53 +365,70 @@ def pre_solve_debug(
         print("\nLift tight-window check skipped (missing lift_gate/needs_wc).")
 
     
+    
     # -----------------------------
-    # 2D) Tight-window ambulift TIME feasibility check (vertical-only minimum)
+    # 2D) Tight-window ambulift TIME feasibility check (vertical-only, SPILLOVER-AWARE)
     # -----------------------------
     N_AMB = sum(int(c["count"]) for c in classes.get("Amb", []))
-    print("\nAmb tight-window time check (vertical-only):")
+    cap = float(bucket_minutes * N_AMB)
+
+    print("\nAmb tight-window time check (vertical-only, spillover-aware):")
     print("  Total ambulifts (from classes):", int(N_AMB))
+    print("  Spill cap (buckets):", int(K_CAP))
 
     if "needs_vertical" in jobs.columns:
         tight_vertical = tight & (jobs["needs_vertical"] == 1)
 
-        req = {}  # bucket -> required amb minutes
+        # HARD FAIL: tight vertical job starts in a bucket where amb minutes available = 0
+        if spin_removed is not None:
+            zero_avail_buckets = {pd.to_datetime(b) for b, v in spin_removed.items() if float(v) >= cap - 1e-9}
+        else:
+            zero_avail_buckets = set()
+
+        hard_fail_jobs = jobs.loc[tight_vertical].copy()
+        hard_fail_jobs["t_bucket"] = t_bucket.loc[hard_fail_jobs.index]
+        hard_fail_jobs = hard_fail_jobs[hard_fail_jobs["t_bucket"].isin(zero_avail_buckets)]
+
+        print("  tight vertical jobs:", int(tight_vertical.sum()))
+        print("  saturated (avail=0) buckets:", len(zero_avail_buckets))
+        print("  tight vertical jobs starting in saturated bucket:", len(hard_fail_jobs))
+
+        if len(hard_fail_jobs) > 0:
+            cols = ["Passenger ID","flight_key","dir","Airline Code","Stand","t","hard_deadline_time","sla_start_time"]
+            cols = [c for c in cols if c in hard_fail_jobs.columns]
+            print("\n❌ HARD INFEASIBILITY: tight vertical jobs start in buckets with 0 ambulift minutes available.")
+            print(hard_fail_jobs[cols].head(25))
+
+        # Spillover-aware required minutes per bucket
+        req = {}  # bucket -> required vertical ambulift minutes (spilled)
         for j in jobs.index[tight_vertical]:
-            b = t_bucket.loc[j]
-            req[b] = req.get(b, 0.0) + float(tau[(j, "Amb")])
+            start_b = t_bucket.loc[j]
+            spill = _split_mins(float(tau[(j, "Amb")]), bucket_minutes, K_CAP)
+            for k, mins in enumerate(spill):
+                b = start_b + pd.to_timedelta(k * bucket_minutes, unit="m")
+                req[b] = req.get(b, 0.0) + float(mins)
 
         infeas = []
         for b, mins in req.items():
-            avail = bucket_minutes * N_AMB - float(spin_removed.get(b, 0.0))
+            removed = float(spin_removed.get(b, 0.0)) if spin_removed is not None else 0.0
+            avail = cap - removed
             if mins > avail + 1e-6:
-                infeas.append((b, mins, avail))
+                infeas.append((b, mins, avail, removed))
 
-        print("  buckets with tight vertical demand:", len(req))
+        print("  buckets with spilled vertical demand:", len(req))
+        print("  infeasible buckets (req > avail):", len(infeas))
 
-        # ---- NEW DEBUG: if infeasible, print spin_removed + culprits in that bucket ----
         if infeas:
-            # Sort by worst shortfall first (most negative available - required)
-            infeas_sorted = sorted(infeas, key=lambda x: (x[2] - x[1]))
-
+            infeas_sorted = sorted(infeas, key=lambda x: (x[2] - x[1]))  # worst shortfall first
             print("\nDetails for worst infeasible bucket(s):")
-            for (b, mins, avail) in infeas_sorted[:5]:
-                removed = float(spin_removed.get(b, 0.0))
-                cap = bucket_minutes * N_AMB
-                print(f"  bucket={b} | required={mins:.1f} | available={avail:.1f} | spin_removed={removed:.1f} | cap={cap:.1f}")
-
-                culprits = jobs[tight_vertical & (t_bucket == b)].copy()
-                cols = ["Passenger ID","flight_key","dir","Airline Code","Stand","t","hard_deadline_time","sla_start_time","needs_vertical"]
-                cols = [c for c in cols if c in culprits.columns]
-                print("  Culprit jobs (first 25):")
-                print(culprits[cols].head(25))
-
-            print("❌ INFEASIBLE RISK: vertical tight ambulift minutes exceed per-bucket capacity. Examples:")
-            for row in infeas[:10]:
-                print("   bucket:", row[0], "| required:", round(row[1], 1), "| available:", round(row[2], 1))
+            for (b, mins, avail, removed) in infeas_sorted[:10]:
+                print(f"  bucket={b} | req={mins:.1f} | avail={avail:.1f} | spin_removed={removed:.1f} | cap={cap:.1f}")
+            print("\n❌ INFEASIBLE RISK (spillover-aware): spilled vertical minutes exceed availability in some buckets.")
         else:
-            print("✅ No per-bucket ambulift time overload from tight vertical jobs.")
+            print("✅ No spillover-aware ambulift time overload from tight vertical jobs.")
     else:
         print("  skipped (needs_vertical missing).")
+
 
 
     # -----------------------------

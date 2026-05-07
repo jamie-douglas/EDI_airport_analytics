@@ -38,6 +38,10 @@ class PlanningToggles:
     standby_dep_vert_mins: float = 5.0   # departures: standby on vertical side
     standby_arr_horiz_mins: float = 5.0  # arrivals: standby on horizontal side
 
+    max_late_mins: int = 120
+
+    spin_turnaround_threshold_mins: int = 60  
+
     # OPTIONAL placeholders for ferrying/break inefficiency later
     # {bucket_timestamp: 1} means reserve 1 unit in that bucket
     ferry_mini_reserved: dict = field(default_factory=dict)
