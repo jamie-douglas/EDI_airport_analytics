@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 import pyomo.environ as pyo
 import pandas as pd
+import time
 
 from .config import (
     RYANAIR_CODES,
@@ -41,6 +42,7 @@ from .config import (
     PlanningToggles,
 )
 from .params import build_vehicle_classes
+from modules.utils.progress import step
 
 
 # ---------------------------------------------------------------------
@@ -166,7 +168,13 @@ def build_pyomo_model(
         - standby_arr_horiz_mins
         - ferry_mini_reserved / ferry_drv_reserved
     """
+    
+    t0 = time.perf_counter()
+    t = t0
+
     m = pyo.ConcreteModel()
+    t = step(t, "ConcreteModel created")
+
 
     # -----------------------------
     # Constants
@@ -179,6 +187,8 @@ def build_pyomo_model(
     # Optional placeholders (do nothing unless provided)
     ferry_mini_reserved = getattr(toggles, "ferry_mini_reserved", {}) or {}
     ferry_drv_reserved = getattr(toggles, "ferry_drv_reserved", {}) or {}
+
+    t = step(t, "constants + toggles loaded")
 
     # -----------------------------
     # Build SERVICE bucket timeline
@@ -212,6 +222,8 @@ def build_pyomo_model(
     b_to_idx = {b: i for i, b in enumerate(B_list)}
     idx_to_b = {i: b for b, i in b_to_idx.items()}
 
+    t = step(t, f"bucket timeline built | buckets={len(B_list):,}")
+
     # -----------------------------
     # Sets
     # -----------------------------
@@ -227,6 +239,8 @@ def build_pyomo_model(
 
     # # Flight x bucket pairs
     # m.FB = pyo.Set(dimen=2, initialize=[(f, b) for f in flights for b in B_list])
+
+    t = step(t, f"sets built | J={len(jobs):,} | F={len(flights):,}")
 
     # -----------------------------
     # SLA parameters
@@ -255,6 +269,8 @@ def build_pyomo_model(
             continue
         t_dead = jobs.loc[j, "hard_deadline_time"]
         hard_deadline_idx[j] = None if pd.isna(t_dead) else b_to_idx[pd.to_datetime(t_dead).ceil(f"{BUCKET_MINUTES}min")]
+    
+    t = step(t, "SLA maps built (release/sla_start/deadline)")
 
     
     # -----------------------------
@@ -274,6 +290,51 @@ def build_pyomo_model(
             latest_time = pd.to_datetime(latest_time).ceil(f"{BUCKET_MINUTES}min")
             latest_idx[j] = min(int(b_to_idx.get(latest_time, len(B_list) - 1)), len(B_list) - 1)
 
+    
+    bad = [j for j in jobs.index if int(latest_idx[j]) < int(release_idx[j])]
+    print("bad jobs (latest_idx < release_idx):", len(bad))
+    if bad:
+        cols = ["Passenger ID","flight_key","dir","t","sla_start_time","sla_limit","hard_deadline_time","release_time"]
+        cols = [c for c in cols if c in jobs.columns]
+        print(jobs.loc[bad, cols].head(20))
+        # also print the raw indices for the first few
+        for j in bad[:10]:
+            print("j=", j, "release_idx=", release_idx[j], "latest_idx=", latest_idx[j])
+
+        
+    # -----------------------------
+    # Build sparse Job x Bucket set (m.JB)
+    # Feasible START buckets for each job (same timing logic as latest_idx)
+    # -----------------------------
+    jb_pairs = []
+    jb_set = set()
+
+    for j in jobs.index:
+        lo = int(release_idx[j])
+        hi = int(latest_idx[j])
+        hi = min(hi, len(B_list) - 1)
+
+        for bi in range(lo, hi + 1):
+            pair = (j, idx_to_b[bi])
+            jb_pairs.append(pair)
+            jb_set.add(pair)
+
+    m.JB = pyo.Set(dimen=2, initialize=jb_pairs)
+
+    # Helpful maps: buckets feasible per job, and jobs feasible per bucket
+    jb_by_j = {j: [] for j in jobs.index}
+    jb_by_b = {b: [] for b in B_list}
+
+    for (j, b) in jb_pairs:
+        jb_by_j[j].append(b)
+        jb_by_b[b].append(j)
+
+    print("\n[JB sparse debug]")
+    print("  JB pairs:", len(jb_pairs))
+    print("  avg buckets per job:", round(len(jb_pairs) / max(1, len(jobs)), 2))
+
+    # ------------------- end of new block ---------------------------
+
     # Group jobs per flight
     jobs_by_f = {f: [] for f in flights}
     for j in jobs.index:
@@ -291,39 +352,44 @@ def build_pyomo_model(
         for bi in range(lo, hi + 1):
             fb_pairs.append((f, idx_to_b[bi]))
 
+    t = step(t, f"sparse FB pairs list built | FB={len(fb_pairs):,}")
     
-    # -----------------------------
-    # DEBUG: sanity-check sparse FB construction
-    # -----------------------------
-    print("\n[FB sparse debug]")
-    print("  flights:", len(flights))
-    print("  buckets:", len(B_list))
-    print("  FB pairs:", len(fb_pairs))
-    print("  avg buckets per flight:", round(len(fb_pairs) / max(1, len(flights)), 2))
+    # # -----------------------------
+    # # DEBUG: sanity-check sparse FB construction
+    # # -----------------------------
+    # print("\n[FB sparse debug]")
+    # print("  flights:", len(flights))
+    # print("  buckets:", len(B_list))
+    # print("  FB pairs:", len(fb_pairs))
+    # print("  avg buckets per flight:", round(len(fb_pairs) / max(1, len(flights)), 2))
 
-    # Any flight missing FB coverage?
-    missing_f = [f for f in flights if f not in jobs_by_f or len(jobs_by_f[f]) == 0]
-    if missing_f:
-        print("  WARNING: flights with no jobs (will be ignored):", len(missing_f))
+    # # Any flight missing FB coverage?
+    # missing_f = [f for f in flights if f not in jobs_by_f or len(jobs_by_f[f]) == 0]
+    # if missing_f:
+    #     print("  WARNING: flights with no jobs (will be ignored):", len(missing_f))
 
-    # Check window lengths distribution
-    lens = []
-    for f in flights:
-        Jf = jobs_by_f.get(f, [])
-        if not Jf:
-            continue
-        lo = min(release_idx[j] for j in Jf)
-        hi = max(latest_idx[j] for j in Jf)
-        lens.append(hi - lo + 1)
+    # # Check window lengths distribution
+    # lens = []
+    # for f in flights:
+    #     Jf = jobs_by_f.get(f, [])
+    #     if not Jf:
+    #         continue
+    #     lo = min(release_idx[j] for j in Jf)
+    #     hi = max(latest_idx[j] for j in Jf)
+    #     lens.append(hi - lo + 1)
 
-    if lens:
-        print("  window buckets per flight: min/median/max =", min(lens), int(pd.Series(lens).median()), max(lens))
-        # Flag huge windows (means MAX_LATE_MINS too large or deadlines missing)
-        big = sum(1 for L in lens if L > 24 * 4)  # > 24 hours at 15-min buckets
-        print("  flights with >24h service window:", big)
+    # if lens:
+    #     print("  window buckets per flight: min/median/max =", min(lens), int(pd.Series(lens).median()), max(lens))
+    #     # Flag huge windows (means MAX_LATE_MINS too large or deadlines missing)
+    #     big = sum(1 for L in lens if L > 24 * 4)  # > 24 hours at 15-min buckets
+    #     print("  flights with >24h service window:", big)
 
 
     m.FB = pyo.Set(dimen=2, initialize=fb_pairs)
+
+    
+    t = step(t, "m.FB set created")
+
 
     
     # --- DEBUG: FB covers all possible start buckets for each flight ---
@@ -356,6 +422,8 @@ def build_pyomo_model(
     for (f, b) in fb_pairs:
         fb_by_b[b].append(f)
 
+    t = step(t, "fb_by_b index built")
+
 
     # -----------------------------
     # Vehicle classes (heterogeneous fleet)
@@ -384,15 +452,19 @@ def build_pyomo_model(
     N_AMB = sum(int(count[(vt, cid)]) for (vt, cid) in vclasses if vt == "Amb")
     N_MINI = sum(int(count[(vt, cid)]) for (vt, cid) in vclasses if vt == "Mini")
 
+    t = step(t, f"vehicle classes set | VC={len(vclasses):,} | N_AMB={N_AMB} | N_MINI={N_MINI}")
+
     # -----------------------------
     # Decision variables
     # -----------------------------
     m.x = pyo.Var(m.J, m.M, domain=pyo.Binary)          # horizontal mode choice
-    m.A = pyo.Var(m.J, m.B, domain=pyo.Binary)          # start bucket (serve once)
+    # m.A = pyo.Var(m.J, m.B, domain=pyo.Binary)          # start bucket (serve once)
+    m.A = pyo.Var(m.JB, domain=pyo.Binary)       # start bucket only where feasible ###
     m.y = pyo.Var(m.J, domain=pyo.Binary)               # SLA breach indicator
 
     # Linearisation var: U[j,b,m] = A[j,b] AND x[j,m]
-    m.U = pyo.Var(m.J, m.B, m.M, domain=pyo.Binary)
+    #m.U = pyo.Var(m.J, m.B, m.M, domain=pyo.Binary)
+    m.U = pyo.Var(m.JB, m.M, domain=pyo.Binary)  # linearisation only where A exists ###
 
     # Vehicles assigned to (flight, bucket)
     m.k = pyo.Var(m.VC, m.FB, domain=pyo.NonNegativeIntegers)
@@ -402,6 +474,20 @@ def build_pyomo_model(
     m.H_vehag = pyo.Var(m.B, domain=pyo.NonNegativeIntegers)
     m.H_push = pyo.Var(m.B, domain=pyo.NonNegativeIntegers)
 
+
+    print(f"[sizes] J={len(jobs):,} | B={len(B_list):,} | JB={len(jb_pairs):,} | FB={len(fb_pairs):,}")
+    
+    t = step(
+        t,
+        "vars created | "
+        f"x={len(jobs)*len(m.M):,} | "
+        f"JB={len(jb_pairs):,} | "
+        f"A={len(jb_pairs):,} | "
+        f"U={len(jb_pairs)*len(m.M):,} | "
+        f"k={len(vclasses)*len(fb_pairs):,}"
+    )
+
+
     # -----------------------------
     # Objective (weights are placeholders; replace with real costs later)
     # -----------------------------
@@ -409,7 +495,8 @@ def build_pyomo_model(
     LAMBDA = 1e6   # SLA breaches are extremely undesirable
 
     def obj_rule(m):
-        trips = BIG * sum(m.k[vc, fb] for vc in m.VC for fb in m.FB)
+        #trips = BIG * sum(m.k[vc, fb] for vc in m.VC for fb in m.FB)
+        trips = BIG * pyo.quicksum(m.k[vc, fb] for vc in m.VC for fb in m.FB)###
 
         soft = sum(
             PENALTY["AMB_HORIZONTAL"] * m.x[j, "Amb"] +
@@ -440,35 +527,75 @@ def build_pyomo_model(
 
     m.OBJ = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
 
+    t = step(t, "objective created")
+
     # -----------------------------
     # Core constraints
     # -----------------------------
     # One mode per job
     m.OneMode = pyo.Constraint(m.J, rule=lambda m, j: sum(m.x[j, mm] for mm in m.M) == 1)
 
-    # Linearisation: U = A AND x
-    def u_le_a(m, j, b, mm):
-        return m.U[j, b, mm] <= m.A[j, b]
-    m.U_le_A = pyo.Constraint(m.J, m.B, m.M, rule=u_le_a)
+    # # Linearisation: U = A AND x
+    # def u_le_a(m, j, b, mm):
+    #     return m.U[j, b, mm] <= m.A[j, b]
+    # m.U_le_A = pyo.Constraint(m.J, m.B, m.M, rule=u_le_a)
 
-    def u_le_x(m, j, b, mm):
-        return m.U[j, b, mm] <= m.x[j, mm]
-    m.U_le_X = pyo.Constraint(m.J, m.B, m.M, rule=u_le_x)
 
-    def u_ge_and(m, j, b, mm):
-        return m.U[j, b, mm] >= m.A[j, b] + m.x[j, mm] - 1
-    m.U_ge_AND = pyo.Constraint(m.J, m.B, m.M, rule=u_ge_and)
+    # def u_le_x(m, j, b, mm):
+    #     return m.U[j, b, mm] <= m.x[j, mm]
+    # m.U_le_X = pyo.Constraint(m.J, m.B, m.M, rule=u_le_x)
+
+    # def u_ge_and(m, j, b, mm):
+    #     return m.U[j, b, mm] >= m.A[j, b] + m.x[j, mm] - 1
+    # m.U_ge_AND = pyo.Constraint(m.J, m.B, m.M, rule=u_ge_and)
+
+    # t = step(t, "constraints: U linearisation (3 blocks)")
+
+    
+    m.U_le_A = pyo.Constraint(###
+        m.JB, m.M,###
+        rule=lambda m, j, b, mm: m.U[j, b, mm] <= m.A[j, b]###
+    )###
+
+    m.U_le_X = pyo.Constraint(###
+        m.JB, m.M,###
+        rule=lambda m, j, b, mm: m.U[j, b, mm] <= m.x[j, mm]###
+    )###
+
+    m.U_ge_AND = pyo.Constraint(###
+        m.JB, m.M,###
+        rule=lambda m, j, b, mm: m.U[j, b, mm] >= m.A[j, b] + m.x[j, mm] - 1###
+    )###
+
+    t = step(t, "constraints: U linearisation (JB x M)")
+
 
     # Serve once (and only after release)
+    # def serve_once(m, j):
+    #     return sum(m.A[j, b] for b in m.B if b_to_idx[b] >= release_idx[j]) == 1
+    # m.ServeOnce = pyo.Constraint(m.J, rule=serve_once)
+    
+    
     def serve_once(m, j):
-        return sum(m.A[j, b] for b in m.B if b_to_idx[b] >= release_idx[j]) == 1
-    m.ServeOnce = pyo.Constraint(m.J, rule=serve_once)
+        buckets = jb_by_j.get(j, [])
+        if not buckets:
+            # No feasible start buckets → job is infeasible
+            return pyo.Constraint.Infeasible
+
+        return pyo.quicksum(m.A[j, b] for b in buckets) == 1
+
+
+    m.ServeOnce = pyo.Constraint(m.J, rule=serve_once)###
+
 
     def no_service_before_release(m, j, b):
         if b_to_idx[b] < release_idx[j]:
             return m.A[j, b] == 0
         return pyo.Constraint.Skip
-    m.NoServiceBeforeRelease = pyo.Constraint(m.J, m.B, rule=no_service_before_release)
+    
+    m.NoServiceBeforeRelease = pyo.Constraint(m.JB, rule=no_service_before_release)###
+    #m.NoServiceBeforeRelease = pyo.Constraint(m.J, m.B, rule=no_service_before_release)
+
 
 
     def no_service_after_deadline(m, j, b):
@@ -478,13 +605,35 @@ def build_pyomo_model(
         if b_to_idx[b] > idx:
             return m.A[j, b] == 0
         return pyo.Constraint.Skip
-    m.NoServiceAfterDeadline = pyo.Constraint(m.J, m.B, rule=no_service_after_deadline)
+    m.NoServiceAfterDeadline = pyo.Constraint(m.JB, rule=no_service_after_deadline)###
+    # m.NoServiceAfterDeadline = pyo.Constraint(m.J, m.B, rule=no_service_after_deadline)
+
+
+
+    t = step(t, "constraints: ServeOnce + release/deadline bounds")
 
     # SLA breach definition: delay <= L_j + M_BIG*y
+    # def sla_rule(m, j):
+    #     delay = sum((b_to_idx[b] - sla_start_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)
+    #     return delay <= L_j[j] + M_BIG * m.y[j]
+    # m.SLA = pyo.Constraint(m.J, rule=sla_rule)
+    # t = step(t, "constraints: SLA")
+    
+    
     def sla_rule(m, j):
-        delay = sum((b_to_idx[b] - sla_start_idx[j]) * BUCKET_MINUTES * m.A[j, b] for b in m.B)
+        buckets = jb_by_j.get(j, [])
+        if not buckets:
+            return pyo.Constraint.Infeasible
+        delay = pyo.quicksum(
+            (b_to_idx[b] - sla_start_idx[j]) * BUCKET_MINUTES * m.A[j, b]
+            for b in buckets
+        )
         return delay <= L_j[j] + M_BIG * m.y[j]
-    m.SLA = pyo.Constraint(m.J, rule=sla_rule)
+
+    m.SLA = pyo.Constraint(m.J, rule=sla_rule)###
+
+    t = step(t, "constraints: SLA (JB-summed)")
+
 
     # Safety stands: disallow push unless Ryanair (only if needs_vertical too)
     def safety_rule(m, j):
@@ -501,20 +650,77 @@ def build_pyomo_model(
         return pyo.Constraint.Skip
     m.NoAmbDomesticArrivals = pyo.Constraint(m.J, rule=no_amb_horizontal_domestic_arrivals)
 
-    # -----------------------------
-    # Helper: jobs per flight
-    # -----------------------------
-    jobs_by_f = {f: [] for f in flights}
-    for j in jobs.index:
-        jobs_by_f[jobs.loc[j, "flight_key"]].append(j)
+    t = step(t, "constraints: safety + domestic arrival rules")
 
+    
+    def A_at(m, j, b):###
+        return m.A[j, b] if (j, b) in jb_set else 0.0###
+
+    def U_at(m, j, b, mm):###
+        return m.U[j, b, mm] if (j, b) in jb_set else 0.0###
+
+
+    
+    def _as_pyomo_constraint(expr):
+        # Convert trivial Python booleans into valid Pyomo constraint returns
+        if expr is True:
+            return pyo.Constraint.Feasible
+        if expr is False:
+            return pyo.Constraint.Infeasible
+        return expr
+
+    # # -----------------------------
+    # # Vehicle physical capacity (seat + wheelchair)
+    # # Uses U[j,b,m] and A[j,b]
+    # # -----------------------------
+    # def mini_seat_cap(m, f, b):
+    #     Jf = jobs_by_f.get(f, [])
+    #     demand = sum(m.U[j, b, "Mini"] for j in Jf)
+    #     supply = sum(
+    #         m.seatcap[("Mini", cid)] * m.k[("Mini", cid), (f, b)]
+    #         for (vt, cid) in m.VC if vt == "Mini"
+    #     )
+    #     return demand <= supply
+
+    # def mini_wc_cap(m, f, b):
+    #     Jf = jobs_by_f.get(f, [])
+    #     demand = sum(int(jobs.loc[j, "needs_wc"]) * m.U[j, b, "Mini"] for j in Jf)
+    #     supply = sum(
+    #         m.wccap[("Mini", cid)] * m.k[("Mini", cid), (f, b)]
+    #         for (vt, cid) in m.VC if vt == "Mini"
+    #     )
+    #     return demand <= supply
+
+    # def amb_seat_cap(m, f, b):
+    #     Jf = jobs_by_f.get(f, [])
+    #     vertical = sum(int(jobs.loc[j, "needs_vertical"]) * m.A[j, b] for j in Jf)
+    #     horizontal_amb = sum(m.U[j, b, "Amb"] for j in Jf)
+    #     demand = vertical + horizontal_amb
+    #     supply = sum(
+    #         m.seatcap[("Amb", cid)] * m.k[("Amb", cid), (f, b)]
+    #         for (vt, cid) in m.VC if vt == "Amb"
+    #     )
+    #     return demand <= supply
+
+    # def amb_wc_cap(m, f, b):
+    #     Jf = jobs_by_f.get(f, [])
+    #     vertical_wc = sum(int(jobs.loc[j, "needs_wc"]) * int(jobs.loc[j, "needs_vertical"]) * m.A[j, b] for j in Jf)
+    #     horizontal_wc = sum(int(jobs.loc[j, "needs_wc"]) * m.U[j, b, "Amb"] for j in Jf)
+    #     demand = vertical_wc + horizontal_wc
+    #     supply = sum(
+    #         m.wccap[("Amb", cid)] * m.k[("Amb", cid), (f, b)]
+    #         for (vt, cid) in m.VC if vt == "Amb"
+    #     )
+    #     return demand <= supply
+
+    
     # -----------------------------
     # Vehicle physical capacity (seat + wheelchair)
-    # Uses U[j,b,m] and A[j,b]
+    # Uses U_at/A_at to handle sparse JB
     # -----------------------------
     def mini_seat_cap(m, f, b):
         Jf = jobs_by_f.get(f, [])
-        demand = sum(m.U[j, b, "Mini"] for j in Jf)
+        demand = sum(U_at(m, j, b, "Mini") for j in Jf)
         supply = sum(
             m.seatcap[("Mini", cid)] * m.k[("Mini", cid), (f, b)]
             for (vt, cid) in m.VC if vt == "Mini"
@@ -523,7 +729,7 @@ def build_pyomo_model(
 
     def mini_wc_cap(m, f, b):
         Jf = jobs_by_f.get(f, [])
-        demand = sum(int(jobs.loc[j, "needs_wc"]) * m.U[j, b, "Mini"] for j in Jf)
+        demand = sum(int(jobs.loc[j, "needs_wc"]) * U_at(m, j, b, "Mini") for j in Jf)
         supply = sum(
             m.wccap[("Mini", cid)] * m.k[("Mini", cid), (f, b)]
             for (vt, cid) in m.VC if vt == "Mini"
@@ -532,8 +738,13 @@ def build_pyomo_model(
 
     def amb_seat_cap(m, f, b):
         Jf = jobs_by_f.get(f, [])
-        vertical = sum(int(jobs.loc[j, "needs_vertical"]) * m.A[j, b] for j in Jf)
-        horizontal_amb = sum(m.U[j, b, "Amb"] for j in Jf)
+        vertical = sum(int(jobs.loc[j, "needs_vertical"]) * A_at(m, j, b) for j in Jf)
+        
+        horizontal_amb = sum(
+            U_at(m, j, b, "Amb") for j in Jf
+            if int(jobs.loc[j, "needs_vertical"]) == 0
+            )
+
         demand = vertical + horizontal_amb
         supply = sum(
             m.seatcap[("Amb", cid)] * m.k[("Amb", cid), (f, b)]
@@ -543,8 +754,17 @@ def build_pyomo_model(
 
     def amb_wc_cap(m, f, b):
         Jf = jobs_by_f.get(f, [])
-        vertical_wc = sum(int(jobs.loc[j, "needs_wc"]) * int(jobs.loc[j, "needs_vertical"]) * m.A[j, b] for j in Jf)
-        horizontal_wc = sum(int(jobs.loc[j, "needs_wc"]) * m.U[j, b, "Amb"] for j in Jf)
+        vertical_wc = sum(
+            int(jobs.loc[j, "needs_wc"]) * int(jobs.loc[j, "needs_vertical"]) * A_at(m, j, b)
+            for j in Jf
+        )
+        
+        horizontal_wc = sum(
+            int(jobs.loc[j, "needs_wc"]) * U_at(m, j, b, "Amb")
+            for j in Jf
+            if int(jobs.loc[j, "needs_vertical"]) == 0
+        )
+
         demand = vertical_wc + horizontal_wc
         supply = sum(
             m.wccap[("Amb", cid)] * m.k[("Amb", cid), (f, b)]
@@ -552,10 +772,15 @@ def build_pyomo_model(
         )
         return demand <= supply
 
+
     m.MiniSeatCap = pyo.Constraint(m.FB, rule=lambda m, f, b: mini_seat_cap(m, f, b))
     m.MiniWcCap = pyo.Constraint(m.FB, rule=lambda m, f, b: mini_wc_cap(m, f, b))
     m.AmbSeatCap = pyo.Constraint(m.FB, rule=lambda m, f, b: amb_seat_cap(m, f, b))
     m.AmbWcCap = pyo.Constraint(m.FB, rule=lambda m, f, b: amb_wc_cap(m, f, b))
+
+    t = step(t, "constraints: per-flight vehicle capacity (seat/wc)")
+
+
 
     # -----------------------------
     # Fleet exclusivity per bucket:
@@ -577,6 +802,8 @@ def build_pyomo_model(
 
 
     m.FleetExclusive = pyo.Constraint(m.VC, m.B, rule=lambda m, vtype, cid, b: fleet_exclusive(m, vtype, cid, b))
+
+    t = step(t, "constraints: FleetExclusive (VC x B)")
 
     # Total minibus cap with ferry reservation (optional)
     # def total_mini_cap_with_ferry(m, b):
@@ -607,6 +834,8 @@ def build_pyomo_model(
 
     m.TotalMiniCapWithFerry = pyo.Constraint(m.B, rule=total_mini_cap_with_ferry)###
 
+    t = step(t, "constraints: TotalMiniCapWithFerry")
+
 
     # ---------------------------------------------------------------------
     # Time capacity per bucket (minutes) WITH SPILLOVER + combined-only standby
@@ -618,6 +847,52 @@ def build_pyomo_model(
     standby_vert = spill["standby_vert"]
     standby_horiz = spill["standby_horiz"]
 
+    
+    # ---------------------------------------------------------------------
+    # Aircraft docking bottleneck for vertical ambulift work
+    # ---------------------------------------------------------------------
+    # Operational rule:
+    # - Vertical ambulift work requires docking to the aircraft.
+    # - Only ONE ambulift can dock to a given flight at a time.
+    # Bucket approximation:
+    # - In any bucket, vertical ambulift minutes for a flight <= BUCKET_MINUTES * 1
+
+    MAX_DOCKED_AMB_PER_FLIGHT = int(getattr(toggles, "max_docked_amb_per_flight", 1) or 1)
+
+    def amb_vert_dock_cap(m, f, b):
+        ib = b_to_idx[b]
+        used = 0.0
+
+        # Only jobs belonging to this flight can consume docking time on this flight
+        Jf = jobs_by_f.get(f, [])
+        if not Jf:
+            return pyo.Constraint.Feasible
+
+        for j in Jf:
+            if int(jobs.loc[j, "needs_vertical"]) != 1:
+                continue
+
+            # Vertical minutes spill across buckets based on job start bucket
+            for k, mins in enumerate(amb_vert[j]):
+                i0 = ib - k
+                if i0 < 0:
+                    break
+                b0 = idx_to_b[i0]
+                used += mins * A_at(m, j, b0)
+
+        expr = used <= float(BUCKET_MINUTES) * float(MAX_DOCKED_AMB_PER_FLIGHT)
+        # handle trivial bools (can happen in empty buckets)
+        if expr is True:
+            return pyo.Constraint.Feasible
+        if expr is False:
+            return pyo.Constraint.Infeasible
+        return expr
+
+    m.AmbVerticalDockCap = pyo.Constraint(m.FB, rule=lambda m, f, b: amb_vert_dock_cap(m, f, b))
+
+    t = step(t, f"constraints: AmbVerticalDockCap (<= {MAX_DOCKED_AMB_PER_FLIGHT} docked amb per flight per bucket)")
+
+
     def amb_time_cap(m, b):
         """
         Ambulift minute capacity in bucket b.
@@ -628,38 +903,72 @@ def build_pyomo_model(
         - Standby minutes on vertical side (departures), ONLY for combined jobs:
             indicator = (A - U_Amb) = 1 when job starts and horizontal != Amb.
         """
+        
         ib = b_to_idx[b]
         used = 0.0
 
         for j in m.J:
-            # 1) ambulift horizontal active minutes (if Amb chosen)
             for k, mins in enumerate(amb_active[j]):
                 i0 = ib - k
                 if i0 < 0:
                     break
                 b0 = idx_to_b[i0]
-                used += mins * m.U[j, b0, "Amb"]
+                used += mins * U_at(m, j, b0, "Amb")
 
-            # 2) vertical active minutes (if needs_vertical)
             if int(jobs.loc[j, "needs_vertical"]) == 1:
                 for k, mins in enumerate(amb_vert[j]):
                     i0 = ib - k
                     if i0 < 0:
                         break
                     b0 = idx_to_b[i0]
-                    used += mins * m.A[j, b0]
+                    used += mins * A_at(m, j, b0)
 
-                # 3) vertical-side standby (dep only via precompute), combined-only:
-                # A - U_Amb = 0 if horizontal=Amb; =A if horizontal!=Amb
                 for k, mins in enumerate(standby_vert[j]):
                     i0 = ib - k
                     if i0 < 0:
                         break
                     b0 = idx_to_b[i0]
-                    used += mins * (m.A[j, b0] - m.U[j, b0, "Amb"])
+                    used += mins * (A_at(m, j, b0) - U_at(m, j, b0, "Amb"))
 
+        
         available = BUCKET_MINUTES * N_AMB - float(spin_removed.get(b, 0.0))
-        return used <= available
+        return _as_pyomo_constraint(used <= available)
+
+
+        # ib = b_to_idx[b]
+        # used = 0.0
+
+        # for j in m.J:
+        #     # 1) ambulift horizontal active minutes (if Amb chosen)
+        #     for k, mins in enumerate(amb_active[j]):
+        #         i0 = ib - k
+        #         if i0 < 0:
+        #             break
+        #         b0 = idx_to_b[i0]
+        #         used += mins * m.U[j, b0, "Amb"]
+
+        #     # 2) vertical active minutes (if needs_vertical)
+        #     if int(jobs.loc[j, "needs_vertical"]) == 1:
+        #         for k, mins in enumerate(amb_vert[j]):
+        #             i0 = ib - k
+        #             if i0 < 0:
+        #                 break
+        #             b0 = idx_to_b[i0]
+        #             used += mins * m.A[j, b0]
+
+        #         # 3) vertical-side standby (dep only via precompute), combined-only:
+        #         # A - U_Amb = 0 if horizontal=Amb; =A if horizontal!=Amb
+        #         for k, mins in enumerate(standby_vert[j]):
+        #             i0 = ib - k
+        #             if i0 < 0:
+        #                 break
+        #             b0 = idx_to_b[i0]
+        #             used += mins * (m.A[j, b0] - m.U[j, b0, "Amb"])
+
+        # available = BUCKET_MINUTES * N_AMB - float(spin_removed.get(b, 0.0))
+        # return used <= available
+    
+    t = step(t, "spill vectors precomputed")
 
     def mini_time_cap(m, b):
         """
@@ -670,31 +979,56 @@ def build_pyomo_model(
         - Horizontal-side standby minutes (arrivals), only applicable when Mini is chosen.
           (If horizontal mode is Push, standby should be represented in staff/pusher model later.)
         """
+        
         ib = b_to_idx[b]
         used = 0.0
 
         for j in m.J:
-            # 1) minibus active minutes (if Mini chosen)
             for k, mins in enumerate(mini_active[j]):
                 i0 = ib - k
                 if i0 < 0:
                     break
                 b0 = idx_to_b[i0]
-                used += mins * m.U[j, b0, "Mini"]
+                used += mins * U_at(m, j, b0, "Mini")
 
-            # 2) arrival-side standby (precomputed), only counts when Mini chosen
             for k, mins in enumerate(standby_horiz[j]):
                 i0 = ib - k
                 if i0 < 0:
                     break
                 b0 = idx_to_b[i0]
-                used += mins * m.U[j, b0, "Mini"]
+                used += mins * U_at(m, j, b0, "Mini")
 
+        
         available = BUCKET_MINUTES * N_MINI
-        return used <= available
+        return _as_pyomo_constraint(used <= available)
+
+        # ib = b_to_idx[b]
+        # used = 0.0
+
+        # for j in m.J:
+        #     # 1) minibus active minutes (if Mini chosen)
+        #     for k, mins in enumerate(mini_active[j]):
+        #         i0 = ib - k
+        #         if i0 < 0:
+        #             break
+        #         b0 = idx_to_b[i0]
+        #         used += mins * m.U[j, b0, "Mini"]
+
+        #     # 2) arrival-side standby (precomputed), only counts when Mini chosen
+        #     for k, mins in enumerate(standby_horiz[j]):
+        #         i0 = ib - k
+        #         if i0 < 0:
+        #             break
+        #         b0 = idx_to_b[i0]
+        #         used += mins * m.U[j, b0, "Mini"]
+
+        # available = BUCKET_MINUTES * N_MINI
+        # return used <= available
 
     m.AmbTimeCap = pyo.Constraint(m.B, rule=amb_time_cap)
     m.MiniTimeCap = pyo.Constraint(m.B, rule=mini_time_cap)
+
+    t = step(t, "constraints: AmbTimeCap + MiniTimeCap")
 
     # -----------------------------
     # Staff constraints per bucket
@@ -717,12 +1051,15 @@ def build_pyomo_model(
 
     def push_staff(m, b):
         # Pushers required 1:1 for push jobs served in bucket b
-        required = sum(m.U[j, b, "Push"] for j in m.J)
+        # required = sum(m.U[j, b, "Push"] for j in m.J)
+        required = pyo.quicksum(U_at(m, j, b, "Push") for j in jb_by_b.get(b, []))
         return m.H_push[b] >= required
 
     m.DriverStaff = pyo.Constraint(m.B, rule=drv_staff)
     m.VehAgStaff = pyo.Constraint(m.B, rule=vehag_staff)
     m.PushStaff = pyo.Constraint(m.B, rule=push_staff)
+
+    t = step(t, "constraints: staff (Drv/VehAg/Push)")
 
     # -----------------------------
     # Gate 7/8 lift bottleneck (bucketed)
@@ -732,9 +1069,16 @@ def build_pyomo_model(
     def lift_cap(m, b):
         if len(J_lift) == 0:
             return pyo.Constraint.Feasible
-        wch = pyo.quicksum(m.A[j, b] for j in J_lift)
-        return wch * float(LIFT_CYCLE_MINS) <= float(LIFT_CAPACITY_MINS)
+       # wch = pyo.quicksum(m.A[j, b] for j in J_lift)
+        wch = pyo.quicksum(A_at(m, j, b) for j in J_lift)
+        return _as_pyomo_constraint(wch * float(LIFT_CYCLE_MINS) <= float(LIFT_CAPACITY_MINS))
 
     m.LiftCap = pyo.Constraint(m.B, rule=lift_cap)
+
+    
+    t = step(t, "constraints: LiftCap")
+
+    t = step(t, f"build_pyomo_model complete | total={(time.perf_counter()-t0):0.2f}s")
+
 
     return m

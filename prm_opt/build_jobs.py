@@ -258,6 +258,50 @@ def build_jobs(
         30 - toggles.sla_buffer_mins,
     )
 
+    
+    # ==========================================================
+    # Arrival SLA feasibility guard (JOB-LEVEL)
+    # ----------------------------------------------------------
+    # Drop arrival jobs where the job starts AFTER the SLA window
+    # implied by the flight anchor has already expired:
+    #   Job Start Time > sla_start_time + sla_limit + max_late_mins
+    #
+    # This prevents empty JB windows downstream.
+    # ==========================================================
+
+    MAX_LATE_MINS = max(0, int(getattr(toggles, "max_late_mins", 180) or 180))
+
+    mask_arrival = (
+        (x["dir"] == "A")  # or (x["A/D"] == "A") - both exist at this point
+        & x["sla_start_time"].notna()
+        & x["Job Start Time"].notna()
+        & x["sla_limit"].notna()
+    )
+
+    latest_allowed = (
+        x.loc[mask_arrival, "sla_start_time"]
+        + pd.to_timedelta(
+            x.loc[mask_arrival, "sla_limit"] + MAX_LATE_MINS,
+            unit="m",
+        )
+    )
+
+    mask_bad = x.loc[mask_arrival, "Job Start Time"] > latest_allowed
+    bad_rows = x.loc[mask_arrival].loc[mask_bad]
+
+    if len(bad_rows) > 0:
+        print(
+            f"\n[BUILD_JOBS] Dropping {len(bad_rows)} arrival jobs with expired SLA window "
+            f"(max_late_mins={MAX_LATE_MINS})."
+        )
+        cols = ["Passenger ID", "Flight Number", "Airline Code", "sla_start_time", "Job Start Time", "sla_limit", "Chocks DT"]
+        cols = [c for c in cols if c in x.columns]
+        print(bad_rows[cols].head(10))
+
+    # IMPORTANT: drop from x (the dataframe we're actually using)
+    x = x.drop(index=bad_rows.index).copy()
+
+
     # -------------------------
     # Base duration (minutes busy)
     # -------------------------

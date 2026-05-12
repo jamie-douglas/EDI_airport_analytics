@@ -15,13 +15,15 @@ Runs S25 scenarios.
 import pyomo.environ as pyo
 from pyomo.core.base import TransformationFactory
 from modules.utils.progress import step
+from dataclasses import replace
 
 
 from .ingest_s25 import ingest_s25
 from .build_jobs import build_jobs
 from .policy_s1 import apply_policy_s1
 from .params import build_tau_from_jobs, build_spin_minutes, build_vehicle_classes
-from .pyomo_model_legacy import build_pyomo_model
+from .pyomo_model_v2 import build_pyomo_model
+#from .pyomo_model_legacy import build_pyomo_model
 #from .pyomo_model import build_pyomo_model
 from .config import LIFT_CAPACITY_MINS, LIFT_CYCLE_MINS, PlanningToggles
 
@@ -31,7 +33,7 @@ from .outputs import (
     extract_vehicle_allocations,
     run_sanity_checks,
     baseline_s1_summary,
-    baseline_s1_vehicle_curves
+    baseline_s1_vehicle_curves_capacity
 )
 
 def pre_solve_debug(
@@ -463,6 +465,69 @@ def pre_solve_debug(
     return {"ok": True, "missingness": miss}
 
 
+def check_job_time_windows(jobs, BUCKET_MINUTES=15, max_late_mins=180):
+    # Build bucket timeline the same way as the model
+    t_min = pd.to_datetime(jobs["t"]).min()
+    sla_starts = pd.to_datetime(
+        jobs["sla_start_time"] if "sla_start_time" in jobs.columns else jobs["s"]
+    )
+
+    start_time = min(t_min, sla_starts.min()).floor(f"{BUCKET_MINUTES}min")
+    end_time = max(
+        pd.to_datetime(jobs["s"]).max(),
+        pd.to_datetime(jobs["hard_deadline_time"]).dropna().max()
+        if "hard_deadline_time" in jobs.columns else pd.to_datetime(jobs["s"]).max()
+    ).ceil(f"{BUCKET_MINUTES}min") + pd.to_timedelta(6, "h")
+
+    B_list = list(pd.date_range(start=start_time, end=end_time, freq=f"{BUCKET_MINUTES}min"))
+    b_to_idx = {b: i for i, b in enumerate(B_list)}
+
+    bad = []
+
+    for j in jobs.index:
+        # release
+        release_idx = b_to_idx[pd.to_datetime(jobs.loc[j, "t"]).floor(f"{BUCKET_MINUTES}min")]
+
+        # latest
+        if (
+            "hard_deadline_time" in jobs.columns
+            and str(jobs.loc[j, "dir"]) == "D"
+            and pd.notna(jobs.loc[j, "hard_deadline_time"])
+        ):
+            latest_idx = b_to_idx[
+                pd.to_datetime(jobs.loc[j, "hard_deadline_time"]).ceil(f"{BUCKET_MINUTES}min")
+            ]
+        else:
+            sla_start = (
+                pd.to_datetime(jobs.loc[j, "sla_start_time"])
+                if "sla_start_time" in jobs.columns and pd.notna(jobs.loc[j, "sla_start_time"])
+                else pd.to_datetime(jobs.loc[j, "s"])
+            ).floor(f"{BUCKET_MINUTES}min")
+
+            latest_time = sla_start + pd.to_timedelta(
+                jobs.loc[j, "sla_limit"] + max_late_mins, "m"
+            )
+            latest_idx = b_to_idx.get(
+                latest_time.ceil(f"{BUCKET_MINUTES}min"),
+                max(b_to_idx.values())
+            )
+
+        if latest_idx < release_idx:
+            bad.append(j)
+
+    print(f"\n🚨 Jobs with NO feasible start bucket: {len(bad)}")
+    if bad:
+        cols = [
+            "Passenger ID", "flight_key", "dir",
+            "t", "sla_start_time", "sla_limit", "hard_deadline_time"
+        ]
+        cols = [c for c in cols if c in jobs.columns]
+        print(jobs.loc[bad, cols].head(15))
+
+    return bad
+
+
+
 def feasibility_ladder(model, solver, groups):
     """
     Solve multiple times with different constraint groups deactivated.
@@ -707,12 +772,16 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
 
     # Baseline curves (use scheduled bucket "s" for comparability)
     
-    curves = baseline_s1_vehicle_curves(
+    
+    curves = baseline_s1_vehicle_curves_capacity(
         jobs,
         decision_col="s1_decision",
         bucket_col="s",
-        count_no_vehicle_as_push=True,
+        count_no_vehicle_as_push=True,   # computed but you can ignore pusher outputs
+        amb_seatcap=3, amb_wccap=1,      # conservative from current fleet
+        mini_seatcap=6, mini_wccap=2,    # current minibuses
     )
+
 
 
     # Current fleet totals (same method as optimisation: from VEHICLE_MODELS)
@@ -722,11 +791,14 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
 
     summary = baseline_s1_summary(jobs, curves, current_amb=current_amb, current_mini=current_mini)
 
+    
     return {
         "jobs": jobs,
         "summary": summary,
-        **curves,
+        **{k: curves[k] for k in ["ambulift_curve","minibus_curve","driver_curve","veh_agent_curve","pusher_curve"]},
+        "fb_detail": curves["fb_detail"],
     }
+
 
 
 
@@ -1083,6 +1155,8 @@ def run_s25_s2_v2(
     # 2) Params
     BUCKET_MINUTES = 15
 
+    bad_jobs = check_job_time_windows(jobs, BUCKET_MINUTES, max_late_mins=180)
+
     print("[3/6] build_tau_from_jobs…", flush=True)
     tau = build_tau_from_jobs(jobs, toggles)
     t = step(t, "tau built")
@@ -1228,6 +1302,166 @@ def run_s25_s2_v2(
         "loaded_solution": loaded,
         "load_error": load_err,
     }
+
+
+
+def run_s25_s2_v2_sensitivity(
+    start,
+    end,
+    vertical_cycle_grid=(0, 5, 10, 15),
+    solver_name="highs",
+    toggles: PlanningToggles = PlanningToggles(),
+    time_limit_sec: int = 600,
+    threads: int = 8,
+    mip_rel_gap: float | None = None,
+):
+    """
+    Run Scenario 2 (v2) for multiple vertical_cycle_mins values WITHOUT re-ingesting data.
+
+    Reuses:
+      - ingest_s25 output
+      - jobs table
+      - tau
+      - vehicle classes
+      - spin_removed
+      - pre_solve_debug results
+
+    Only repeats:
+      - build_pyomo_model (because time parameters change)
+      - solver solve
+      - extraction
+    """
+
+    print("\nPRM OPT — S25 Scenario 2 (v2) — Sensitivity")
+    print(f"Window : {start} → {end}")
+    print(f"vertical_cycle_grid: {list(vertical_cycle_grid)}\n")
+
+    t = time.perf_counter()
+
+    # -------------------------
+    # 1) Ingest + build jobs (ONCE)
+    # -------------------------
+    print("[1/4] ingest_s25…", flush=True)
+    df_prm_master = ingest_s25(start, end)
+    t = step(t, f"ingest_s25 done | rows={len(df_prm_master):,}")
+
+    print("[2/4] build_jobs…", flush=True)
+    jobs = build_jobs(df_prm_master, bucket="15min", toggles=toggles)
+    t = step(t, f"build_jobs done | jobs={len(jobs):,}")
+
+    BUCKET_MINUTES = 15
+
+    print("[3/4] build_tau + classes + spin_removed…", flush=True)
+    tau = build_tau_from_jobs(jobs, toggles)
+    classes = build_vehicle_classes(include_future=True)
+    N_AMB = sum(int(c["count"]) for c in classes.get("Amb", []))
+    spin_removed = build_spin_minutes(
+        jobs,
+        spin_lock_threshold_mins=50,
+        n_ambulifts=N_AMB,
+        bucket_minutes=BUCKET_MINUTES,
+    )
+    t = step(t, f"params built | N_AMB={N_AMB}")
+
+    print("[4/4] pre_solve_debug (no solver)…", flush=True)
+    pre_solve_debug(
+        jobs=jobs,
+        toggles=toggles,
+        tau=tau,
+        spin_removed=spin_removed,
+        classes=classes,
+        bucket_minutes=BUCKET_MINUTES,
+        M_BIG=10_000,
+        lift_cycle_mins=LIFT_CYCLE_MINS,
+        lift_capacity_mins=LIFT_CAPACITY_MINS,
+    )
+    t = step(t, "pre_solve_debug done")
+
+    # -------------------------
+    # Sensitivity loop: model build + solve (REPEATED)
+    # -------------------------
+    runs = []
+    for vcm in vertical_cycle_grid:
+        print("\n" + "-" * 70)
+        print(f"[SENS] vertical_cycle_mins = {vcm}")
+        print("-" * 70)
+
+        toggles_local = replace(toggles, vertical_cycle_mins=float(vcm))
+
+        # Build model (must rebuild because spill vectors depend on vcm)
+        t_build0 = time.perf_counter()
+        model = build_pyomo_model(
+            jobs=jobs,
+            tau=tau,
+            spin_removed=spin_removed,
+            toggles=toggles_local,
+        )
+        print(f"    ✓ build_pyomo_model done   [{time.perf_counter() - t_build0:0.2f}s]", flush=True)
+        print("Vars:", model.nvariables())
+        print("Cons:", model.nconstraints())
+
+        # Solve
+        solver = pyo.SolverFactory(solver_name)
+        solver.options["time_limit"] = float(time_limit_sec)
+        solver.options["threads"] = int(threads)
+        if mip_rel_gap is not None:
+            solver.options["mip_rel_gap"] = float(mip_rel_gap)
+
+        t_solve0 = time.perf_counter()
+        results = solver.solve(model, tee=True, load_solutions=False)
+        solve_wall = time.perf_counter() - t_solve0
+
+        tc = str(results.solver.termination_condition).lower()
+        st = str(results.solver.status).lower()
+        print(f"[SOLVE] wall={solve_wall:0.2f}s | tc={tc} | status={st}", flush=True)
+
+        loaded = False
+        load_err = None
+        try:
+            model.solutions.load_from(results)
+            loaded = True
+        except Exception as e:
+            load_err = repr(e)
+
+        out = {
+            "vertical_cycle_mins": float(vcm),
+            "tc": tc,
+            "st": st,
+            "status": "infeasible" if tc in ("infeasible", "infeasibleorunbounded") else tc,
+            "loaded_solution": loaded,
+            "load_error": load_err,
+            "model": model,
+            "jobs": jobs,
+            "results": results,
+        }
+
+        # Extract outputs if usable
+        if loaded and (tc in ("optimal", "feasible") or ("timelimit" in tc)):
+            summary = extract_summary(model, jobs)
+            job_df = extract_job_assignments(model, jobs)
+            vehicle_df = extract_vehicle_allocations(model)
+            checks = run_sanity_checks(job_df, vehicle_df)
+
+            out.update({
+                "status": "optimal" if tc in ("optimal", "feasible") else "timelimit_feasible",
+                "summary": summary,
+                "job_assignments": job_df,
+                "vehicle_allocations": vehicle_df,
+                "sanity_checks": checks,
+            })
+
+        runs.append(out)
+
+    return {
+        "status": "sensitivity_complete",
+        "start": start,
+        "end": end,
+        "jobs": jobs,
+        "tau": tau,
+        "spin_removed": spin_removed,
+        "runs": runs,
+    }
+
 
 
 def run_s25_s2_lp(

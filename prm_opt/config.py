@@ -38,7 +38,7 @@ class PlanningToggles:
     standby_dep_vert_mins: float = 5.0   # departures: standby on vertical side
     standby_arr_horiz_mins: float = 5.0  # arrivals: standby on horizontal side
 
-    max_late_mins: int = 120
+    max_late_mins: int = 180
 
     spin_turnaround_threshold_mins: int = 60  
 

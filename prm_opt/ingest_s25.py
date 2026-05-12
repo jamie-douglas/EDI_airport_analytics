@@ -8,6 +8,7 @@ from modules.utils.query import query
 from modules.utils.dates import add_date_parts, to_datetime
 from modules.domain.prm.minibus import passenger_level_flags
 
+
 from prm_opt.config import NO_JETBRIDGE_AIRLINES, WCHS_OWN_CHAIR_PROB
 
 
@@ -303,7 +304,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
 
    
    
-    # ==========================================================
+     # ==========================================================
     # Unmatched Flight Diagnostics & Filtering
     # ----------------------------------------------------------
     # Purpose:
@@ -419,9 +420,6 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         print("\nUnmatched key reasons:")
         print(reason["reason"].value_counts(dropna=False))
 
-        print("\nSample unmatched keys with reasons (top 50):")
-        print(reason.sort_values(["reason", "Airline Code", "Scheduled Flight DT_prm"]).head(50))
-
         # -------------------------
         # 4) Drop categories you do not want downstream
         # -------------------------
@@ -444,6 +442,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         print(f"\nDropped {before - after} passenger rows due to reasons {drop_reasons}")
 
         df_prm_master.drop(columns=["reason"], inplace=True)
+
 
 
     # Vertical PRM count per flight (simple proxy: WCHC/WCHS AND effective remote)
