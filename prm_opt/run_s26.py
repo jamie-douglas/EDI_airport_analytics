@@ -11,7 +11,7 @@ from .ingest_s26 import ingest_s26
 from .build_jobs import build_jobs
 from .policy_s1 import apply_policy_s1
 from .params import build_tau_from_jobs, build_spin_minutes, build_vehicle_classes
-from .pyomo_model import build_pyomo_model
+from .pyomo_model_v2 import build_pyomo_model
 from .config import PlanningToggles
 
 from .outputs import (

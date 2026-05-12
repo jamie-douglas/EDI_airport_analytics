@@ -12,9 +12,30 @@ from modules.domain.prm.minibus import passenger_level_flags
 from prm_opt.config import NO_JETBRIDGE_AIRLINES, WCHS_OWN_CHAIR_PROB
 
 
+""" 
+Ingest and prepare historical S25 PRM data.
+
+This module constructs df_prm_master, the canonical passenger–flight–PRM dataset
+used by downstream optimisation and reporting.
+
+Responsibilities:
+- Load PRM service records and flight performance data
+- Clean and harmonise timestamps and identifiers
+- Derive PRM service-time proxies (tau) from observed S25 data
+- Construct flight-level aggregates (PRM count, vertical count)
+- Build turnaround and spin indicators
+- Return a dataset that matches the S26 ingest contract
+
+This file contains NO optimisation logic.
+"""
+
+
 # ---------------------------------------------------------
 # SSR numeric mapping (unchanged)
 # ---------------------------------------------------------
+
+# Map SSR codes to an ordinal severity scale.
+# Used by Scenario 1 policy logic and legacy analytics.
 
 def map_ssr(ssr_code: str) -> int:
     if ssr_code == "WCHC":
@@ -29,6 +50,17 @@ def map_ssr(ssr_code: str) -> int:
 # ---------------------------------------------------------
 
 def load_prm_data(start: str, end: str) -> pd.DataFrame:
+    
+    """
+    Load raw PRM service records from CompletedServicesByJob.
+
+    One row ~= one service segment performed for a passenger.
+    This table is intentionally NOT yet suitable for optimisation:
+    - Passengers may appear multiple times
+    - Flight anchoring is incomplete
+    - Service times are segment-level, not job-level
+    """
+
     start_op = start.replace("-", "")
     end_op = end.replace("-", "")
 
@@ -179,11 +211,21 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     df_prm["SSR numeric"] = df_prm["SSR Code"].apply(map_ssr)
 
     
-    # segment-level active busy minutes (row-by-row)
+    
+    # --------------------------------------------------
+    # Segment-level active busy minutes (S25 empirical)
+    # --------------------------------------------------
+    # Each PRM job may involve multiple segments.
+    # We compute observed segment durations and later aggregate
+    # to typical service-time proxies by SSR + direction + vehicle.
+
     df_prm["segment_mins"] = (df_prm["Job End Time"] - df_prm["Job Start Time"]).dt.total_seconds() / 60.0
     df_prm["segment_mins"] = df_prm["segment_mins"].clip(lower=0)
 
-    # typical busy mins by SSR+dir+vehicle
+    
+    # Typical (median) busy minutes by SSR + direction + vehicle type.
+    # These become the base τ inputs for optimisation (S25 only).
+
     veh_svc = (
         df_prm.groupby(["SSR Code", "A/D", "Vehicle Type"])["segment_mins"]
             .median()
@@ -205,7 +247,13 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     # Passenger-level flags 
     df_prm_flags = passenger_level_flags(df_prm)
 
-    # Own-chair assignment
+    
+    # --------------------------------------------------
+    # Own-chair assignment (S25 empirical rates)
+    # --------------------------------------------------
+    # WCHC always has own chair.
+    # WCHS is sampled probabilistically using observed
+
     np.random.seed(seed)
     rolls = np.random.rand(len(df_prm_flags))
 
@@ -224,7 +272,13 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         df_prm_flags["Actual DO Location"],
     )
 
-    # Passenger aggregation
+    
+    # --------------------------------------------------
+    # Passenger-level aggregation
+    # --------------------------------------------------
+    # Collapse multiple service segments into one PRM job per passenger-flight.
+    # This produces the passenger-level demand used by the optimiser.
+
     agg_rules = {
         "Sector": "first",
         "A/D": "first",
@@ -281,7 +335,11 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
 
 
         
-    # Merge passenger + flight (robust: join on scheduled time and direction, not Day)
+    
+    # Merge passenger-level PRMs with flight performance.
+    # Join is anchored on Flight Number + Airline + A/D + Scheduled Flight DT.
+    # (Robust to repeated flight numbers across days.)
+
     df_prm_master = df_prm_grouped.merge(
         df_flights[
             [
@@ -304,7 +362,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
 
    
    
-     # ==========================================================
+    # ==========================================================
     # Unmatched Flight Diagnostics & Filtering
     # ----------------------------------------------------------
     # Purpose:
@@ -445,7 +503,12 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
 
 
 
-    # Vertical PRM count per flight (simple proxy: WCHC/WCHS AND effective remote)
+    
+    # --------------------------------------------------
+    # Vertical PRM count per flight
+    # --------------------------------------------------
+    # Used as a flight-level proxy for vertical
+
     df_prm_master["VerticalCandidate"] = (
         df_prm_master["SSR Code"].isin(["WCHC", "WCHS"])
         & (df_prm_master["IsEffectiveRemote"] == 1)
@@ -465,9 +528,12 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     ).fillna({"Vertical PRM Count": 0})
 
 
-    # -------------------------
+    
+    # --------------------------------------------------
+    # Turnaround PRM and vertical counts
+    # --------------------------------------------------
+    # Link arrival and departure legs to identify short-turn ("spin") situations.
 
-    # Turnaround PRM Count 
     arrivals = df_flights[df_flights["A/D"] == "A"][
         ["Flight Number", "Airline Code", "Turnaround Flight Number", "PRM Flight Count", "Vertical PRM Count", "Scheduled Flight DT"]
     ]
@@ -515,6 +581,15 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     })
 
     turnaround_lookup = pd.concat([lookup_A, lookup_D], ignore_index=True)
+
+    
+    # --------------------------------------------------
+    # OUTPUT
+    # --------------------------------------------------
+
+    # df_prm_master is the canonical S25 input to build_jobs().
+    # S26 ingestion is designed to replicate this schema
+
 
     df_prm_master = df_prm_master.merge(
         turnaround_lookup,

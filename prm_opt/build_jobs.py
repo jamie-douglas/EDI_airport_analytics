@@ -1,15 +1,18 @@
 # scripts/prm_opt/build_jobs.py
 """
 
+
 Build the canonical PRM job table (J) used by the optimiser.
 
+Each row corresponds to one PRM job j.
 
-This file enforces:
-- Correct vertical logic (SSR AND effective remote)
-- Gate 7/8 identification (Scenario 2 & 3)
-- SLA thresholds (with buffer)
-- Stand-zone mapping for batching (Scenario 3)
-- Domestic/International class derived from Sector
+This function:
+- Harmonises S25 and S26 ingestion outputs
+- Constructs all job-level attributes required by the model
+- Applies SLA logic, vertical logic, lift flags, and timing buckets
+
+This file contains NO optimisation logic.
+
 
 """
 
@@ -49,7 +52,10 @@ def build_jobs(
 
     
     # --------------------------------------------------
-    # Defensive fill for flags coming from left joins
+    
+    # Defensive fill for flags coming from ingest-side left joins.
+    # Missing values here would silently break policy or model
+
     # --------------------------------------------------
     for col in [
         "Has Own Chair",
@@ -88,6 +94,10 @@ def build_jobs(
     # We interpret Job Start Time as the "release" moment for SLA.
     # Preposition shifts this earlier to represent vehicles needing to be in place
     # before the service is expected/required.
+    
+    # t = release bucket (used for SLA feasibility)
+    # s = scheduled/service bucket (used for anchoring)
+
     prepos = np.where(
         x["A/D"] == "A",
         toggles.preposition_arrival_mins,
@@ -105,6 +115,12 @@ def build_jobs(
     # -------------------------
     # S25 columns: "Chocks DT", "Scheduled Flight DT"
     # S26 columns: "Chocks_Est", "ScheduledDateTime_Local"
+
+    
+    # SLA clock anchor:
+    # - Arrivals: chocks time (if available)
+    # - Departures: scheduled flight time
+
     if "Chocks DT" in x.columns:
         chocks_col = "Chocks DT"
     elif "Chocks_Est" in x.columns:
@@ -135,7 +151,10 @@ def build_jobs(
 
    
     # -------------------------
-    # Hard deadline time (departures): never earlier than release_time
+    
+    # Hard deadline (departures only).
+    # Represents an operational cut-off after which service is no longer allowed.
+
     # -------------------------
     dep_buffer = int(getattr(toggles, "dep_boarding_buffer_mins", 0) or 0)
 
@@ -218,7 +237,11 @@ def build_jobs(
     x["is_effective_remote"] = x["IsEffectiveRemote"].astype(int)
 
     # -------------------------
-    # Vertical requirement
+    
+    # Vertical requirement flag.
+    # A job requires vertical handling if SSR requires it AND the stand is effectively remote,
+    # plus any explicit airline/stand exceptions.
+
     # -------------------------
     base_vertical = (
         x["SSR Code"].isin(["WCHC", "WCHS"]) &
@@ -327,7 +350,11 @@ def build_jobs(
     # Departure leg vertical exists (from ingest-supplied turnaround vertical count)
     dep_has_vertical = (x.get("Turnaround Vertical Count", 0).fillna(0).astype(float) > 0)
 
-    # Spin triggers ONLY on ARRIVAL rows (prevents double counting)
+    
+    # Spin indicator:
+    # Triggered ONLY on arrival rows to avoid double counting.
+    # Requires short turnaround + vertical demand on both legs.
+
     x["is_spin"] = ( (x["dir"] == "A") & quick_turn & arr_has_vertical & dep_has_vertical ).astype(int)
 
 
@@ -343,6 +370,9 @@ def build_jobs(
     )
 
     
+    # Final job table.
+    # This is the ONLY structure visible to the optimisation model.
+
     jobs = x[
         [
             "Passenger ID",

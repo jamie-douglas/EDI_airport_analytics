@@ -118,8 +118,13 @@ from modules.utils.progress import step
 # ---------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------
+
+# These helpers exist to translate real-world operational timing
+# (minutes busy, standby, repeated cycles) into bucket-based constraints
+# without introducing continuous-time variables.
+
 def _split_mins(total_mins: float, bucket_mins: int, k_cap: int) -> list[float]:
-    """Split total_mins into front-loaded per-bucket minute allocations (capped to k_cap buckets)."""
+    """Front-loaded by design: reflects vehicles being occupied ASAP after dispatch.."""
     total = max(0.0, float(total_mins))
     if total <= 1e-9:
         return []
@@ -148,7 +153,10 @@ def _flight_level_tau(jobs: pd.DataFrame, tau_job: dict) -> dict[tuple[str, str]
     Convert passenger-indexed tau[(j,mode)] into a flight-level trip duration proxy.
 
     For each flight f and mode m, use the median tau[(j,m)] across jobs on that flight.
-    This supports fleet sizing where one vehicle visit can serve multiple passengers.
+    
+    This function allows multiple passengers on the same flight
+    to share a single vehicle visit in fleet sizing.
+
     """
     modes = ["Amb", "Mini", "Push"]
     out: dict[tuple[str, str], float] = {}
@@ -175,12 +183,19 @@ def _inflate_amb_tau_for_vertical_cycles(
     amb_wccap_effective: int,
     vertical_cycle_mins: float,
 ) -> dict[tuple[str, str], float]:
+    
     """
-    Inflate ambulift trip time for flights where vertical wheelchair demand exceeds capacity per cycle.
+    Inflate ambulift trip time when vertical wheelchair demand
+    exceeds the capacity of one ambulift cycle.
 
-    cycles = ceil(vertical_wc_demand / amb_wccap_effective)
-    tau_f[(f,"Amb")] += (cycles - 1) * vertical_cycle_mins
+    Operational interpretation:
+    - One ambulift arrives at the aircraft
+    - If more wheelchairs than fit per cycle, it must perform repeat cycles
+    - These repeats block the same ambulift sequentially in time
+
+    This is a TIME effect, not an extra vehicle requirement.
     """
+
     out = dict(tau_f)
     C = max(1, int(amb_wccap_effective))
 
@@ -246,7 +261,10 @@ def _build_trip_time_params(
     """
     tau_f = _flight_level_tau(jobs, tau_job)
 
-    # Option C: user-controlled additional minutes per extra vertical cycle
+    
+    # Centralised construction of all time-related parameters.
+    # This isolates timing assumptions from the main model logic.
+    # user-controlled additional minutes per extra vertical cycle
     vertical_cycle_mins = float(getattr(toggles, "vertical_cycle_mins", 0.0) or 0.0)
     if vertical_cycle_mins > 0:
         tau_f = _inflate_amb_tau_for_vertical_cycles(
@@ -291,6 +309,17 @@ def build_pyomo_model(
     spin_removed: dict,
     toggles: PlanningToggles,
 ):
+    
+    """
+    Build and return a Pyomo ConcreteModel for Scenario 2 (no pooling).
+
+    Input:
+    - jobs: canonical job table from build_jobs()
+    - tau: job-level busy minutes (Amb/Mini/Push)
+    - spin_removed: ambulift minutes removed per bucket due to spin locking
+    - toggles: planning assumptions and sensitivity parameters
+    """
+
     t0 = time.perf_counter()
     t = t0
 
@@ -300,6 +329,11 @@ def build_pyomo_model(
     # -----------------------------
     # Constants
     # -----------------------------
+    
+    # Note:
+    # - BUCKET_MINUTES is fixed at model-build time
+    # - All other values may be overridden via PlanningToggles
+
     BUCKET_MINUTES = 15
     M_BIG = 10_000
 
@@ -314,6 +348,12 @@ def build_pyomo_model(
     # -----------------------------
     # Bucket timeline
     # -----------------------------
+    
+    # The bucket timeline must cover:
+    # - earliest release
+    # - latest SLA/deadline
+    # - additional slack to allow post-SLA service with penalty
+
     t_min = pd.to_datetime(jobs["t"]).min()
     s_max = pd.to_datetime(jobs["s"]).max()
     max_sla = float(pd.to_numeric(jobs["sla_limit"]).max())
@@ -343,6 +383,13 @@ def build_pyomo_model(
     # -----------------------------
     # Sets
     # -----------------------------
+    
+    # Indices:
+    # J = jobs (passengers)
+    # F = flights
+    # B = time buckets
+    # M = horizontal modes
+
     m.J = pyo.Set(initialize=list(jobs.index))
     m.B = pyo.Set(initialize=B_list, ordered=True)
     m.M = pyo.Set(initialize=["Amb", "Mini", "Push"])
@@ -382,6 +429,27 @@ def build_pyomo_model(
     # -----------------------------
     # Build sparse JB (job feasible start buckets)
     # -----------------------------
+
+    
+    # JB (Job–Bucket) defines the exact service start buckets that are
+    # FEASIBLE for each job.
+    #
+    # Construction logic:
+    # - A job cannot start before its release time
+    # - A job cannot start after its SLA window (or hard deadline for departures)
+    #
+    # JB massively reduces model size by:
+    # - Avoiding variables for impossible (j,b) combinations
+    # - Enforcing timing feasibility structurally, before optimisation
+    #
+    # Result:
+    # - A[j,b] variables only exist where service is allowed
+
+
+    
+    # Enumerate all feasible (job, bucket) pairs.
+    # These define the domain of the service-start decision
+
     latest_idx = {}
     for j in jobs.index:
         if str(jobs.loc[j, "dir"]) == "D" and hard_deadline_idx.get(j) is not None:
@@ -403,6 +471,17 @@ def build_pyomo_model(
 
     m.JB = pyo.Set(dimen=2, initialize=jb_pairs)
 
+
+    
+    # Convenience index maps:
+    # - jb_by_j[j] = list of buckets job j can start in
+    # - jb_by_b[b] = list of jobs that can start in bucket b
+    #
+    # Used for:
+    # - Serve-once constraints
+    # - SLA calculation
+    # - Staff and Lift constraints
+
     jb_by_j = {j: [] for j in jobs.index}
     jb_by_b = {b: [] for b in B_list}
     for (j, b) in jb_pairs:
@@ -414,10 +493,34 @@ def build_pyomo_model(
     # -----------------------------
     # Build sparse FB (flight feasible buckets)
     # -----------------------------
+
+    
+    # FB (Flight–Bucket) defines the buckets in which a flight
+    # could require vehicle resources.
+    #
+    # Construction logic:
+    # - A flight is active from the earliest release of its jobs
+    # - Until the latest feasible service time of any of its jobs
+    #
+    # FB is used for:
+    # - Vehicle allocation k[(vtype,class),(f,b)]
+    # - Vertical visit anchors V[f,b]
+    # - Fleet exclusivity and time-capacity constraints
+    #
+    # NOTE:
+    # Flights do NOT require resources outside FB by construction.
+
+
+    
+    # Group job indices by flight.
+    # This is the bridge between passenger-level demand and flight-level resources.
     jobs_by_f: dict[str, list[int]] = {f: [] for f in flights}
     for j in jobs.index:
         jobs_by_f[jobs.loc[j, "flight_key"]].append(j)
 
+    
+    # Enumerate feasible (flight, bucket) pairs.
+    # Vehicles can ONLY be allocated in these buckets for a flight.
     fb_pairs = []
     for f in flights:
         Jf = jobs_by_f.get(f, [])
@@ -430,15 +533,40 @@ def build_pyomo_model(
 
     m.FB = pyo.Set(dimen=2, initialize=fb_pairs)
 
+    
+    # Convenience index map:
+    # - fb_by_b[b] = list of flights active in bucket b
+    #
+    # Used for:
+    # - Fleet exclusivity per bucket
+    # - Time-capacity constraints
+    # - Staffing aggregation
+
+
     fb_by_b = {b: [] for b in B_list}
     for (f, b) in fb_pairs:
         fb_by_b[b].append(f)
+
+
+    
+    # Summary:
+    # - JB controls WHEN individual passengers may be served
+    # - FB controls WHEN flights may consume shared resources
+    # Together, they enforce timing feasibility at two levels:
+    # passenger-level precision and fleet-level scalability.
 
     t = step(t, f"FB set built | FB={len(fb_pairs):,}")
 
     # -----------------------------
     # Vehicle classes
     # -----------------------------
+
+    
+    # Vehicle classes allow heterogeneous fleets (different sizes / capacities)
+    # while still enforcing total fleet availability per bucket.
+    # Vehicles are not routed; only their aggregate availability is tracked.
+
+
     classes = build_vehicle_classes(include_future=True)
 
     vclasses = []
@@ -473,6 +601,28 @@ def build_pyomo_model(
     # -----------------------------
     # Decision variables
     # -----------------------------
+
+    
+    # Decision variables fall into four conceptual groups:
+    #
+    # 1) Passenger decisions:
+    #    - x[j, m] : horizontal mode choice
+    #    - A[j, b] : service start bucket
+    #    - y[j]    : SLA breach indicator
+    #
+    # 2) Vehicle deployment decisions:
+    #    - k[(vtype, class_id), (f, b)] : vehicles assigned to a flight in a bucket
+    #    - V[f, b]                     : ambulift visit anchor at the aircraft
+    #
+    # 3) Flight-bucket indicators (derived / linearisation helpers):
+    #    - Z_*  : which horizontal resources are used
+    #    - W_*  : combined (vertical + horizontal ≠ ambulift) indicators for standby
+    #
+    # 4) Staffing requirements:
+    #    - H_drv[b], H_vehag[b], H_push[b]
+
+
+
     # Passenger decisions
     m.x = pyo.Var(m.J, m.M, domain=pyo.Binary)           # horizontal mode choice
     m.A = pyo.Var(m.JB, domain=pyo.Binary)               # service start bucket
@@ -521,6 +671,16 @@ def build_pyomo_model(
     # -----------------------------
     # Objective
     # -----------------------------
+
+    
+    # Objective priorities (highest to lowest):
+    #
+    # 1) Avoid SLA breaches (very high penalty)
+    # 2) Minimise vehicles deployed (fleet sizing)
+    # 3) Discourage operationally undesirable modes (soft penalties)
+    # 4) Minimise staff and vehicle operating costs
+
+
     BIG = 1000.0
     LAMBDA = 1e6
 
@@ -630,6 +790,16 @@ def build_pyomo_model(
     # -----------------------------
     # Flight-level vertical ambulift visit
     # -----------------------------
+
+    
+    # This models aircraft-side attachment of an ambulift.
+    #
+    # Key point:
+    # - A visit is a TIME anchor, not a passenger assignment.
+    # - Multiple passengers can be served during/after a single visit,
+    #   subject to time and capacity constraints elsewhere.
+
+
     # Flights that have at least one vertical passenger require a vertical visit anchor.
     flight_has_vertical = {f: int((jobs.loc[jobs_by_f[f], "needs_vertical"] == 1).any()) for f in flights}
 
@@ -812,6 +982,15 @@ def build_pyomo_model(
     # -----------------------------
     # Trip-level time capacity per bucket (vehicle-based)
     # -----------------------------
+
+    
+    # Vehicle time capacity is enforced at the FLEET level.
+    #
+    # Busy minutes are aggregated across all flights in a bucket.
+    # This captures utilisation and bottlenecks without routing vehicles explicitly.
+
+
+
     tau_f, spill_trip, standby_amb_vec, standby_horiz_vec, flight_dir = _build_trip_time_params(
         jobs=jobs,
         jobs_by_f=jobs_by_f,
@@ -890,6 +1069,13 @@ def build_pyomo_model(
     # -----------------------------
     # Staff constraints per bucket
     # -----------------------------
+
+    
+    # Staffing constraints translate vehicle deployment into headcount needs.
+    # One driver and one vehicle-agent are required per dispatched vehicle.
+    # Pushers are required per passenger using Push mode.
+
+
     def amb_used(m, b):
         flights_b = fb_by_b.get(b, [])
         return pyo.quicksum(amb_alloc(m, f, b) for f in flights_b)
@@ -919,6 +1105,16 @@ def build_pyomo_model(
     # -----------------------------
     # Gate 7/8 lift bottleneck (bucketed)
     # -----------------------------
+
+    
+    # This constrains START rates through the physical lift at Gates 7/8.
+    #
+    # Notes:
+    # - Independent of ambulift fleet size
+    # - Limits how many wheelchair passengers can START service per bucket
+    # - Prevents unrealistic clustering at the lift
+
+
     J_lift = [j for j in jobs.index if int(jobs.loc[j, "lift_gate"]) == 1 and int(jobs.loc[j, "needs_wc"]) == 1]
 
     def lift_cap(m, b):

@@ -101,6 +101,13 @@ def run_sanity_checks(job_df, vehicle_df):
     """
     Returns a dict of useful diagnostic tables.
     Nothing is enforced here — this is purely for inspection.
+
+    
+    IMPORTANT:
+    These are diagnostic / audit checks.
+    They do NOT imply infeasibility or errors — they flag patterns
+    worth
+
     """
 
     checks = {}
@@ -606,6 +613,7 @@ def build_run_report(out: dict, *, day_from: str = "s", hour_method: str = "max"
     report["job_assignments"] = out["job_assignments"]
     report["vehicle_allocations"] = out["vehicle_allocations"]
 
+
     # Always compute sanity checks (not optional)
     report["sanity_checks"] = run_sanity_checks(
         report["job_assignments"],
@@ -634,6 +642,13 @@ def print_run_report(report: dict, *, show_hours: int = 24, show_top: int = 10):
     print(f"Solver     : tc={report.get('tc')} | status={report.get('st')}")
     if report.get("loaded_solution") is not None:
         print(f"Loaded sol : {report.get('loaded_solution')} | load_error={report.get('load_error')}")
+    
+    
+    assump = report.get("assumptions", {})
+    if assump:
+        print("\nAssumptions:")
+        print(f"  Vertical cycle extra mins : {assump.get('vertical_cycle_mins')}")
+
 
     # No outputs case
     if "note" in report:

@@ -34,6 +34,12 @@ class PlanningToggles:
     # Spillover control: max number of buckets a single job’s minutes can span
     spill_bucket_cap: int = 12   # 12 * 15min = 3 hours
 
+    
+    vertical_cycle_mins: float = 0.0     # Option C: try 0/5/10/15
+    vertical_wccap: int | None = None    # optional override
+    max_docked_amb_per_flight: int = 1
+
+
     # Standby (handover) minutes — applied only for combined jobs (NOT if horizontal is Amb)
     standby_dep_vert_mins: float = 5.0   # departures: standby on vertical side
     standby_arr_horiz_mins: float = 5.0  # arrivals: standby on horizontal side
