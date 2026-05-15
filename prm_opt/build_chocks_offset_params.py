@@ -16,8 +16,9 @@ df["offset_mins"] = (
     df["Chocks DT"] - df["Scheduled Flight DT"]
 ).dt.total_seconds() / 60.0
 
+
 out = (
-    df.groupby(["Airline Code", "A/D", "class"])["offset_mins"]
+    df.groupby(["Airline Code", "A/D", "Sector"])["offset_mins"]
       .agg(mean_offset_mins="mean", std_offset_mins="std", count="count")
       .reset_index()
 )

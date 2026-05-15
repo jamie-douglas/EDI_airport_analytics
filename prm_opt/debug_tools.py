@@ -220,9 +220,9 @@ def pre_solve_debug(
                 print("❌ INFEASIBLE: even vertical-only amb minutes exceed total amb capacity.")
 
         # (b) forced-minibus jobs (Amb blocked + Push blocked)
-        if all(c in jobs.columns for c in ["safety_stand","needs_vertical","Airline Code","class","dir"]):
+        if all(c in jobs.columns for c in ["safety_stand","needs_vertical","Airline Code","Sector","dir"]):
             blocked_push = (jobs["safety_stand"] == 1) & (jobs["needs_vertical"] == 1) & (~jobs["Airline Code"].isin(["FR","RY"]))
-            blocked_amb = (jobs["class"] == "Dom") & (jobs["dir"] == "A")
+            blocked_amb = (jobs["Sector"] == "Domestic") & (jobs["dir"] == "A")
             must_mini = blocked_push & blocked_amb
             forced = int(must_mini.sum())
             if forced > 0:
@@ -262,7 +262,7 @@ def pre_solve_debug(
     
     # Mode eligibility checks (necessary condition)
     # Amb forbidden only for Dom arrivals.
-    amb_allowed = ~((jobs["class"] == "Dom") & (jobs["dir"] == "A"))
+    amb_allowed = ~((jobs["Sector"] == "Domestic") & (jobs["dir"] == "A"))
 
     # Push forbidden for safety_stand + vertical + not Ryanair.
     push_allowed = ~((jobs["safety_stand"] == 1) & (jobs["needs_vertical"] == 1) & (~jobs["Airline Code"].isin(["FR","RY"])))
@@ -274,7 +274,7 @@ def pre_solve_debug(
     bad = jobs[allowed_count == 0]
     print("\nJobs with ZERO feasible horizontal modes:", len(bad))
     if len(bad) > 0:
-        print(bad[["Passenger ID","flight_key","dir","class","Airline Code","safety_stand","needs_vertical"]].head(20))
+        print(bad[["Passenger ID","flight_key","dir","Sector","Airline Code","safety_stand","needs_vertical"]].head(20))
 
     
     missing_tau = []

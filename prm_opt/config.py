@@ -86,7 +86,7 @@ VERTICAL_EXCEPTIONS: Set[Tuple[str, str]] = {
 
 LIFT_STANDS: Set[str] = {"7", "8"}
 
-LIFT_CYCLE_MINS = 2.0          # minutes per WCH
+LIFT_CYCLE_MINS = 3.0          # minutes per WCH
 LIFT_CAPACITY_MINS = 60.0      # per hour bucket
 
 

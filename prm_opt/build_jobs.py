@@ -19,6 +19,7 @@ This file contains NO optimisation logic.
 from __future__ import annotations
 import pandas as pd
 import numpy as np
+from prm_opt.sector import normalise_sector 
 
 from .config import (
     PlanningToggles,
@@ -196,14 +197,14 @@ def build_jobs(
 
     
     # -------------------------
-    # Class (Dom / Int / CTA) from Sector
+    # Sector (Domestic / CTA / International) from Sector
     # -------------------------
-    sec = x["Sector"].astype(str).str.upper()
-    x["class"] = np.where(
-        sec.str.contains("DOM"),
-        "Dom",
-        np.where(sec.isin(["IRISH", "NIRISH"]), "CTA", "Int"),
-    )
+    
+    # Sector (canonical). Prefer sector_norm if ingest_s25 provided it; else normalise raw Sector.
+    if "Sector_norm" in x.columns:
+        x["Sector"] = x["Sector_norm"]
+    else:
+        x["Sector"] = x["Sector"].apply(normalise_sector)
 
 
     # -------------------------
@@ -370,6 +371,16 @@ def build_jobs(
     )
 
     
+    # -------------------------
+    # Tau columns must exist for both S25 and S26 schema contract.
+    # If an upstream ingest ever forgets them, default to base_duration_mins.
+    # -------------------------
+    for col in ["tau_amb_mins", "tau_mini_mins", "tau_push_mins"]:
+        if col not in x.columns:
+            x[col] = x["base_duration_mins"]
+
+
+    
     # Final job table.
     # This is the ONLY structure visible to the optimisation model.
 
@@ -383,7 +394,7 @@ def build_jobs(
             "dir",
             "zone",
             "Stand",
-            "class",
+            "Sector",
             "Airline Code",
             "needs_wc",
             "needs_vertical",

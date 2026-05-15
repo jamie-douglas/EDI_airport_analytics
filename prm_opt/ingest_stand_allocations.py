@@ -1,54 +1,105 @@
 
 """
-prm_opt.ingest_stand_allocations
---------------------------------
-Ingest and process stand allocation outputs for S26.
+Ingest and process stand allocation plans for S26.
 
-These files represent realised / planned stand allocations
-for June and July only.
+These CSV files represent *realised or planned* stand allocations
+for June and July.
 
-They are used in two ways:
-  1) Deterministic stand assignment where dates overlap June–July
-  2) Empirical stand distribution construction for extrapolation
-     beyond July (rest of S26 season)
+They serve two purposes:
+1) Deterministic stand assignment for flights covered by the plans
+2) Empirical stand distributions for extrapolation beyond July
 
-No optimisation logic lives here – this is purely demand construction.
+NOTE:
+-----
+This module contains NO optimisation logic.
+It is purely concerned with demand construction.
 """
 
 from __future__ import annotations
 import pandas as pd
 
 
+# --------------------------------------------------
+# CTA classification support
+# --------------------------------------------------
+
+CTA_AIRPORTS = {
+    "DUB", "SNN", "ORK", "KIR", "NOC", "WAT",
+    "IOM", "GCI", "JER",
+}
+
+
+def classify_stand_class(
+    *,
+    di_code: str | None,
+    origin: str | None,
+    dest: str | None,
+) -> str:
+    """
+    Assign a canonical operational class for stand usage.
+
+    Priority order:
+    ---------------
+    1) CTA override based on origin/destination airports
+    2) DI code fallback:
+         - DOM, NIRISH → Domestic
+         - IRISH       → CTA
+         - INT         → International
+
+    This logic is specific to stand operations and must remain
+    independent from flight-sector classification.
+    """
+    di = str(di_code).upper().strip() if di_code else ""
+    origin = str(origin).upper().strip() if origin else ""
+    dest = str(dest).upper().strip() if dest else ""
+
+    if origin in CTA_AIRPORTS or dest in CTA_AIRPORTS:
+        return "CTA"
+
+    if di in ("DOM", "NIRISH"):
+        return "Domestic"
+    if di == "IRISH":
+        return "CTA"
+    if di == "INT":
+        return "International"
+
+    return "International"
+
+
+# --------------------------------------------------
+# Stand plan ingestion
+# --------------------------------------------------
+
 def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
     """
     Load and harmonise stand allocation CSVs.
 
-    Each CSV represents a full daily turn-level stand plan.
-    Each row contains both arrival and departure details.
+    Each CSV row represents a *turn* containing both
+    arrival and departure information.
 
-    Output schema:
-      FlightNumber
-      ScheduledDateTime_Local
-      Airline
-      dir              ('A' or 'D')
-      class            ('Dom' or 'Int')
-      stand
+    Output:
+      One row per flight leg (A and D), with:
+        - FlightNumber
+        - ScheduledDateTime_Local
+        - Airline
+        - dir (A/D)
+        - class (Domestic / CTA / International)
+        - stand
     """
-
-    frames = []
-    for p in csv_paths:
-        frames.append(pd.read_csv(p))
-
+    frames = [pd.read_csv(p) for p in csv_paths]
     raw = pd.concat(frames, ignore_index=True)
 
     # -------------------------
-    # ARRIVALS
+    # Arrivals
     # -------------------------
     arrivals = raw[
-        [   "TurnID",
+        [
+            "TurnID",
             "Arr_Flight_No",
             "Arr_Scheduled_Date",
             "Arr_Operator",
+            "Arr_Origin",
+            "Arr_Dest",
             "DI_arr",
             "stand",
         ]
@@ -59,20 +110,25 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
             "Arr_Flight_No": "FlightNumber",
             "Arr_Scheduled_Date": "ScheduledDateTime_Local",
             "Arr_Operator": "Airline",
-            "DI_arr": "class",
+            "Arr_Origin": "Origin",
+            "Arr_Dest": "Dest",
+            "DI_arr": "DI",
         },
         inplace=True,
     )
     arrivals["dir"] = "A"
 
     # -------------------------
-    # DEPARTURES
+    # Departures
     # -------------------------
     departures = raw[
-        [   "TurnID",
+        [
+            "TurnID",
             "Dep_Flight_No",
             "Dep_Scheduled_Date",
             "Dep_Operator",
+            "Dep_Origin",
+            "Dep_Dest",
             "DI_dep",
             "stand",
         ]
@@ -83,32 +139,27 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
             "Dep_Flight_No": "FlightNumber",
             "Dep_Scheduled_Date": "ScheduledDateTime_Local",
             "Dep_Operator": "Airline",
-            "DI_dep": "class",
+            "Dep_Origin": "Origin",
+            "Dep_Dest": "Dest",
+            "DI_dep": "DI",
         },
         inplace=True,
     )
     departures["dir"] = "D"
 
     # -------------------------
-    # COMBINE
+    # Combine + clean
     # -------------------------
     out = pd.concat([arrivals, departures], ignore_index=True)
 
-    # -------------------------
-    # CLEAN & NORMALISE
-    # -------------------------
     out = out.dropna(
-        subset=[
-            "FlightNumber",
-            "ScheduledDateTime_Local",
-            "stand",
-        ]
+        subset=["FlightNumber", "ScheduledDateTime_Local", "stand"]
     )
 
     out["FlightNumber"] = out["FlightNumber"].astype(str)
     out["ScheduledDateTime_Local"] = pd.to_datetime(out["ScheduledDateTime_Local"])
 
-    # Normalise stand naming (strip terminal suffixes etc.)
+    # Normalise stand IDs
     out["stand"] = (
         out["stand"]
         .astype(str)
@@ -116,58 +167,52 @@ def load_stand_allocations(csv_paths: list[str]) -> pd.DataFrame:
         .str.strip()
     )
 
-    # Normalise Domestic / International labels
-    out["class"] = (
-        out["class"]
-        .astype(str)
-        .str.strip()
-        .replace(
-            {
-                "DOM": "Dom",
-                "INT": "Int",
-                "IRISH": "Int",
-                "NIRISH": "Int",
-            }
-        )
+    # Assign operational stand class
+    out["Sector"] = out.apply(
+        lambda r: classify_stand_class(
+            di_code=r["DI"],
+            origin=r["Origin"],
+            dest=r["Dest"],
+        ),
+        axis=1,
     )
 
-    return out
+    return out.drop(columns=["DI", "Origin", "Dest"])
 
+
+# --------------------------------------------------
+# Build empirical stand distributions
+# --------------------------------------------------
 
 def build_stand_distribution(stand_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build empirical stand distributions for extrapolation
-    beyond July.
+    Build empirical stand distributions from stand plans.
 
     Conditioning dimensions:
-      Airline
-      dir        (A/D)
-      class      (Dom/Int)
+      Airline x dir x sector
 
     Output:
-      Airline | dir | class | stand | prob
+      Airline | dir | sector | stand | prob
     """
-
     counts = (
         stand_df
-        .groupby(["Airline", "dir", "class", "stand"])
+        .groupby(["Airline", "dir", "Sector", "stand"])
         .size()
         .reset_index(name="count")
     )
 
     totals = (
         counts
-        .groupby(["Airline", "dir", "class"])["count"]
+        .groupby(["Airline", "dir", "Sector"])["count"]
         .sum()
         .reset_index(name="total")
     )
 
     dist = counts.merge(
         totals,
-        on=["Airline", "dir", "class"],
+        on=["Airline", "dir", "Sector"],
         how="left",
     )
 
     dist["prob"] = dist["count"] / dist["total"]
-
     return dist

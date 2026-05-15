@@ -7,17 +7,36 @@ import pandas as pd
 import numpy as np
 
 
+"""
+Reporting and diagnostics utilities for PRM optimisation runs.
+
+Contains:
+- Extraction of job- and vehicle-level solution outputs
+- Sanity / audit checks (non-binding, diagnostic only)
+- KPI summaries for Scenario 1 and Scenario 2
+- Peak-day and peak-hour fleet reporting
+
+IMPORTANT:
+This module contains no optimisation logic.
+"""
+
+
+
 # =========================================================
 # A) JOB‑LEVEL ASSIGNMENTS
 # =========================================================
 def extract_job_assignments(model, jobs):
+    
     """
+    Extract passenger-level outcomes from a solved Scenario 2 model.
+
     One row per PRM job:
-      - which service bucket it was served in
-      - which HORIZONTAL mode was chosen
-      - whether SLA was breached
-      - vertical flags for auditing logic
+    - service start bucket
+    - chosen horizontal mode
+    - SLA breach indicator
+    - vertical / wheelchair flags for audit purposes
     """
+
     
     # Build mapping: j -> feasible buckets
     jb_by_j = defaultdict(list)
@@ -105,8 +124,9 @@ def run_sanity_checks(job_df, vehicle_df):
     
     IMPORTANT:
     These are diagnostic / audit checks.
-    They do NOT imply infeasibility or errors — they flag patterns
-    worth
+    They do NOT imply infeasibility or errors — 
+    They flag solution patterns worth reviewing for operational realism.
+
 
     """
 
@@ -257,78 +277,6 @@ def extract_summary(model, jobs):
     }
 
 
-
-
-# def baseline_s1_vehicle_curves(
-#     jobs,
-#     decision_col="s1_decision",
-#     bucket_col="s",
-#     *,
-#     count_no_vehicle_as_push: bool = False,
-# ):
-#     """
-#     Build S1 baseline curves from policy decisions.
-
-#     Assumptions (your stated reporting convention):
-#       - 1 Driver per dispatched vehicle (Amb or Mini)
-#       - 1 Vehicle Agent per dispatched vehicle (Amb or Mini)
-#       - Pushers: 1 per job if decision == "Push"
-#       - OPTIONAL: treat "No Vehicle" as requiring a pusher (count_no_vehicle_as_push=True)
-
-#     Returns:
-#       - ambulift_curve (per bucket)
-#       - minibus_curve  (per bucket)
-#       - pusher_curve   (per bucket)
-#       - driver_curve   (per bucket)  [drivers = amb + mini]
-#       - veh_agent_curve(per bucket)  [veh_agents = amb + mini]
-#     """
-#     import pandas as pd
-
-#     if decision_col not in jobs.columns:
-#         raise ValueError(f"Missing {decision_col} in jobs")
-
-#     jobs = jobs.copy()
-#     jobs["_amb"] = 0
-#     jobs["_mini"] = 0
-#     jobs["_push"] = 0
-
-#     # Map decisions at job level
-#     jobs.loc[jobs[decision_col] == "Ambulift Only", "_amb"] = 1
-#     jobs.loc[jobs[decision_col] == "Mini Bus Only", "_mini"] = 1
-
-#     jobs.loc[jobs[decision_col] == "Both", "_amb"] = 1
-#     jobs.loc[jobs[decision_col] == "Both", "_mini"] = 1
-
-#     jobs.loc[jobs[decision_col] == "Push", "_push"] = 1
-
-#     if count_no_vehicle_as_push:
-#         jobs.loc[jobs[decision_col] == "No Vehicle", "_push"] = 1
-
-#     # Aggregate to flight-bucket so we count a dispatch once per flight per bucket
-#     fb = (
-#         jobs
-#         .groupby([bucket_col, "flight_key"])[["_amb", "_mini", "_push"]]
-#         .max()
-#         .reset_index()
-#     )
-
-#     # Sum across flights per bucket
-#     amb_curve = fb.groupby(bucket_col)["_amb"].sum().sort_index()
-#     mini_curve = fb.groupby(bucket_col)["_mini"].sum().sort_index()
-#     push_curve = fb.groupby(bucket_col)["_push"].sum().sort_index()
-
-#     driver_curve = (amb_curve + mini_curve).astype(int)
-#     veh_agent_curve = (amb_curve + mini_curve).astype(int)
-
-#     return {
-#         "ambulift_curve": amb_curve,
-#         "minibus_curve": mini_curve,
-#         "pusher_curve": push_curve,
-#         "driver_curve": driver_curve,
-#         "veh_agent_curve": veh_agent_curve,
-#     }
-
-
 def baseline_s1_vehicle_curves_capacity(
     jobs,
     decision_col="s1_decision",
@@ -441,8 +389,6 @@ def baseline_s1_vehicle_curves_capacity(
         "veh_agent_curve": veh_agent_curve,
         "fb_detail": fb,                                       # VERY useful for debugging
     }
-
-
 
 
 

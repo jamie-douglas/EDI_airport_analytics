@@ -773,7 +773,7 @@ def build_pyomo_model(
     m.SafetyStand = pyo.Constraint(m.J, rule=safety_rule)
 
     def no_amb_horizontal_domestic_arrivals(m, j):
-        if str(jobs.loc[j, "class"]) == "Dom" and str(jobs.loc[j, "dir"]) == "A":
+        if str(jobs.loc[j, "Sector"]) == "Domestic" and str(jobs.loc[j, "dir"]) == "A":
             return m.x[j, "Amb"] == 0
         return pyo.Constraint.Skip
 

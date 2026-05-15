@@ -857,7 +857,7 @@ def build_pyomo_model(
     # Bucket approximation:
     # - In any bucket, vertical ambulift minutes for a flight <= BUCKET_MINUTES * 1
 
-    MAX_DOCKED_AMB_PER_FLIGHT = int(getattr(toggles, "max_docked_amb_per_flight", 1) or 1)
+    MAX_DOCKED_AMB_PER_FLIGHT = max(1, int(getattr(toggles, "max_docked_amb_per_flight", 1) or 1))
 
     def amb_vert_dock_cap(m, f, b):
         ib = b_to_idx[b]

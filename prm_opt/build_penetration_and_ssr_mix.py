@@ -8,63 +8,85 @@ Build:
 - Own-chair rates per SSR (WCHC=1, WCHS=0.109, others=0)
 
 Outputs:
-- penetration_rates.csv
-- ssr_mix_by_airline_country.csv
+- penetration_rates (DataFrame)
+- ssr_mix (DataFrame)
 """
 
 import pandas as pd
-from prm_opt.ingest_s25 import ingest_s25
+
+from prm_opt.ingest_s25 import ingest_s25, load_flight_data
+from prm_opt.config import WCHS_OWN_CHAIR_PROB
 
 
-df = ingest_s25("2025-06-01", "2025-09-30")
+def build_penetration_and_ssr_mix(
+    s25_start: str,
+    s25_end: str,
+):
+    """
+    Returns:
+      penetration_rates : Airline Code x CountryName penetration
+      ssr_mix           : Airline Code x CountryName x SSR Code mix
+    """
 
-# -----------------------------
-# Total penetration
-# -----------------------------
-# Requires ingest_s25 to include:
-#   - Airline Code
-#   - CountryName
-#   - Passenger ID
-#   - TotalPassengers (or Passengers mapped into TotalPassengers)
-penetration = (
-    df.groupby(["Airline Code", "CountryName"])
-    .agg(
-        prm_count=("Passenger ID", "count"),
-        pax=("TotalPassengers", "sum"),
+    # =====================================================
+    # Load data
+    # =====================================================
+    df_prm = ingest_s25(s25_start, s25_end)
+    df_flights = load_flight_data(s25_start, s25_end)
+
+    # =====================================================
+    # Penetration (PRM pax / total pax)
+    # =====================================================
+    # PRM passengers (unique people)
+    prm_counts = (
+        df_prm.groupby(["Airline Code", "CountryName"])["Passenger ID"]
+        .nunique()
+        .reset_index(name="prm_count")
     )
-    .assign(penetration=lambda x: x.prm_count / x.pax)
-    .reset_index()
-)
 
-penetration.to_csv("penetration_rates.csv", index=False)
+    # Total passengers (FLIGHT-level, no duplication)
+    pax_totals = (
+        df_flights.groupby(["Airline Code", "CountryName"])["Pax"]
+        .sum()
+        .reset_index(name="pax")
+    )
 
-# -----------------------------
-# SSR mix
-# -----------------------------
-ssr = (
-    df.groupby(["Airline Code", "CountryName", "SSR Code"])
-    .size()
-    .reset_index(name="count")
-)
+    penetration = prm_counts.merge(
+        pax_totals,
+        on=["Airline Code", "CountryName"],
+        how="left",
+    ).fillna({"pax": 0})
 
-ssr = ssr.merge(
-    ssr.groupby(["Airline Code", "CountryName"])["count"]
-    .sum()
-    .reset_index(name="total"),
-    on=["Airline Code", "CountryName"],
-)
+    penetration["penetration"] = penetration.apply(
+        lambda r: r.prm_count / r.pax if r.pax > 0 else 0.0,
+        axis=1,
+    )
 
-ssr["share"] = ssr["count"] / ssr["total"]
+    # =====================================================
+    # SSR mix (within PRM passengers)
+    # =====================================================
+    ssr = (
+        df_prm.groupby(["Airline Code", "CountryName", "SSR Code"])
+        .size()
+        .reset_index(name="count")
+    )
 
+    ssr = ssr.merge(
+        ssr.groupby(["Airline Code", "CountryName"])["count"]
+        .sum()
+        .reset_index(name="total"),
+        on=["Airline Code", "CountryName"],
+    )
 
-def own_chair_rate(code: str) -> float:
-    if code == "WCHC":
-        return 1.0
-    if code == "WCHS":
-        return 0.109
-    return 0.0
+    ssr["share"] = ssr["count"] / ssr["total"]
 
+    def own_chair_rate(code: str) -> float:
+        if code == "WCHC":
+            return 1.0
+        if code == "WCHS":
+            return float(WCHS_OWN_CHAIR_PROB)
+        return 0.0
 
-ssr["own_chair_rate"] = ssr["SSR Code"].apply(own_chair_rate)
+    ssr["own_chair_rate"] = ssr["SSR Code"].apply(own_chair_rate)
 
-ssr.to_csv("ssr_mix_by_airline_country.csv", index=False)
+    return penetration, ssr

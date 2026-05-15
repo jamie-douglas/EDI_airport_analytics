@@ -7,6 +7,7 @@ from datetime import timedelta
 from modules.utils.query import query
 from modules.utils.dates import add_date_parts, to_datetime
 from modules.domain.prm.minibus import passenger_level_flags
+from prm_opt.sector import normalise_sector
 
 
 from prm_opt.config import NO_JETBRIDGE_AIRLINES, WCHS_OWN_CHAIR_PROB
@@ -137,7 +138,9 @@ def load_flight_data(start: str, end: str) -> pd.DataFrame:
             "ArrDeptureCode AS [A/D]",
             "FlightNumber AS [Flight Number]",
             "AirlineCode_IATA AS [Airline Code]",
+            "CountryName AS [CountryName]",
             "Sector",
+            "Passengers AS [Pax]",
             "StandCode AS [Stand]",
             "DepartureGate AS [Departure Gate]",
             "ActualDateTime_Local AS [Actual Flight DT]",
@@ -146,6 +149,7 @@ def load_flight_data(start: str, end: str) -> pd.DataFrame:
             "TurnAround_ScheduledDateTime_Local AS [Turnaround Scheduled DT]",
             "MinutesOnStand_Chocks AS [Minutes on Chocks]",
             "RemoteStand AS [Remote Stand]",
+            
         ],
         where=[
             "ScheduledDateTime_Local >= :start",
@@ -352,6 +356,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
                 "Minutes on Chocks",
                 "PRM Flight Count",
                 "Chocks DT",
+                "CountryName",
             ]
         ].drop_duplicates(subset=["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"]),
         on=["Flight Number", "Airline Code", "A/D", "Scheduled Flight DT"],
@@ -603,5 +608,7 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     df_prm_master["IsAdhoc"] = (
         df_prm_master["Adhoc Or Planned"] == "Ad-Hoc"
     ).astype(int)
+
+    df_prm_master["Sector_norm"] = df_prm_master["Sector"].apply(normalise_sector)
 
     return df_prm_master

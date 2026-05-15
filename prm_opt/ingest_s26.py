@@ -8,6 +8,7 @@ from datetime import timedelta
 
 from modules.utils.query import query
 from prm_opt.config import STAND_ZONES, WCHS_OWN_CHAIR_PROB, NO_JETBRIDGE_AIRLINES
+from prm_opt.sector import normalise_sector
 
 
 def load_future_flights(start: str, end: str) -> pd.DataFrame:
@@ -43,7 +44,7 @@ def assign_stand(
     sched: pd.Timestamp,
     direction: str,
     airline: str,
-    flight_class: str,
+    sector: str,
     stand_actuals: pd.DataFrame,
     stand_dist: pd.DataFrame,
     rng: np.random.Generator,
@@ -51,7 +52,7 @@ def assign_stand(
     """
     Stand assignment:
       1) deterministic from June/July actuals
-      2) extrapolated from distributions conditioned on Airline/dir/class
+      2) extrapolated from distributions conditioned on Airline/dir/sector
     """
 
     exact = stand_actuals[
@@ -63,47 +64,102 @@ def assign_stand(
     if len(exact) > 0:
         return str(exact.iloc[0]["stand"])
 
+    
+    
+    # Level 1: Airline + dir + Sector
     fb = stand_dist[
         (stand_dist["Airline"] == airline)
         & (stand_dist["dir"] == direction)
-        & (stand_dist["class"] == flight_class)
+        & (stand_dist["Sector"] == sector)
     ]
 
+    # Level 2: Airline + dir
     if len(fb) == 0:
-        raise ValueError(f"No stand distribution for {airline} | {direction} | {flight_class}")
+        fb = stand_dist[
+            (stand_dist["Airline"] == airline)
+            & (stand_dist["dir"] == direction)
+        ]
 
-    return rng.choice(fb["stand"].values, p=fb["prob"].values)
+    # ✅ NEW — Level 3: dir + Sector
+    if len(fb) == 0:
+        fb = stand_dist[
+            (stand_dist["dir"] == direction)
+            & (stand_dist["Sector"] == sector)
+        ]
+
+    # Level 4: Airline only
+    if len(fb) == 0:
+        fb = stand_dist[
+            (stand_dist["Airline"] == airline)
+        ]
+
+    # Level 5: Sector only
+    if len(fb) == 0:
+        fb = stand_dist[
+            (stand_dist["Sector"] == sector)
+        ]
+
+    # Level 6: Global
+    if len(fb) == 0:
+        fb = stand_dist
 
 
-def sector_to_class(sector: str) -> str:
-    s = str(sector).upper()
-    if "DOM" in s:
-        return "Dom"
-    if s in ["IRISH", "NIRISH"]:
-        return "CTA"
-    return "Int"
+    # Final safety check
+    if len(fb) == 0:
+        raise ValueError(f"Completely empty stand_dist — cannot assign stands")
+
+    
+    fb = fb.copy()
+
+    # drop bad stands
+    fb = fb.dropna(subset=["stand", "prob"])
+    fb["stand"] = fb["stand"].astype(str)
+    fb = fb[fb["stand"].str.strip() != ""]
+
+    if len(fb) == 0:
+        raise ValueError(f"No valid stands after cleaning for {airline}|{direction}|{sector}")
+
+    # Ensure probabilities sum to 1
+    p = fb["prob"].values.astype(float)
+    p = p / p.sum()
+
+    return rng.choice(fb["stand"].values, p=p)
+
 
 
 def build_offset_lookup(chocks_offset_params: pd.DataFrame):
     """
-    Convert chocks_offset_params.csv to dict:
-      (Airline, dir, class) -> (mean, std)
+    Convert chocks_offset_params to dict:
+      (Airline Code, A/D, Sector) -> (mean, std)
     """
     d = {}
     for _, r in chocks_offset_params.iterrows():
-        d[(r["Airline Code"], r["A/D"], r["class"])] = (float(r["mean_offset_mins"]), float(r["std_offset_mins"]))
+        d[(str(r["Airline Code"]), str(r["A/D"]), str(r["Sector"]).upper())] = (
+            float(r["mean_offset_mins"]),
+            float(r["std_offset_mins"]),
+        )
     return d
 
 
-def sample_sched_to_chocks(airline: str, direction: str, flight_class: str, offset_lookup: dict, rng: np.random.Generator) -> float:
+
+
+def sample_sched_to_chocks(
+    airline: str,
+    direction: str,
+    sector: str,
+    offset_lookup: dict,
+    rng: np.random.Generator,
+) -> float:
     """
-    Sample the Scheduled -> Chocks offset in minutes using Normal(mean, std),
-    segmented by Airline x A/D x Class.
+    Sample Scheduled -> Chocks offset in minutes using Normal(mean, std),
+    segmented by Airline x A/D x Sector.
     """
-    mean, std = offset_lookup.get((airline, direction, flight_class), (0.0, 0.0))
+    key = (str(airline), str(direction), str(sector).upper())
+    mean, std = offset_lookup.get(key, (0.0, 0.0))
     if std == 0.0:
-        return mean
+        return float(mean)
     return float(rng.normal(mean, std))
+
 
 
 def compute_concurrent_stress(df_flights: pd.DataFrame, chocks_col: str = "Chocks_Est") -> pd.Series:
@@ -122,7 +178,7 @@ def compute_concurrent_stress(df_flights: pd.DataFrame, chocks_col: str = "Chock
 def pair_turnarounds(df_flights: pd.DataFrame, max_gap_mins: int = 240) -> pd.DataFrame:
     """
     Create A/D turnaround pairs:
-      - For each arrival, find earliest subsequent departure with same Airline and Class within max_gap.
+      - For each arrival, find earliest subsequent departure with same Airline and Sector within max_gap.
       - Each departure can only be paired once.
     """
     
@@ -142,7 +198,7 @@ def pair_turnarounds(df_flights: pd.DataFrame, max_gap_mins: int = 240) -> pd.Da
         candidates = df[
             (df["dir"] == "D")
             & (df["Airline"] == a["Airline"])
-            & (df["class"] == a["class"])
+            & (df["Sector"] == a["Sector"])
             & (df["Chocks_Est"] >= a["Chocks_Est"])
             & (df["Chocks_Est"] <= a["Chocks_Est"] + timedelta(minutes=max_gap_mins))
         ]
@@ -162,10 +218,10 @@ def pair_turnarounds(df_flights: pd.DataFrame, max_gap_mins: int = 240) -> pd.Da
 
     
     df["turn_pair_id"] = pair_id
+    
     out = df.set_index("orig_idx")[["turn_pair_id"]]
-    return df_flights.join(out, how="left").assign(
-        turn_pair_id=lambda x: x["turn_pair_id"].fillna(-1).astype(int)
-    )
+    return out
+
 
 
 
@@ -177,6 +233,7 @@ def ingest_s26(
     stand_actuals: pd.DataFrame,
     stand_dist: pd.DataFrame,
     service_time_params: pd.DataFrame,
+    tau_mode_params: pd.DataFrame,  
     chocks_offset_params: pd.DataFrame,
     early_late_std_mins: float = 15.0,
     seed: int = 42,
@@ -186,22 +243,27 @@ def ingest_s26(
     """
     Build S26 PRM jobs from FutureFlights table, including:
       - stochastic early/late timing
-      - stochastic scheduled->chocks offset (by airline, A/D, class)
+      - stochastic scheduled->chocks offset (by airline, A/D, sector)
       - concurrent stress computed from stochastic chocks
       - turnaround pairing (A/D pair)
       - turnaround PRM metrics (total + WCHC/WCHS + WCHS own chair)
       - spin flag (turnaround pair + gap <= spin window + any vertical PRM on arrival)
     """
 
+    
+    DEBUG = True          # turn off when done
+    DEBUG_MAX_SHOW = 15   # limit prints
+
+
     rng = np.random.default_rng(seed)
 
     df_flights = load_future_flights(start, end).copy()
 
-    # Standardise fields and create class/dir
+    # Standardise fields and create sector/dir
     df_flights["ScheduledDateTime_Local"] = pd.to_datetime(df_flights["ScheduledDateTime_Local"])
     df_flights["dir"] = np.where(df_flights["ArrDeptureCode"] == "A", "A", "D")
     df_flights["Airline"] = df_flights["AirlineCode_IATA"].astype(str)
-    df_flights["class"] = df_flights["Sector"].apply(sector_to_class)
+    df_flights["Sector"] = df_flights["Sector"].apply(normalise_sector)
 
     # Pax Most Confident logic
     df_flights["Pax"] = np.where(
@@ -209,6 +271,25 @@ def ingest_s26(
         df_flights["PublishedForecast_Pax"],
         df_flights["Pax_MostConfident"],
     ).astype(float)
+
+    
+    # if both forecast fields are missing, Pax becomes NaN → force 0
+    df_flights["Pax"] = pd.to_numeric(df_flights["Pax"], errors="coerce").fillna(0.0)
+
+
+    
+    if DEBUG:
+        print("\n" + "="*80)
+        print("[DEBUG A] Future flights loaded & Pax computed")
+        print("="*80)
+        print("df_flights rows:", len(df_flights))
+        print("Airlines (sample):", df_flights["Airline"].dropna().astype(str).unique()[:10])
+        print("Countries (sample):", df_flights["CountryName"].dropna().astype(str).unique()[:10])
+        print("\nPax describe:")
+        print(df_flights["Pax"].describe())
+        print("\nTop 10 rows (Airline, CountryName, Sector, dir, Pax):")
+        print(df_flights[["Airline","CountryName","Sector","dir","Pax"]].head(DEBUG_MAX_SHOW))
+
 
     # Assign stand (deterministic where possible, else sampled)
     stands = []
@@ -218,7 +299,7 @@ def ingest_s26(
             sched=r["ScheduledDateTime_Local"],
             direction=r["dir"],
             airline=r["Airline"],
-            flight_class=r["class"],
+            sector=r["Sector"],
             stand_actuals=stand_actuals,
             stand_dist=stand_dist,
             rng=rng,
@@ -233,7 +314,7 @@ def ingest_s26(
     # Stochastic early/late + stochastic sched->chocks
     earlylate = rng.normal(0, early_late_std_mins, size=len(df_flights))
     chocks_offsets = [
-        sample_sched_to_chocks(r["Airline"], r["dir"], r["class"], offset_lookup, rng)
+        sample_sched_to_chocks(r["Airline"], r["dir"], r["Sector"], offset_lookup, rng)
         for _, r in df_flights.iterrows()
     ]
 
@@ -252,6 +333,13 @@ def ingest_s26(
     # Turnaround pairing: use TurnID from stand plan when available,
     # otherwise fall back to heuristic pairing.
     # ---------------------------------------------------------
+    
+    if stand_actuals is not None and "ScheduledDateTime_Local" in stand_actuals.columns:
+        stand_actuals = stand_actuals.copy()
+        stand_actuals["ScheduledDateTime_Local"] = pd.to_datetime(
+            stand_actuals["ScheduledDateTime_Local"]
+        )
+
 
     # 1) Bring TurnID onto df_flights (matches how assign_stand does its exact lookup)
     if stand_actuals is not None and "TurnID" in stand_actuals.columns:
@@ -288,6 +376,72 @@ def ingest_s26(
     ssr_lookup = ssr_mix.set_index(["Airline Code", "CountryName", "SSR Code"])["share"].to_dict()
     svc_lookup = service_time_params.set_index(["SSR Code", "dir"]).to_dict("index")
 
+    
+    # ---------------------------------------------------------
+    # Mode-specific tau lookup from S25 medians (SSR Code x A/D)
+    # ---------------------------------------------------------
+    tau_mode_lookup = (
+        tau_mode_params
+        .set_index(["SSR Code", "A/D"])[["tau_amb_mins", "tau_mini_mins", "tau_push_mins"]]
+        .to_dict("index")
+    )
+
+    
+    if DEBUG:
+        print("\n" + "="*80)
+        print("[DEBUG B] Penetration lookup match rate")
+        print("="*80)
+
+        # Create lookup keys from future flights
+        keys = list(zip(df_flights["Airline"].astype(str), df_flights["CountryName"].astype(str)))
+        df_flights["_pen_key"] = keys
+
+        df_flights["_pen_found"] = df_flights["_pen_key"].apply(lambda k: k in pen_lookup)
+        match_rate = df_flights["_pen_found"].mean() if len(df_flights) else 0.0
+
+        print(f"Penetration keys available: {len(pen_lookup):,}")
+        print(f"Flights with penetration match: {df_flights['_pen_found'].sum():,} / {len(df_flights):,} ({match_rate*100:0.1f}%)")
+
+        # Show top missing key combos (this is usually the smoking gun)
+        missing = df_flights[~df_flights["_pen_found"]].copy()
+        if len(missing) > 0:
+            top_missing = (
+                missing.groupby(["Airline","CountryName"])
+                    .size()
+                    .reset_index(name="flight_rows")
+                    .sort_values("flight_rows", ascending=False)
+                    .head(DEBUG_MAX_SHOW)
+            )
+            print("\nTop missing (Airline, CountryName) combos in future flights:")
+            print(top_missing)
+
+            print("\nExample missing keys:")
+            print(missing[["Airline","CountryName","Pax"]].head(DEBUG_MAX_SHOW))
+        else:
+            print("\n✅ All future flights matched a penetration key.")
+
+    
+    if DEBUG:
+        print("\n" + "="*80)
+        print("[DEBUG C] Expected PRMs vs rounding")
+        print("="*80)
+
+        # Use fallback when missing (same as your code)
+        df_flights["_pen_used"] = df_flights["_pen_key"].map(pen_lookup).fillna(0.01).astype(float)
+
+        df_flights["_prm_raw"] = df_flights["Pax"].fillna(0).astype(float) * df_flights["_pen_used"].fillna(0)
+        df_flights["_prm_round"] = df_flights["_prm_raw"].fillna(0).round().astype(int)
+
+        print("Total expected PRMs (raw sum, BEFORE rounding):", float(df_flights["_prm_raw"].sum()))
+        print("Total PRMs after rounding:", int(df_flights["_prm_round"].sum()))
+
+        print("\nRaw PRM demand distribution (prm_raw):")
+        print(df_flights["_prm_raw"].describe())
+
+        print("\nTop flights by raw PRM demand:")
+        top = df_flights.sort_values("_prm_raw", ascending=False).head(DEBUG_MAX_SHOW)
+        print(top[["Airline","CountryName","Pax","_pen_used","_prm_raw","_prm_round"]])
+
     # First pass: create per-flight PRM totals and SSR composition
     flight_prm_stats = {}
     for idx, r in df_flights.iterrows():
@@ -296,7 +450,24 @@ def ingest_s26(
         direction = r["dir"]
 
         penetration = pen_lookup.get((airline, country), 0.01)
-        n_prm = int(round(r["Pax"] * penetration))
+        
+        pax = 0 if pd.isna(r["Pax"]) else r["Pax"]
+        pen = penetration if pd.notna(penetration) else 0.0
+
+        n_prm = int(round(pax * pen))
+
+
+        
+        
+        if DEBUG and idx < DEBUG_MAX_SHOW:
+            print(
+                f"[DEBUG flight] Airline={airline} | "
+                f"Country={country} | Pax={r['Pax']:.1f} | "
+                f"Pen={penetration:.5f} | Pax*Pen={r['Pax']*penetration:.3f} | "
+                f"PRMs={n_prm}"
+            )
+
+
 
         # SSR distribution for that airline/country
         ssr_probs = {s: ssr_lookup.get((airline, country, s), 0.0) for s in ["WCHC", "WCHS", "WCHR", "OTHER"]}
@@ -321,11 +492,38 @@ def ingest_s26(
             "WCHS_own_count": wchs_own,
         }
 
+
     # Second pass: compute turnaround PRM stats for arrivals by using paired departure stats
     df_flights["Turnaround PRM Count"] = 0
     df_flights["Turnaround WCHC"] = 0
     df_flights["Turnaround WCHS"] = 0
     df_flights["Turnaround WCHS Own"] = 0
+
+    
+    # ---------------------------------------------------------
+    # Derived fields to match S25 schema expectations downstream
+    # ---------------------------------------------------------
+
+
+
+    # Minutes on Chocks (proxy):
+    # If the flight has a paired turnaround, approximate by (dep_chocks - arr_chocks) in minutes on the ARRIVAL row.
+    df_flights["Minutes on Chocks"] = np.nan
+    for pid in df_flights["turn_pair_id"].unique():
+        if pid == -1:
+            continue
+        pair = df_flights[df_flights["turn_pair_id"] == pid]
+        if len(pair) != 2:
+            continue
+        arr = pair[pair["dir"] == "A"]
+        dep = pair[pair["dir"] == "D"]
+        if len(arr) != 1 or len(dep) != 1:
+            continue
+        a_idx = arr.index[0]
+        d_idx = dep.index[0]
+        gap_mins = (df_flights.loc[d_idx, "Chocks_Est"] - df_flights.loc[a_idx, "Chocks_Est"]).total_seconds() / 60.0
+        df_flights.loc[a_idx, "Minutes on Chocks"] = max(0.0, float(gap_mins))
+
 
     for pid in df_flights["turn_pair_id"].unique():
         if pid == -1:
@@ -347,8 +545,24 @@ def ingest_s26(
         df_flights.loc[a_i, "Turnaround WCHC"] = dep_stats["WCHC_count"]
         df_flights.loc[a_i, "Turnaround WCHS"] = dep_stats["WCHS_count"]
         df_flights.loc[a_i, "Turnaround WCHS Own"] = dep_stats["WCHS_own_count"]
+        df_flights.loc[a_i, "Turnaround Vertical Count"] = dep_stats["WCHC_count"] + dep_stats["WCHS_count"]
 
-    # Spin flag: only arrivals can be spin triggers, and only if pair exists and gap <= spin window
+        
+    for col in ["Turnaround PRM Count", "Turnaround Vertical Count"]:
+        if col in df_flights.columns:
+            df_flights[col] = (
+                df_flights[col]
+                .fillna(0)
+                .astype(int)
+            )
+
+
+    # Spin flag
+    # Note:
+    # Spin is defined as a turnaround arrival that:
+    # - has a paired departure within spin_window_mins
+    # - and has any vertical PRM (WCHC or WCHS) on arrival
+
     df_flights["is_spin"] = 0
     for pid in df_flights["turn_pair_id"].unique():
         if pid == -1:
@@ -420,6 +634,24 @@ def ingest_s26(
             job_start = job_start_base
             job_end = job_start + timedelta(minutes=base)
 
+            
+            # ---------------------------------------------------------
+            # Mode-specific tau for this (SSR, direction)
+            # These are minutes consumed IF the optimiser chooses that mode.
+            # ---------------------------------------------------------
+            tau_row = tau_mode_lookup.get((ssr, direction))
+
+            if tau_row is None:
+                # fallback: use service-time median if unseen SSR/dir combo
+                svc = svc_lookup.get((ssr, direction), {"median": 15.0, "std": 5.0})
+                tau_amb = tau_mini = tau_push = float(svc["median"])
+            else:
+                tau_amb  = float(tau_row["tau_amb_mins"])
+                tau_mini = float(tau_row["tau_mini_mins"])
+                tau_push = float(tau_row["tau_push_mins"])
+
+
+            
             rows.append({
                 "Passenger ID": f"S26_{f['FlightNumber']}_{i}",
                 "Airline Code": airline,
@@ -428,18 +660,44 @@ def ingest_s26(
                 "Sector": sector,
                 "CountryName": country,
                 "Stand": stand,
-                "Departure Gate": None,
+                "Scheduled Flight DT": sched,                 # alias of ScheduledDateTime_Local
+                "Chocks DT": f["Chocks_Est"],                 # alias of Chocks_Est
+                "Minutes on Chocks": f.get("Minutes on Chocks", np.nan),
                 "ScheduledDateTime_Local": sched,
                 "Chocks_Est": f["Chocks_Est"],
+                "Departure Gate": None,
                 "SSR Code": ssr,
                 "Has Own Chair": has_own,
                 "IsEffectiveRemote": int(airline in NO_JETBRIDGE_AIRLINES),
                 "PRM Flight Count": prm_flight_count,
                 "Concurrent Stress": concurrent_stress,
                 "Turnaround PRM Count": turnaround_prm_count,
+                "Turnaround Vertical Count": int(f.get("Turnaround Vertical Count", 0) or 0),
                 "IsArrival": is_arrival,
+                "Adhoc Or Planned": "Planned",
+                "IsAdhoc": 0,
                 "Job Start Time": job_start,
                 "Job End Time": job_end,
+                "tau_amb_mins": tau_amb,
+                "tau_mini_mins": tau_mini,
+                "tau_push_mins": tau_push,
             })
+
+    
+    # ---------------- DEBUG: ingest_s26 output ----------------
+    print("\n[DEBUG ingest_s26]")
+    print(f"Total PRM jobs (rows): {len(rows)}")
+
+    if len(rows) == 0:
+        print("⚠️ No PRM jobs created (rows is empty)")
+    else:
+        df_dbg = pd.DataFrame(rows)
+        print("Columns:", list(df_dbg.columns))
+        print("SSR Code present:", "SSR Code" in df_dbg.columns)
+        if "SSR Code" in df_dbg.columns:
+            print("SSR Code distribution:")
+            print(df_dbg["SSR Code"].value_counts())
+    # ---------------------------------------------------------
+
 
     return pd.DataFrame(rows)
