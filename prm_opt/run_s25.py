@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import time
 
+from prm_opt.outputs import build_run_report, build_run_report_s1
 
 """
 Scenario runners for S25 (historical data).
@@ -642,4 +643,46 @@ def run_s25_s2_lp(
         "results": results,
         "lp_baseline": {"termination": tc_lp, "status": st_lp},
         "lp_ladder": ladder,
+    }
+
+
+def run_month_s25(month_start, toggles):
+    month_start_str = month_start.strftime("%Y-%m-%d")
+    month_end_str = (month_start + pd.offsets.MonthBegin(1)).strftime("%Y-%m-%d")
+
+    print(f"\nRunning S25 {month_start.strftime('%Y-%m')}")
+
+    # Scenario 1
+    out_s1 = run_s25_s1(month_start_str, month_end_str, toggles=toggles)
+
+    # Scenario 2
+    sens = run_s25_s2_v2_sensitivity(
+        start=month_start_str,
+        end=month_end_str,
+        vertical_cycle_grid=[10],   # ✅ must be list
+        solver_name="highs",
+        toggles=toggles,
+        time_limit_sec=3600,
+        threads=8,
+        mip_rel_gap=0.10,
+    )
+
+    r = sens["runs"][0]
+
+    report_s1 = build_run_report_s1(out_s1)
+    report_s2 = build_run_report(r)
+
+    return {
+        "month": month_start.strftime("%Y-%m"),
+
+        "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
+        "S1_PeakMini": report_s1["summary"]["PeakMini"],
+
+        "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
+        "S2_PeakMini": report_s2["summary"]["PeakMini"],
+
+        # ✅ SLA breakdown (important)
+        "SLA_all": report_s2["summary"]["SLA_all"],
+        "SLA_arr": report_s2["summary"]["SLA_arr"],
+        "SLA_dep": report_s2["summary"]["SLA_dep"],
     }

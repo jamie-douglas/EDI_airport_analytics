@@ -335,9 +335,14 @@ def build_pyomo_model(
     # - All other values may be overridden via PlanningToggles
 
     BUCKET_MINUTES = 15
-    M_BIG = 10_000
-
+    
     MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
+
+    # Big-M only needs to cover the maximum lateness you're allowing.
+    # Huge values weaken the relaxation and blow up solver gaps.
+    M_BIG = int(getattr(toggles, "M_BIG", MAX_LATE_MINS + 30) or (MAX_LATE_MINS + 30))
+
+
     MAX_DOCKED_AMB_PER_FLIGHT = max(1, int(getattr(toggles, "max_docked_amb_per_flight", 1) or 1))
 
     ferry_mini_reserved = getattr(toggles, "ferry_mini_reserved", {}) or {}
@@ -628,6 +633,23 @@ def build_pyomo_model(
     m.A = pyo.Var(m.JB, domain=pyo.Binary)               # service start bucket
     m.y = pyo.Var(m.J, domain=pyo.Binary)                # SLA breach
 
+    
+    # -----------------------------
+    # Soft SLA target (still soft)
+    # -----------------------------
+    SLA_TARGET = float(getattr(toggles, "sla_target_rate", 0.98) or 0.98)
+
+    # allowed breaches at target (e.g. 2% of jobs)
+    allowed_breaches = int((1.0 - SLA_TARGET) * len(jobs))
+
+    # sla_excess = max(0, total_breaches - allowed_breaches)
+    m.sla_excess = pyo.Var(domain=pyo.NonNegativeReals)
+
+    m.SLAExcessDef = pyo.Constraint(
+        expr=m.sla_excess >= pyo.quicksum(m.y[j] for j in m.J) - allowed_breaches
+    )
+
+
     # Linearisation: U[j,b,m] = A[j,b] AND x[j,m]
     m.U = pyo.Var(m.JB, m.M, domain=pyo.Binary)
 
@@ -681,8 +703,13 @@ def build_pyomo_model(
     # 4) Minimise staff and vehicle operating costs
 
 
-    BIG = 1000.0
-    LAMBDA = 1e6
+    
+    BIG = float(getattr(toggles, "obj_trip_weight", 1000.0) or 1000.0)
+    LAMBDA = float(getattr(toggles, "obj_sla_weight", 200_000.0) or 200_000.0)
+
+    # Heavy extra penalty only when SLA dips below target (98%)
+    EXCESS_WEIGHT = float(getattr(toggles, "obj_sla_excess_weight", 2_000_000.0) or 2_000_000.0)
+
 
     def obj_rule(m):
         trips_cost = BIG * pyo.quicksum(m.k[vc, fb] for vc in m.VC for fb in m.FB)
@@ -695,6 +722,7 @@ def build_pyomo_model(
         )
 
         sla_pen = LAMBDA * pyo.quicksum(m.y[j] for j in m.J)
+        sla_excess_pen = EXCESS_WEIGHT * m.sla_excess
 
         WAGE = {"Drv": 1.0, "VehAg": 1.0, "Push": 1.0}
         staff_reg = pyo.quicksum(
@@ -708,7 +736,7 @@ def build_pyomo_model(
             for (vtype, cid) in m.VC
         )
 
-        return trips_cost + soft + sla_pen + staff_reg + veh_capex
+        return trips_cost + soft + sla_pen + sla_excess_pen + staff_reg + veh_capex
 
     m.OBJ = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
     t = step(t, "objective created")

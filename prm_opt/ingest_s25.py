@@ -364,9 +364,6 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         validate="m:1",  # optional but recommended
     )
 
-
-   
-   
     # ==========================================================
     # Unmatched Flight Diagnostics & Filtering
     # ----------------------------------------------------------
@@ -505,8 +502,6 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
         print(f"\nDropped {before - after} passenger rows due to reasons {drop_reasons}")
 
         df_prm_master.drop(columns=["reason"], inplace=True)
-
-
 
     
     # --------------------------------------------------

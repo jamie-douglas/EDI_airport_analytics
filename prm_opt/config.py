@@ -32,10 +32,10 @@ class PlanningToggles:
     
        
     # Spillover control: max number of buckets a single job’s minutes can span
-    spill_bucket_cap: int = 12   # 12 * 15min = 3 hours
+    spill_bucket_cap: int = 8   # 8 * 15min = 2 hours
 
     
-    vertical_cycle_mins: float = 0.0     # Option C: try 0/5/10/15
+    vertical_cycle_mins: float = 0.0     
     vertical_wccap: int | None = None    # optional override
     max_docked_amb_per_flight: int = 1
 
@@ -45,6 +45,16 @@ class PlanningToggles:
     standby_arr_horiz_mins: float = 5.0  # arrivals: standby on horizontal side
 
     max_late_mins: int = 180
+
+    
+    sla_target_rate: float = 0.98
+
+    obj_trip_weight: float = 50.0
+    obj_sla_weight: float = 200_000.0
+    obj_sla_excess_weight: float = 5_000_000.0
+
+    M_BIG: int | None = None
+
 
     spin_turnaround_threshold_mins: int = 60  
 

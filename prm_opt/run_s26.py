@@ -17,6 +17,8 @@ from .pyomo_model_v2 import build_pyomo_model
 from .config import LIFT_CAPACITY_MINS, LIFT_CYCLE_MINS, PlanningToggles
 
 from .debug_tools import pre_solve_debug, feasibility_ladder, check_job_time_windows
+from prm_opt.outputs import build_run_report, build_run_report_s1
+from prm_opt.run_s25 import run_s25_s1, run_s25_s2_v2_sensitivity
 
 from .outputs import (
     extract_summary,
@@ -502,4 +504,109 @@ def run_s26_s2_v2_sensitivity(
         "start": start,
         "end": end,
         "runs": runs,
+    }
+
+
+def run_month_s26(month_start, assumptions, toggles):
+    month_start_str = month_start.strftime("%Y-%m-%d")
+    month_end_str = (month_start + pd.offsets.MonthBegin(1)).strftime("%Y-%m-%d")
+
+    cutoff = pd.Timestamp.today().normalize()  # ✅ dynamic cutoff
+
+    print(f"\nRunning S26 {month_start.strftime('%Y-%m')} | cutoff={cutoff.date()}")
+
+    # --------------------------------------------------
+    # CASE 1: FULLY HISTORICAL
+    # --------------------------------------------------
+    if month_start < cutoff and (month_start + pd.offsets.MonthBegin(1)) <= cutoff:
+        print("→ HISTORICAL ONLY")
+
+        out_s1 = run_s25_s1(month_start_str, month_end_str, toggles=toggles)
+
+        sens = run_s25_s2_v2_sensitivity(
+            start=month_start_str,
+            end=month_end_str,
+            vertical_cycle_grid=[10],
+            solver_name="highs",
+            toggles=toggles,
+            time_limit_sec=600,
+            threads=8,
+            mip_rel_gap=0.20,
+        )
+
+    # --------------------------------------------------
+    # CASE 2: FULLY FORECAST
+    # --------------------------------------------------
+    elif month_start >= cutoff:
+        print("→ FORECAST ONLY")
+
+        out_s1 = run_s26_s1(
+            start=month_start_str,
+            end=month_end_str,
+            **assumptions["inputs"],
+            toggles=toggles,
+        )
+
+        sens = run_s26_s2_v2_sensitivity(
+            start=month_start_str,
+            end=month_end_str,
+            **assumptions["inputs"],
+            vertical_cycle_grid=[10],
+            solver_name="highs",
+            toggles=toggles,
+            time_limit_sec=600,
+            threads=8,
+            mip_rel_gap=0.20,
+        )
+
+    # --------------------------------------------------
+    # CASE 3: SPLIT MONTH (CURRENT MONTH)
+    # --------------------------------------------------
+    else:
+        print("→ SPLIT MONTH")
+
+        mid = cutoff.strftime("%Y-%m-%d")
+
+        out_fcst = run_s26_s1(
+            start=mid,
+            end=month_end_str,
+            **assumptions["inputs"],
+            toggles=toggles,
+        )
+
+        out_s1 = out_fcst  # ✅ practical simplification
+
+        sens = run_s26_s2_v2_sensitivity(
+            start=mid,
+            end=month_end_str,
+            **assumptions["inputs"],
+            vertical_cycle_grid=[10],
+            solver_name="highs",
+            toggles=toggles,
+            time_limit_sec=3600,
+            threads=8,
+            mip_rel_gap=0.10,
+        )
+
+    # --------------------------------------------------
+    # Extract outputs
+    # --------------------------------------------------
+    r = sens["runs"][0]
+
+    report_s1 = build_run_report_s1(out_s1)
+    report_s2 = build_run_report(r)
+
+    return {
+        "month": month_start.strftime("%Y-%m"),
+        "cutoff_used": cutoff.strftime("%Y-%m-%d"),
+
+        "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
+        "S1_PeakMini": report_s1["summary"]["PeakMini"],
+
+        "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
+        "S2_PeakMini": report_s2["summary"]["PeakMini"],
+
+        "SLA_all": report_s2["summary"]["SLA_all"],
+        "SLA_arr": report_s2["summary"]["SLA_arr"],
+        "SLA_dep": report_s2["summary"]["SLA_dep"],
     }
