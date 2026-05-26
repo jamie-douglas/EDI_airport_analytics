@@ -338,8 +338,6 @@ def build_pyomo_model(
     
     MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
 
-    # Big-M only needs to cover the maximum lateness you're allowing.
-    # Huge values weaken the relaxation and blow up solver gaps.
     M_BIG = int(getattr(toggles, "M_BIG", MAX_LATE_MINS + 30) or (MAX_LATE_MINS + 30))
 
 

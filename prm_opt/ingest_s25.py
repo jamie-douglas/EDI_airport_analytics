@@ -315,9 +315,9 @@ def ingest_s25(start: str, end: str, seed: int = 42) -> pd.DataFrame:
     )
 
     # fallbacks if any SSR+dir combo is missing
-    df_prm_grouped["tau_amb_mins"]  = df_prm_grouped["tau_amb_mins"].fillna(20.0)
-    df_prm_grouped["tau_mini_mins"] = df_prm_grouped["tau_mini_mins"].fillna(20.0)
-    df_prm_grouped["tau_push_mins"] = df_prm_grouped["tau_push_mins"].fillna(20.0)
+    df_prm_grouped["tau_amb_mins"]  = df_prm_grouped["tau_amb_mins"].fillna(30.0)
+    df_prm_grouped["tau_mini_mins"] = df_prm_grouped["tau_mini_mins"].fillna(30.0)
+    df_prm_grouped["tau_push_mins"] = df_prm_grouped["tau_push_mins"].fillna(30.0)
 
 
     # PRM Flight Count

@@ -213,7 +213,6 @@ def run_s25_s2_v2(
         spin_removed=spin_removed,
         classes=classes,
         bucket_minutes=BUCKET_MINUTES,
-        M_BIG=10_000,
         lift_cycle_mins=LIFT_CYCLE_MINS,
         lift_capacity_mins=LIFT_CAPACITY_MINS,
     )
@@ -410,7 +409,6 @@ def run_s25_s2_v2_sensitivity(
         spin_removed=spin_removed,
         classes=classes,
         bucket_minutes=BUCKET_MINUTES,
-        M_BIG=10_000,
         lift_cycle_mins=LIFT_CYCLE_MINS,
         lift_capacity_mins=LIFT_CAPACITY_MINS,
     )
@@ -446,6 +444,8 @@ def run_s25_s2_v2_sensitivity(
         solver = pyo.SolverFactory(solver_name)
         solver.options["time_limit"] = float(time_limit_sec)
         solver.options["threads"] = int(threads)
+        solver.options["user_objective_scale"] = -3
+        solver.options["mip_heuristic_effort"] = 1.0
         if mip_rel_gap is not None:
             solver.options["mip_rel_gap"] = float(mip_rel_gap)
 

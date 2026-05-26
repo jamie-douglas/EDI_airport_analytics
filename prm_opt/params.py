@@ -210,7 +210,7 @@ def build_vehicle_classes(include_future: bool = False) -> Dict[str, List[Dict]]
                         "class_id": model_num,
                         "seatcap": int(spec["seatcap"]),
                         "wccap": int(spec["wccap"]),
-                        "count": 1000,
+                        "count": 2,
                     }
         for (vtype, _), v in future_models.items():
             classes[vtype].append(v)

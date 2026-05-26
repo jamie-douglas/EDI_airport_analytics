@@ -30,14 +30,16 @@ import pyomo.core.base as TransformationFactory
 
 from .config import LIFT_CAPACITY_MINS, LIFT_CYCLE_MINS, PlanningToggles
 
+toggles = PlanningToggles()
+
 def pre_solve_debug(
     jobs: pd.DataFrame,
     toggles,
+    M_BIG: int | None = None,
     tau: dict | None = None,
     spin_removed: dict | None = None,
     classes: dict | None = None,
     bucket_minutes: int = 15,
-    M_BIG: int = 10_000,
     lift_cycle_mins: float | None = None,
     lift_capacity_mins: float | None = None,
 ):
@@ -51,6 +53,14 @@ def pre_solve_debug(
     print("\n" + "="*70)
     print("PRE-SOLVER FEASIBILITY DEBUG (no solver)")
     print("="*70)
+
+    
+    # Align with the model’s Big‑M rule:
+    # M_BIG = toggles.M_BIG if present else (MAX_LATE_MINS + 30)
+    if M_BIG is None:
+        MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
+        M_BIG = int(getattr(toggles, "M_BIG", MAX_LATE_MINS + 30) or (MAX_LATE_MINS + 30))
+
 
     
     # --------------------------------------------------

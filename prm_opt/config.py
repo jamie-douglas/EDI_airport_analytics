@@ -32,7 +32,7 @@ class PlanningToggles:
     
        
     # Spillover control: max number of buckets a single job’s minutes can span
-    spill_bucket_cap: int = 8   # 8 * 15min = 2 hours
+    spill_bucket_cap: int = 10   # 8 * 15min = 2 hours
 
     
     vertical_cycle_mins: float = 0.0     

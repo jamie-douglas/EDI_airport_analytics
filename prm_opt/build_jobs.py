@@ -34,6 +34,7 @@ def build_jobs(
     df_prm_master: pd.DataFrame,
     bucket: str = "15min",
     toggles: PlanningToggles = PlanningToggles(),
+    use_90th_percentile_cap: bool = False,
 ) -> pd.DataFrame:
     """
     Build job-level optimisation table.
@@ -86,8 +87,7 @@ def build_jobs(
 
     x = x.dropna(subset=["Job Start Time"]).copy()
 
-
-
+    
    
     # -------------------------
     # Time bucket (with optional preposition)
@@ -283,6 +283,28 @@ def build_jobs(
     )
 
     
+    # --------------------------------------------------
+    # Drop jobs that are already impossible at release due to data
+    # (t - sla_start_time > sla_limit + max_late_mins)
+    # --------------------------------------------------
+
+    MAX_LATE_MINS = int(getattr(toggles, "max_late_mins", 180) or 180)
+
+    t_bucket = pd.to_datetime(x["t"])
+    sla_start = pd.to_datetime(x["sla_start_time"])
+
+    earliest_delay_mins = (t_bucket - sla_start).dt.total_seconds() / 60.0
+
+    impossible_mask = earliest_delay_mins > (x["sla_limit"].astype(float) + MAX_LATE_MINS)
+
+    n_drop = int(impossible_mask.sum())
+    if n_drop > 0:
+        print(f"[BUILD_JOBS] Dropping {n_drop} jobs already impossible at release (beyond SLA + max late)")
+
+    x = x.loc[~impossible_mask].copy()
+
+
+    
     # ==========================================================
     # Arrival SLA feasibility guard (JOB-LEVEL)
     # ----------------------------------------------------------
@@ -369,6 +391,74 @@ def build_jobs(
         + "_"
         + x["s"].astype(str)
     )
+
+    
+    # --------------------------------------------------
+    # Optional demand capping: 90th percentile per-flight PRM cap
+    #
+    # Purpose:
+    #   Reduce extreme PRM demand while preserving all flights and the
+    #   underlying flight schedule structure.
+    #
+    # Behaviour:
+    #   - Computes PRM jobs per flight (each row = one PRM)
+    #   - Calculates the 90th percentile of PRMs per flight
+    #   - Caps each flight at this level
+    #   - Excess jobs are removed deterministically (NO randomness)
+    #
+    # Impact:
+    #   - Reduces overall PRM volume
+    #   - Reduces vertical demand (fewer WCHC/WCHS retained)
+    #   - Keeps operational structure intact (same flights, timing, peaks)
+    #
+    # Deterministic selection logic:
+    #   Jobs are prioritised and retained in this order:
+    #     1. Vertical jobs (needs_vertical = 1)
+    #     2. Wheelchair-dependent (needs_wc = 1)
+    #     3. Higher SSR severity (SSR numeric)
+    #     4. Earlier Job Start Time
+    #
+    # This ensures that the most operationally constraining PRMs
+    # are always preserved.
+    # --------------------------------------------------
+    if use_90th_percentile_cap:
+
+        # Count PRMs per flight
+        prm_per_flight = x.groupby("flight_key").size()
+
+        # 90th percentile cap
+        cap_n = int(np.ceil(prm_per_flight.quantile(0.90)))
+
+        print(f"[BUILD_JOBS] Applying 90th percentile PRM cap per flight: {cap_n}")
+
+        # Sort jobs by deterministic priority
+        x = x.sort_values(
+            [
+                "flight_key",
+                "needs_vertical",    # highest priority
+                "needs_wc",
+                "SSR numeric",
+                "Job Start Time",
+            ],
+            ascending=[True, False, False, False, True],
+        )
+
+        # Rank jobs within each flight
+        x["_rank_in_flight"] = x.groupby("flight_key").cumcount() + 1
+
+        # Keep only up to cap per flight
+        before = len(x)
+        x = x[x["_rank_in_flight"] <= cap_n].copy()
+        after = len(x)
+
+        print(f"[BUILD_JOBS] Dropped {before - after} PRM jobs via percentile cap")
+
+        # Clean up helper column
+        x.drop(columns=["_rank_in_flight"], inplace=True)
+
+        # Recalculate per-flight PRM counts (important for downstream logic)
+        new_counts = x.groupby("flight_key").size()
+        x["PRM Flight Count"] = x["flight_key"].map(new_counts).astype(int)
 
     
     # -------------------------

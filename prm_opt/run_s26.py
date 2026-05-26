@@ -114,7 +114,7 @@ def run_s26_s1(
         spin_window_mins=spin_window_mins,
     )
 
-    jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
+    jobs = build_jobs(df_master, bucket="15min", toggles=toggles, use_90th_percentile_cap=False)
 
     decisions = apply_policy_s1(jobs)
     jobs["s1_decision"] = jobs.index.map(decisions.get)
@@ -209,7 +209,7 @@ def run_s26_s2_v2(
     t = step(t, f"ingest_s26 done | rows={len(df_master):,}")
 
     print("[2/6] build_jobs…", flush=True)
-    jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
+    jobs = build_jobs(df_master, bucket="15min", toggles=toggles, use_90th_percentile_cap=False)
     t = step(t, f"build_jobs done | jobs={len(jobs):,}")
 
     # --------------------------------------------------
@@ -416,7 +416,7 @@ def run_s26_s2_v2_sensitivity(
     t = step(t, f"ingest_s26 done | rows={len(df_master):,}")
 
     print("[2/4] build_jobs…", flush=True)
-    jobs = build_jobs(df_master, bucket="15min", toggles=toggles)
+    jobs = build_jobs(df_master, bucket="15min", toggles=toggles, use_90th_percentile_cap=False)
     t = step(t, f"build_jobs done | jobs={len(jobs):,}")
 
     BUCKET_MINUTES = 15
@@ -465,6 +465,8 @@ def run_s26_s2_v2_sensitivity(
         solver = pyo.SolverFactory(solver_name)
         solver.options["time_limit"] = float(time_limit_sec)
         solver.options["threads"] = int(threads)
+        solver.options["user_objective_scale"] = -3
+        solver.options["mip_heuristic_effort"] = 1.0
         if mip_rel_gap is not None:
             solver.options["mip_rel_gap"] = float(mip_rel_gap)
 
@@ -529,9 +531,9 @@ def run_month_s26(month_start, assumptions, toggles):
             vertical_cycle_grid=[10],
             solver_name="highs",
             toggles=toggles,
-            time_limit_sec=600,
+            time_limit_sec=3600,
             threads=8,
-            mip_rel_gap=0.20,
+            mip_rel_gap=0.30,
         )
 
     # --------------------------------------------------
@@ -556,7 +558,7 @@ def run_month_s26(month_start, assumptions, toggles):
             toggles=toggles,
             time_limit_sec=600,
             threads=8,
-            mip_rel_gap=0.20,
+            mip_rel_gap=0.30,
         )
 
     # --------------------------------------------------
@@ -595,6 +597,34 @@ def run_month_s26(month_start, assumptions, toggles):
 
     report_s1 = build_run_report_s1(out_s1)
     report_s2 = build_run_report(r)
+
+    
+    # --------------------------------------------------
+    # Print per-month summary (incremental visibility)
+    # --------------------------------------------------
+    print("\n================ MONTH SUMMARY =================")
+    print(f"Month: {month_start.strftime('%Y-%m')} | Cutoff: {cutoff.date()}")
+
+    print("Scenario 1:")
+    print(
+        f"  PeakAmb={report_s1['summary']['PeakAmb']} | "
+        f"PeakMini={report_s1['summary']['PeakMini']}"
+    )
+
+    print("Scenario 2:")
+    print(
+        f"  PeakAmb={report_s2['summary']['PeakAmb']} | "
+        f"PeakMini={report_s2['summary']['PeakMini']}"
+    )
+
+    print("SLA:")
+    print(
+        f"  All={report_s2['summary']['SLA_all']:.4f} | "
+        f"Arr={report_s2['summary']['SLA_arr']:.4f} | "
+        f"Dep={report_s2['summary']['SLA_dep']:.4f}"
+    )
+    print("================================================\n")
+
 
     return {
         "month": month_start.strftime("%Y-%m"),
