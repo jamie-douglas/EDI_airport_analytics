@@ -62,7 +62,7 @@ def forward_window(weeks: int) -> tuple[str, str]:
     """
     Create a rolling forward window starting tomorrow
     """
-    start = datetime.today() + timedelta(days=1)
+    start = datetime.today() + timedelta(days=4)
     end = start + timedelta(days=weeks * 7)
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 

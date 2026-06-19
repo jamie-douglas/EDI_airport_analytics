@@ -1,0 +1,694 @@
+from_clean,to_clean,avg_travel_time_minutes,median_travel_time_minutes,movement_count
+Arrivals,Block A,6.91,7.0,383
+Arrivals,Block AA,6.06,6.0,385
+Arrivals,Block B,6.95,7.0,510
+Arrivals,Block BB,6.29,6.0,360
+Arrivals,Block C,7.18,7.0,460
+Arrivals,Block CC,6.7,6.0,246
+Arrivals,Block D,7.27,7.0,453
+Arrivals,Block DD,7.0,6.0,43
+Arrivals,Block E,7.4,7.0,418
+Arrivals,Block EE,5.92,6.0,194
+Arrivals,Block F,7.59,7.0,452
+Arrivals,Block FF,6.02,6.0,661
+Arrivals,Block G,7.36,7.0,494
+Arrivals,Block GG,6.32,6.0,281
+Arrivals,Block H,7.57,7.0,409
+Arrivals,Block HH,7.94,7.0,201
+Arrivals,Block J,7.74,7.0,961
+Arrivals,Block K,8.02,8.0,963
+Arrivals,Block M,8.06,8.0,1094
+Arrivals,Block P,8.1,8.0,802
+Arrivals,Block Q,8.15,8.0,117
+Arrivals,Block R,11.6,10.0,30
+Arrivals,Block S,8.89,8.0,141
+Arrivals,Block T,8.81,8.0,105
+Arrivals,Block U,8.9,9.0,124
+Arrivals,Block Y,7.43,7.0,573
+Arrivals,Forecourt EVS,6.51,7.0,37
+Arrivals,Green,8.46,8.0,364
+Arrivals,Red,9.16,9.0,334
+Arrivals,Returns A,2.75,2.0,12
+Arrivals,Returns AA,4.72,4.0,18
+Arrivals,Returns B,4.28,3.0,47
+Arrivals,Returns C,3.04,3.0,26
+Arrivals,Returns D,3.57,3.0,23
+Arrivals,Returns E,3.02,3.0,122
+Arrivals,Returns EV,3.86,4.0,7
+Arrivals,Returns F,2.78,3.0,108
+Arrivals,Temp Lane,4.0,4.0,23
+Arrivals,Unallocated,9.51,9.0,89
+Arrivals,Yellow,8.0,8.0,325
+Block A,Block AA,7.5,5.0,6
+Block A,Block B,4.0,3.0,4
+Block A,Block BB,3.0,3.0,1
+Block A,Block C,1.0,1.0,1
+Block A,Block CC,1.0,1.0,1
+Block A,Block D,4.0,4.0,1
+Block A,Block E,4.0,4.0,1
+Block A,Block EE,2.33,3.0,3
+Block A,Block F,2.0,1.5,4
+Block A,Block FF,6.0,6.0,2
+Block A,Block GG,4.0,3.0,4
+Block A,Block J,3.0,2.5,8
+Block A,Block K,4.0,4.0,2
+Block A,Block M,3.0,3.0,3
+Block A,Block Y,8.0,8.0,1
+Block A,Returns A,6.93,7.0,73
+Block A,Returns AA,7.48,7.0,48
+Block A,Returns B,6.97,7.0,73
+Block A,Returns C,7.07,7.0,57
+Block A,Returns D,7.64,7.0,45
+Block A,Returns E,6.89,7.0,27
+Block A,Returns F,8.37,8.0,30
+Block A,Temp Lane,7.29,7.0,24
+Block A,Unallocated,5.5,5.5,2
+Block AA,Block B,2.0,2.0,2
+Block AA,Block C,3.0,3.0,1
+Block AA,Block CC,2.0,2.0,1
+Block AA,Block E,4.5,4.5,4
+Block AA,Block G,2.0,2.0,1
+Block AA,Block J,3.0,3.0,1
+Block AA,Block K,4.0,4.0,3
+Block AA,Plane Parking EV Bay,5.5,5.5,2
+Block AA,Returns A,6.29,6.0,65
+Block AA,Returns AA,7.0,6.5,40
+Block AA,Returns B,7.21,6.0,99
+Block AA,Returns C,6.97,7.0,61
+Block AA,Returns D,6.75,6.0,56
+Block AA,Returns E,6.58,7.0,43
+Block AA,Returns EV,9.0,10.0,7
+Block AA,Returns F,8.2,7.0,30
+Block AA,Temp Lane,6.38,6.0,26
+Block B,Block A,2.0,2.0,2
+Block B,Block BB,2.5,3.0,6
+Block B,Block C,5.0,5.0,2
+Block B,Block CC,4.5,4.5,2
+Block B,Block D,4.0,4.0,1
+Block B,Block E,2.0,2.0,1
+Block B,Block F,3.0,3.0,1
+Block B,Block FF,4.0,3.0,4
+Block B,Block G,2.0,2.0,1
+Block B,Block GG,2.5,2.5,2
+Block B,Block J,2.75,2.5,4
+Block B,Block K,2.5,3.0,4
+Block B,Block M,3.67,3.0,3
+Block B,Block Y,5.0,5.0,4
+Block B,Green,3.0,3.0,1
+Block B,Returns A,7.99,7.0,92
+Block B,Returns AA,8.07,8.0,30
+Block B,Returns B,7.53,7.0,93
+Block B,Returns C,7.49,7.0,80
+Block B,Returns D,7.88,7.0,69
+Block B,Returns E,8.21,7.0,53
+Block B,Returns F,8.07,8.0,41
+Block B,Temp Lane,8.06,7.5,16
+Block B,Unallocated,3.0,3.0,1
+Block BB,Block A,4.0,4.0,1
+Block BB,Block E,8.0,8.0,1
+Block BB,Block T,6.0,6.0,1
+Block BB,Returns A,6.9,6.0,72
+Block BB,Returns AA,7.12,6.0,26
+Block BB,Returns B,7.28,7.0,81
+Block BB,Returns C,6.41,6.0,66
+Block BB,Returns D,6.59,6.0,70
+Block BB,Returns E,6.29,6.5,34
+Block BB,Returns F,7.6,7.0,30
+Block BB,Temp Lane,6.72,6.0,25
+Block C,Block A,1.0,1.0,1
+Block C,Block AA,1.0,1.0,1
+Block C,Block B,1.0,1.0,1
+Block C,Block BB,5.0,5.0,1
+Block C,Block D,1.5,1.5,2
+Block C,Block E,4.0,4.0,1
+Block C,Block F,1.0,1.0,1
+Block C,Block FF,4.0,4.0,1
+Block C,Block J,4.8,5.0,5
+Block C,Returns A,7.41,7.0,112
+Block C,Returns AA,8.36,7.0,44
+Block C,Returns B,7.41,7.0,75
+Block C,Returns C,7.38,7.0,56
+Block C,Returns D,7.69,7.0,72
+Block C,Returns E,7.48,8.0,40
+Block C,Returns F,7.7,8.0,33
+Block C,Temp Lane,7.22,7.0,23
+Block C,Unallocated,2.67,3.0,3
+Block CC,Block C,3.0,3.0,2
+Block CC,Block FF,6.0,6.0,1
+Block CC,Block GG,1.0,1.0,1
+Block CC,Forecourt EVS,1.0,1.0,1
+Block CC,Returns A,7.3,7.0,47
+Block CC,Returns AA,8.62,7.0,16
+Block CC,Returns B,7.43,7.0,65
+Block CC,Returns C,7.36,7.0,42
+Block CC,Returns D,7.45,7.0,53
+Block CC,Returns E,7.66,7.0,29
+Block CC,Returns F,6.48,6.0,23
+Block CC,Temp Lane,7.0,6.0,19
+Block D,Block A,5.67,3.0,3
+Block D,Block B,7.0,7.0,1
+Block D,Block BB,2.0,2.0,1
+Block D,Block C,7.0,7.0,1
+Block D,Block CC,3.0,3.0,3
+Block D,Block E,2.0,2.0,2
+Block D,Block F,2.0,2.0,1
+Block D,Block FF,4.0,4.0,1
+Block D,Block GG,3.0,3.0,2
+Block D,Block H,3.0,3.0,1
+Block D,Block J,10.0,10.0,1
+Block D,Block K,2.33,2.0,3
+Block D,Block M,3.0,3.0,3
+Block D,Block Q,6.5,6.5,2
+Block D,Block T,3.0,3.0,1
+Block D,Returns A,7.71,8.0,77
+Block D,Returns AA,7.58,7.0,19
+Block D,Returns B,7.23,7.0,86
+Block D,Returns C,7.45,7.0,69
+Block D,Returns D,7.74,7.0,74
+Block D,Returns E,7.9,8.0,58
+Block D,Returns F,7.97,8.0,61
+Block D,Temp Lane,8.08,8.0,24
+Block D,Unallocated,3.0,3.0,3
+Block DD,Block AA,6.0,6.0,1
+Block DD,Block D,8.0,8.0,1
+Block DD,Block P,3.0,3.0,1
+Block DD,Returns A,6.86,7.0,7
+Block DD,Returns AA,9.0,9.0,1
+Block DD,Returns B,6.4,6.0,5
+Block DD,Returns C,6.88,7.0,8
+Block DD,Returns D,5.56,5.0,9
+Block DD,Returns E,7.2,7.0,5
+Block DD,Returns F,8.0,8.0,4
+Block DD,Temp Lane,8.0,8.0,1
+Block E,Block A,1.67,2.0,3
+Block E,Block AA,5.25,4.5,4
+Block E,Block C,5.67,3.0,3
+Block E,Block CC,3.0,3.0,1
+Block E,Block D,4.0,4.0,2
+Block E,Block GG,13.0,13.0,1
+Block E,Block H,4.0,4.0,2
+Block E,Block K,4.0,3.5,4
+Block E,Block M,3.0,3.0,1
+Block E,Block U,8.0,8.0,1
+Block E,Block Y,2.0,2.0,1
+Block E,Red,10.0,10.0,1
+Block E,Returns A,7.88,8.0,118
+Block E,Returns AA,7.53,8.0,32
+Block E,Returns B,8.1,8.0,80
+Block E,Returns C,7.86,8.0,63
+Block E,Returns D,8.32,8.0,72
+Block E,Returns E,7.42,8.0,36
+Block E,Returns F,7.67,7.0,30
+Block E,Temp Lane,8.26,9.0,23
+Block E,Unallocated,2.0,2.0,1
+Block EE,Block C,9.5,9.5,2
+Block EE,Returns A,6.14,6.0,37
+Block EE,Returns AA,6.26,7.0,19
+Block EE,Returns B,6.62,6.0,52
+Block EE,Returns C,6.47,6.0,36
+Block EE,Returns D,5.92,6.0,25
+Block EE,Returns E,6.22,7.0,32
+Block EE,Returns F,7.22,7.0,23
+Block EE,Temp Lane,6.71,7.5,14
+Block F,Block A,3.0,3.0,1
+Block F,Block AA,1.0,1.0,1
+Block F,Block B,2.0,2.0,2
+Block F,Block BB,6.0,6.0,1
+Block F,Block C,15.0,15.0,1
+Block F,Block CC,5.0,5.0,1
+Block F,Block D,1.0,1.0,1
+Block F,Block E,3.75,3.5,4
+Block F,Block EE,5.0,5.0,1
+Block F,Block FF,10.0,9.0,3
+Block F,Block G,1.6,1.0,5
+Block F,Block J,2.75,3.0,4
+Block F,Block K,2.5,2.5,4
+Block F,Block M,8.0,8.0,1
+Block F,Green,9.0,9.0,1
+Block F,Returns A,8.13,7.5,92
+Block F,Returns AA,7.91,7.5,34
+Block F,Returns B,8.4,8.0,82
+Block F,Returns C,8.22,8.0,77
+Block F,Returns D,8.2,8.0,70
+Block F,Returns E,8.83,8.0,36
+Block F,Returns EV,10.0,10.0,1
+Block F,Returns F,8.54,8.0,39
+Block F,Temp Lane,8.65,7.0,34
+Block F,Unallocated,4.0,4.0,2
+Block FF,Block AA,4.0,4.0,2
+Block FF,Block BB,1.0,1.0,1
+Block FF,Block GG,2.0,2.0,1
+Block FF,Red,9.0,9.0,1
+Block FF,Returns A,6.05,6.0,97
+Block FF,Returns AA,6.34,6.0,56
+Block FF,Returns B,6.51,6.0,134
+Block FF,Returns C,6.14,6.0,92
+Block FF,Returns D,6.36,6.0,112
+Block FF,Returns E,6.61,6.0,59
+Block FF,Returns F,7.15,6.0,48
+Block FF,Temp Lane,6.18,6.0,39
+Block G,Block B,2.5,2.5,2
+Block G,Block CC,4.0,4.0,2
+Block G,Block D,2.0,2.0,1
+Block G,Block E,4.5,4.5,2
+Block G,Block EE,4.0,4.0,1
+Block G,Block F,1.33,1.0,3
+Block G,Block FF,3.0,3.0,1
+Block G,Block GG,3.67,4.0,3
+Block G,Block J,2.0,2.0,2
+Block G,Block M,4.0,4.0,1
+Block G,Block P,3.0,3.0,1
+Block G,Block Y,12.0,12.0,1
+Block G,Returns A,7.88,8.0,66
+Block G,Returns AA,8.07,8.0,27
+Block G,Returns B,8.5,8.0,108
+Block G,Returns C,7.88,7.0,74
+Block G,Returns D,8.36,8.0,75
+Block G,Returns E,8.26,8.0,72
+Block G,Returns F,7.86,8.0,51
+Block G,Temp Lane,9.04,9.0,28
+Block G,Unallocated,4.5,4.0,4
+Block G,Yellow,2.0,2.0,1
+Block GG,Block AA,6.0,6.0,1
+Block GG,Block C,6.0,6.0,1
+Block GG,Block D,4.0,4.0,1
+Block GG,Block F,1.0,1.0,1
+Block GG,Block K,1.0,1.0,1
+Block GG,Block Y,2.0,2.0,1
+Block GG,Returns A,6.21,6.0,75
+Block GG,Returns AA,5.83,5.0,30
+Block GG,Returns B,6.56,6.0,63
+Block GG,Returns C,5.85,6.0,48
+Block GG,Returns D,6.81,6.0,43
+Block GG,Returns E,6.0,6.0,27
+Block GG,Returns F,7.44,7.0,27
+Block GG,Temp Lane,5.7,6.0,23
+Block H,Block B,17.0,17.0,1
+Block H,Block C,10.0,10.0,1
+Block H,Block E,5.0,5.0,2
+Block H,Block F,8.0,8.0,1
+Block H,Block GG,1.0,1.0,1
+Block H,Green,8.0,8.0,1
+Block H,Returns A,8.94,8.0,79
+Block H,Returns AA,9.3,9.0,10
+Block H,Returns B,8.1,8.0,109
+Block H,Returns C,8.29,8.0,73
+Block H,Returns D,7.92,8.0,63
+Block H,Returns E,8.32,9.0,38
+Block H,Returns F,8.5,8.0,32
+Block H,Temp Lane,8.18,8.0,22
+Block H,Unallocated,7.0,7.0,1
+Block HH,Block F,6.0,6.0,1
+Block HH,Plane Parking EV Bay,6.71,6.0,63
+Block HH,Returns B,6.0,6.0,1
+Block HH,Returns C,10.0,10.0,1
+Block HH,Returns EV,7.31,7.0,108
+Block HH,Returns F,8.0,8.0,1
+Block HH,Temp Lane,5.8,5.0,10
+Block J,Block AA,5.2,5.0,5
+Block J,Block BB,1.0,1.0,1
+Block J,Block C,1.0,1.0,1
+Block J,Block D,7.0,7.0,1
+Block J,Block E,4.33,4.0,3
+Block J,Block EE,8.5,8.5,2
+Block J,Block F,4.0,4.0,7
+Block J,Block FF,3.0,3.0,1
+Block J,Block GG,13.0,13.0,1
+Block J,Block K,1.0,1.0,2
+Block J,Block M,2.0,2.0,1
+Block J,Block P,3.0,3.0,2
+Block J,Block Y,4.0,4.0,2
+Block J,Returns A,8.49,8.0,193
+Block J,Returns AA,8.85,9.0,81
+Block J,Returns B,8.53,8.0,213
+Block J,Returns C,8.31,8.0,139
+Block J,Returns D,8.3,8.0,158
+Block J,Returns E,8.88,9.0,102
+Block J,Returns F,8.75,9.0,110
+Block J,Temp Lane,8.2,8.0,65
+Block J,Unallocated,2.2,2.0,5
+Block J,Yellow,9.0,9.0,1
+Block K,Block A,2.5,2.5,2
+Block K,Block AA,3.5,3.5,2
+Block K,Block BB,4.5,4.5,2
+Block K,Block C,10.0,10.0,2
+Block K,Block D,7.33,7.0,3
+Block K,Block E,4.5,4.5,2
+Block K,Block EE,3.0,3.0,1
+Block K,Block F,8.33,9.0,3
+Block K,Block GG,5.0,5.0,1
+Block K,Block J,7.0,7.0,1
+Block K,Block Q,6.0,6.0,1
+Block K,Returns A,8.74,8.0,229
+Block K,Returns AA,8.67,8.0,66
+Block K,Returns B,8.46,8.0,205
+Block K,Returns C,8.25,8.0,153
+Block K,Returns D,8.49,8.0,144
+Block K,Returns E,8.31,8.0,94
+Block K,Returns EV,7.0,7.0,1
+Block K,Returns F,9.3,9.0,88
+Block K,Temp Lane,8.65,9.0,72
+Block K,Unallocated,2.67,3.0,3
+Block M,Block A,2.0,2.0,2
+Block M,Block AA,4.0,4.0,1
+Block M,Block B,3.0,3.0,2
+Block M,Block BB,5.17,4.5,6
+Block M,Block C,3.88,3.0,8
+Block M,Block D,7.0,7.0,1
+Block M,Block FF,4.67,4.0,3
+Block M,Block GG,4.0,4.0,1
+Block M,Block J,2.0,2.0,1
+Block M,Block K,2.0,2.0,1
+Block M,Block P,4.0,4.0,1
+Block M,Block Q,1.0,1.0,1
+Block M,Block Y,4.0,4.0,1
+Block M,Green,2.5,2.5,2
+Block M,Returns A,9.07,8.0,203
+Block M,Returns AA,8.57,9.0,72
+Block M,Returns B,8.94,8.0,208
+Block M,Returns C,8.57,8.0,145
+Block M,Returns D,8.59,8.0,167
+Block M,Returns E,8.66,9.0,117
+Block M,Returns F,8.49,8.0,113
+Block M,Temp Lane,8.31,8.0,51
+Block M,Unallocated,4.0,4.0,3
+Block M,Yellow,7.0,7.0,2
+Block P,Block H,1.0,1.0,1
+Block P,Block M,8.0,8.0,1
+Block P,Returns A,9.12,9.0,177
+Block P,Returns AA,9.52,9.0,77
+Block P,Returns B,9.61,9.0,174
+Block P,Returns C,8.95,9.0,139
+Block P,Returns D,9.05,9.0,131
+Block P,Returns E,9.53,9.0,88
+Block P,Returns EV,8.0,8.0,1
+Block P,Returns F,9.32,9.0,66
+Block P,Temp Lane,9.36,9.0,42
+Block Q,Block B,8.0,8.0,1
+Block Q,Block D,5.0,5.0,2
+Block Q,Plane Parking EV Bay,5.83,6.0,6
+Block Q,Returns A,7.44,7.0,9
+Block Q,Returns AA,7.94,8.0,17
+Block Q,Returns B,9.14,9.0,22
+Block Q,Returns C,10.19,9.0,21
+Block Q,Returns D,8.77,9.0,26
+Block Q,Returns E,9.23,8.0,13
+Block Q,Returns EV,7.67,8.0,3
+Block Q,Returns F,8.31,9.0,16
+Block Q,Temp Lane,9.31,10.0,13
+Block Q,Unallocated,1.0,1.0,1
+Block R,Block EE,10.0,10.0,1
+Block R,Block M,8.0,8.0,1
+Block R,Returns A,8.67,9.0,6
+Block R,Returns AA,9.0,9.5,10
+Block R,Returns B,8.0,8.0,1
+Block R,Returns C,9.0,9.0,1
+Block R,Returns D,8.0,8.0,2
+Block R,Returns E,9.0,9.0,1
+Block R,Temp Lane,9.5,9.5,2
+Block S,Returns A,7.5,8.0,30
+Block S,Returns AA,7.38,8.0,8
+Block S,Returns B,8.17,8.0,36
+Block S,Returns C,10.07,9.0,15
+Block S,Returns D,9.56,8.0,27
+Block S,Returns E,8.73,8.0,15
+Block S,Returns F,9.0,9.0,12
+Block S,Temp Lane,9.8,11.0,5
+Block T,Block B,3.0,3.0,1
+Block T,Block M,5.0,5.0,1
+Block T,Block S,2.0,2.0,1
+Block T,Block Y,6.0,6.0,1
+Block T,Returns A,8.41,8.0,37
+Block T,Returns AA,8.14,7.5,14
+Block T,Returns B,7.36,7.0,22
+Block T,Returns C,7.2,8.0,15
+Block T,Returns D,8.56,8.0,25
+Block T,Returns E,8.38,8.0,8
+Block T,Returns F,8.4,9.0,5
+Block T,Temp Lane,7.33,7.0,9
+Block U,Block D,6.0,6.0,1
+Block U,Returns A,7.29,8.0,14
+Block U,Returns AA,8.0,8.0,12
+Block U,Returns B,6.95,7.0,19
+Block U,Returns C,7.56,8.0,18
+Block U,Returns D,7.67,8.0,18
+Block U,Returns E,7.25,7.0,12
+Block U,Returns F,7.21,8.0,14
+Block U,Temp Lane,9.17,8.0,6
+Block U,Yellow,9.0,9.0,1
+Block Y,Block A,1.0,1.0,1
+Block Y,Block D,1.0,1.0,1
+Block Y,Block K,17.0,17.0,2
+Block Y,Block M,7.0,7.0,1
+Block Y,Red,1.0,1.0,1
+Block Y,Returns A,7.62,7.0,122
+Block Y,Returns AA,8.07,8.0,28
+Block Y,Returns B,7.54,7.0,131
+Block Y,Returns C,7.04,7.0,99
+Block Y,Returns D,7.17,7.0,109
+Block Y,Returns E,7.79,7.0,67
+Block Y,Returns F,7.77,8.0,53
+Block Y,Temp Lane,6.88,7.0,32
+Customer,Block A,6.3,6.0,47
+Customer,Block AA,5.72,6.0,60
+Customer,Block B,6.41,6.0,22
+Customer,Block BB,5.64,5.0,33
+Customer,Block C,6.55,6.0,40
+Customer,Block CC,6.0,6.0,45
+Customer,Block D,6.72,7.0,43
+Customer,Block DD,4.5,4.5,4
+Customer,Block E,7.31,7.0,48
+Customer,Block EE,5.45,5.0,31
+Customer,Block F,7.6,7.0,50
+Customer,Block FF,5.61,6.0,36
+Customer,Block G,7.7,7.0,33
+Customer,Block GG,5.82,6.0,51
+Customer,Block H,7.36,7.0,14
+Customer,Block HH,7.5,8.0,26
+Customer,Block J,7.58,7.0,142
+Customer,Block K,7.78,7.0,115
+Customer,Block M,7.5,7.0,119
+Customer,Block P,7.88,8.0,127
+Customer,Block Q,8.77,8.0,22
+Customer,Block R,12.0,12.0,1
+Customer,Block S,8.95,8.0,22
+Customer,Block T,8.5,8.0,40
+Customer,Block Y,7.07,7.0,89
+Customer,Forecourt EVS,8.0,8.0,1
+Customer,Green,8.85,8.0,47
+Customer,Red,8.33,8.0,45
+Customer,Returns A,4.2,3.0,5
+Customer,Returns AA,3.0,3.0,1
+Customer,Returns B,2.6,3.0,5
+Customer,Returns C,2.6,3.0,5
+Customer,Returns D,7.33,5.5,6
+Customer,Returns E,2.25,2.0,16
+Customer,Returns EV,4.5,4.5,2
+Customer,Returns F,2.64,2.5,14
+Customer,Temp Lane,3.44,4.0,9
+Customer,Unallocated,8.4,8.0,5
+Customer,Yellow,7.96,8.0,45
+EV Bay Passes,Returns A,5.0,5.0,1
+Forecourt EVS,Block A,6.5,6.5,2
+Forecourt EVS,Block AA,5.0,5.0,1
+Forecourt EVS,Block BB,7.5,7.5,4
+Forecourt EVS,Block C,7.33,6.0,3
+Forecourt EVS,Block CC,7.0,7.0,1
+Forecourt EVS,Block F,8.5,8.5,6
+Forecourt EVS,Block FF,7.0,8.0,3
+Forecourt EVS,Block G,7.0,7.0,1
+Forecourt EVS,Block GG,6.0,6.0,1
+Forecourt EVS,Block H,7.75,7.0,4
+Forecourt EVS,Block J,7.2,7.0,5
+Forecourt EVS,Block K,12.0,12.0,1
+Forecourt EVS,Block M,6.75,6.5,4
+Forecourt EVS,Block Q,7.33,7.0,3
+Forecourt EVS,Block S,7.0,7.0,1
+Forecourt EVS,Block Y,6.0,6.0,1
+Forecourt EVS,Red,6.0,6.0,2
+Forecourt EVS,Returns A,5.5,5.5,2
+Forecourt EVS,Returns AA,3.5,3.5,2
+Forecourt EVS,Returns B,4.29,6.0,7
+Forecourt EVS,Returns C,3.5,3.5,2
+Forecourt EVS,Returns E,5.2,5.0,15
+Forecourt EVS,Returns F,5.44,5.0,9
+Forecourt EVS,Temp Lane,5.67,6.0,3
+Green,Block C,2.0,2.0,2
+Green,Block F,3.67,4.0,3
+Green,Block GG,6.0,6.0,1
+Green,Block H,10.0,10.0,1
+Green,Red,9.0,9.0,1
+Green,Returns A,8.26,8.0,50
+Green,Returns AA,8.0,9.0,9
+Green,Returns B,8.09,8.0,58
+Green,Returns C,8.46,9.0,35
+Green,Returns D,8.67,8.0,48
+Green,Returns E,7.87,9.0,23
+Green,Returns F,8.33,8.0,27
+Green,Temp Lane,9.11,8.0,9
+Key Room,Block CC,7.0,7.0,1
+Key Room,Block FF,5.0,5.0,1
+Key Room,Block G,8.0,8.0,1
+Key Room,Block GG,1.0,1.0,1
+Plane Parking EV Bay,Forecourt EVS,7.0,7.0,25
+Plane Parking EV Bay,Returns A,5.0,5.0,1
+Plane Parking EV Bay,Returns AA,7.0,7.0,2
+Plane Parking EV Bay,Returns B,7.5,7.0,8
+Plane Parking EV Bay,Returns C,6.31,6.0,13
+Plane Parking EV Bay,Returns D,7.5,8.0,8
+Plane Parking EV Bay,Returns E,6.71,7.0,7
+Plane Parking EV Bay,Returns EV,6.0,6.0,5
+Plane Parking EV Bay,Returns F,6.0,6.0,5
+Plane Parking EV Bay,Temp Lane,6.0,6.0,2
+Red,Arrivals,1.0,1.0,1
+Red,Block C,10.0,10.0,1
+Red,Block F,1.0,1.0,1
+Red,Block HH,4.0,4.0,1
+Red,Forecourt EVS,1.0,1.0,1
+Red,Plane Parking EV Bay,4.5,4.5,10
+Red,Returns A,8.44,8.5,34
+Red,Returns AA,8.0,7.0,9
+Red,Returns B,8.32,8.0,44
+Red,Returns C,10.16,8.0,19
+Red,Returns D,9.59,9.0,37
+Red,Returns E,8.5,8.0,14
+Red,Returns F,7.55,8.0,11
+Red,Temp Lane,7.0,7.0,12
+Returns A,Block B,6.0,6.0,1
+Returns A,Block D,8.0,8.0,1
+Returns A,Block GG,1.0,1.0,1
+Returns A,Block K,9.0,9.0,1
+Returns A,Block M,8.0,8.0,1
+Returns A,Block Y,1.0,1.0,1
+Returns A,Red,1.0,1.0,1
+Returns A,Returns B,2.29,2.0,7
+Returns A,Returns C,1.68,1.0,22
+Returns A,Returns D,2.0,2.0,12
+Returns A,Returns E,2.09,2.0,11
+Returns A,Returns EV,1.0,1.0,1
+Returns A,Returns F,1.62,1.5,8
+Returns A,Temp Lane,2.0,2.0,2
+Returns AA,Block BB,6.0,6.0,1
+Returns AA,Block C,3.5,3.5,2
+Returns AA,Block F,1.0,1.0,1
+Returns AA,Block H,5.0,5.0,2
+Returns AA,Block J,2.0,2.0,1
+Returns AA,Block K,7.0,7.0,1
+Returns AA,Returns A,2.0,2.0,1
+Returns AA,Returns B,1.67,1.0,6
+Returns AA,Returns C,2.15,2.0,48
+Returns AA,Returns D,2.17,2.0,30
+Returns AA,Returns E,2.11,2.0,9
+Returns AA,Returns EV,1.0,1.0,1
+Returns AA,Returns F,3.0,2.0,9
+Returns AA,Temp Lane,3.0,3.0,2
+Returns B,Block AA,4.5,4.5,2
+Returns B,Block C,8.0,8.0,1
+Returns B,Block D,2.0,2.0,1
+Returns B,Block M,8.0,8.0,1
+Returns B,Block P,7.0,7.0,1
+Returns B,Returns AA,5.0,5.0,1
+Returns B,Returns C,1.65,1.0,20
+Returns B,Returns D,2.38,2.0,21
+Returns B,Returns E,2.41,2.0,17
+Returns B,Returns EV,3.0,3.0,1
+Returns B,Returns F,1.81,2.0,16
+Returns B,Temp Lane,2.17,2.5,6
+Returns C,Block B,7.0,7.0,1
+Returns C,Block J,6.0,6.0,1
+Returns C,Block K,9.0,9.0,1
+Returns C,Block P,3.0,3.0,1
+Returns C,Returns AA,4.0,4.0,1
+Returns C,Returns B,1.0,1.0,1
+Returns C,Returns D,3.6,2.0,5
+Returns C,Returns E,1.5,1.5,2
+Returns C,Returns EV,1.0,1.0,1
+Returns C,Returns F,2.6,1.0,5
+Returns C,Temp Lane,1.83,2.0,6
+Returns D,Block AA,1.0,1.0,1
+Returns D,Block C,1.0,1.0,1
+Returns D,Block CC,5.0,5.0,1
+Returns D,Block EE,5.5,5.5,2
+Returns D,Block GG,8.0,8.0,1
+Returns D,Block J,7.0,7.0,1
+Returns D,Returns AA,2.0,2.0,1
+Returns D,Returns C,1.33,1.0,3
+Returns D,Temp Lane,1.5,1.0,12
+Returns E,Block D,4.5,4.5,2
+Returns E,Returns AA,6.5,6.5,2
+Returns E,Returns B,10.0,10.0,1
+Returns E,Returns C,3.67,4.0,3
+Returns E,Returns F,7.0,7.0,1
+Returns E,Temp Lane,4.0,3.0,3
+Returns EV,Forecourt EVS,5.15,5.0,27
+Returns EV,Returns A,3.69,4.0,13
+Returns EV,Returns AA,4.44,4.0,9
+Returns EV,Returns B,3.83,4.0,12
+Returns EV,Returns C,3.68,4.0,22
+Returns EV,Returns D,4.55,4.0,33
+Returns EV,Returns E,5.19,5.5,26
+Returns EV,Returns F,4.58,5.0,24
+Returns EV,Temp Lane,3.75,4.5,4
+Returns F,Block C,1.0,1.0,1
+Returns F,Block F,7.0,7.0,2
+Returns F,Block FF,8.0,8.0,1
+Returns F,Block G,10.0,10.0,1
+Returns F,Block M,11.0,11.0,1
+Returns F,Returns A,4.0,4.0,1
+Returns F,Returns AA,2.5,2.5,2
+Returns F,Returns B,5.0,5.0,1
+Returns F,Returns C,2.0,2.0,5
+Returns F,Returns D,2.8,2.0,5
+Returns F,Temp Lane,3.0,3.0,2
+Temp Lane,Block A,5.0,5.0,1
+Temp Lane,Block AA,2.67,2.0,3
+Temp Lane,Block BB,5.0,5.0,1
+Temp Lane,Block C,2.0,2.0,1
+Temp Lane,Block D,6.25,6.0,4
+Temp Lane,Block G,1.0,1.0,1
+Temp Lane,Block GG,6.0,6.0,1
+Temp Lane,Block H,3.0,3.0,1
+Temp Lane,Block J,2.67,2.0,3
+Temp Lane,Block P,2.0,2.0,1
+Temp Lane,Block S,10.25,10.0,4
+Temp Lane,Block Y,4.0,3.0,4
+Temp Lane,Returns A,2.61,2.0,18
+Temp Lane,Returns AA,3.0,1.0,3
+Temp Lane,Returns B,2.18,2.0,34
+Temp Lane,Returns C,2.29,2.0,276
+Temp Lane,Returns D,2.42,2.0,193
+Temp Lane,Returns E,2.75,3.0,20
+Temp Lane,Returns EV,5.0,5.0,4
+Temp Lane,Returns F,2.76,3.0,21
+Temp Lane,Unallocated,10.0,10.0,1
+Temp Lane,Yellow,1.0,1.0,1
+Unallocated,Block A,1.75,1.5,4
+Unallocated,Block AA,2.8,3.0,5
+Unallocated,Block CC,6.0,6.0,1
+Unallocated,Block D,3.67,3.0,3
+Unallocated,Block E,4.33,3.0,3
+Unallocated,Block F,1.0,1.0,2
+Unallocated,Block FF,3.0,3.0,6
+Unallocated,Block G,1.0,1.0,1
+Unallocated,Block J,2.0,2.0,1
+Unallocated,Block K,2.67,2.0,6
+Unallocated,Block Q,3.0,3.0,2
+Unallocated,Returns A,7.38,8.0,8
+Unallocated,Returns AA,11.0,11.0,1
+Unallocated,Returns B,10.46,10.0,13
+Unallocated,Returns C,7.73,7.0,11
+Unallocated,Returns D,10.4,10.0,5
+Unallocated,Returns E,7.6,9.0,5
+Unallocated,Returns F,8.67,8.0,3
+Unallocated,Temp Lane,9.33,10.0,3
+Unallocated,Yellow,5.0,5.0,1
+Yellow,Block A,4.0,4.0,1
+Yellow,Returns A,8.44,8.0,54
+Yellow,Returns AA,10.3,9.0,20
+Yellow,Returns B,8.54,8.0,41
+Yellow,Returns C,9.1,8.0,48
+Yellow,Returns D,8.33,8.0,49
+Yellow,Returns E,8.97,9.0,29
+Yellow,Returns F,8.8,8.0,30
+Yellow,Temp Lane,8.73,8.0,15
+Yellow,Unallocated,1.0,1.0,1
