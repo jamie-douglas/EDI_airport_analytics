@@ -99,17 +99,30 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
     # Baseline curves (use scheduled bucket "s" for comparability)
     
     
-    # Convert job-level decisions into capacity-based vehicle curves.
-    # Uses effective seat / wheelchair capacities to estimate vehicles required.
+    # # Convert job-level decisions into capacity-based vehicle curves.
+    # # Uses effective seat / wheelchair capacities to estimate vehicles required.
+    # curves = baseline_s1_vehicle_curves_capacity(
+    #     jobs,
+    #     decision_col="s1_decision",
+    #     bucket_col="s",
+    #     count_no_vehicle_as_push=True,   # computed but you can ignore pusher outputs
+    #     amb_seatcap=3, amb_wccap=1,      # conservative from current fleet
+    #     mini_seatcap=6, mini_wccap=2,    # current minibuses
+    # )
+
+    
     curves = baseline_s1_vehicle_curves_capacity(
         jobs,
         decision_col="s1_decision",
-        bucket_col="s",
+        bucket_col="s",                  # retained for compatibility
         count_no_vehicle_as_push=True,   # computed but you can ignore pusher outputs
-        amb_seatcap=3, amb_wccap=1,      # conservative from current fleet
-        mini_seatcap=6, mini_wccap=2,    # current minibuses
+        amb_seatcap=3,
+        amb_wccap=1,
+        mini_seatcap=6,
+        mini_wccap=2,
+        duration_mins=35,                # NEW: fixed job duration
+        time_freq="5min",                # NEW: time resolution for active demand
     )
-
 
 
     # Current fleet totals (same method as optimisation: from VEHICLE_MODELS)
@@ -655,22 +668,22 @@ def run_month_s25(month_start, toggles):
     # Scenario 1
     out_s1 = run_s25_s1(month_start_str, month_end_str, toggles=toggles)
 
-    # Scenario 2
-    sens = run_s25_s2_v2_sensitivity(
-        start=month_start_str,
-        end=month_end_str,
-        vertical_cycle_grid=[10],   # ✅ must be list
-        solver_name="highs",
-        toggles=toggles,
-        time_limit_sec=3600,
-        threads=8,
-        mip_rel_gap=0.10,
-    )
+    # # Scenario 2
+    # sens = run_s25_s2_v2_sensitivity(
+    #     start=month_start_str,
+    #     end=month_end_str,
+    #     vertical_cycle_grid=[10],   # ✅ must be list
+    #     solver_name="highs",
+    #     toggles=toggles,
+    #     time_limit_sec=3600,
+    #     threads=8,
+    #     mip_rel_gap=0.10,
+    # )
 
-    r = sens["runs"][0]
+    # r = sens["runs"][0]
 
     report_s1 = build_run_report_s1(out_s1)
-    report_s2 = build_run_report(r)
+    # report_s2 = build_run_report(r)
 
     return {
         "month": month_start.strftime("%Y-%m"),
@@ -678,11 +691,11 @@ def run_month_s25(month_start, toggles):
         "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
         "S1_PeakMini": report_s1["summary"]["PeakMini"],
 
-        "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
-        "S2_PeakMini": report_s2["summary"]["PeakMini"],
+        # "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
+        # "S2_PeakMini": report_s2["summary"]["PeakMini"],
 
         # ✅ SLA breakdown (important)
-        "SLA_all": report_s2["summary"]["SLA_all"],
-        "SLA_arr": report_s2["summary"]["SLA_arr"],
-        "SLA_dep": report_s2["summary"]["SLA_dep"],
+        # "SLA_all": report_s2["summary"]["SLA_all"],
+        # "SLA_arr": report_s2["summary"]["SLA_arr"],
+        # "SLA_dep": report_s2["summary"]["SLA_dep"],
     }

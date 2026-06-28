@@ -277,10 +277,124 @@ def extract_summary(model, jobs):
     }
 
 
+# def baseline_s1_vehicle_curves_capacity(
+#     jobs,
+#     decision_col="s1_decision",
+#     bucket_col="s",
+#     *,
+#     count_no_vehicle_as_push: bool = False,
+#     # effective capacities (current fleet, conservative defaults)
+#     amb_seatcap: int = 3,
+#     amb_wccap: int = 1,
+#     mini_seatcap: int = 6,
+#     mini_wccap: int = 2,
+# ):
+#     """
+#     Capacity-aware S1 baseline curves.
+
+#     For each (bucket, flight_key), compute required vehicles as:
+#       req = max(ceil(seat_demand/seatcap), ceil(wc_demand/wccap))
+
+#     Demand is based on job-level policy decisions:
+#       - "Ambulift Only" -> Amb demand
+#       - "Mini Bus Only" -> Mini demand
+#       - "Both" -> Amb demand + Mini demand
+#       - "No Vehicle" -> optionally pusher demand (not reported)
+
+#     Staff convention (your requirement):
+#       - 1 driver per vehicle (Amb or Mini)
+#       - 1 vehicle agent per vehicle (Amb or Mini)
+#       - "Both" implies 2 vehicles -> 2 drivers + 2 agents
+#       - pushers tracked optionally but not needed in final output
+#     """
+#     import pandas as pd
+#     import numpy as np
+
+#     if decision_col not in jobs.columns:
+#         raise ValueError(f"Missing {decision_col} in jobs")
+
+#     df = jobs.copy()
+
+#     # Job needs: treat needs_wc as wheelchair, otherwise seated
+#     # (This assumes each row = one PRM passenger/job)
+#     df["_wc"] = (df["needs_wc"].fillna(0).astype(int) > 0).astype(int)
+#     df["_seat"] = 1 - df["_wc"]
+
+#     # Which vehicle types does the policy require?
+#     dec = df[decision_col].fillna("No Vehicle")
+
+#     df["_need_amb"] = dec.isin(["Ambulift Only", "Both"]).astype(int)
+#     df["_need_mini"] = dec.isin(["Mini Bus Only", "Both"]).astype(int)
+#     df["_need_push"] = 0
+#     if count_no_vehicle_as_push:
+#         df["_need_push"] = (dec == "No Vehicle").astype(int)
+
+#     # Demand contributions (seat/wc) by vehicle type
+#     df["_amb_wc"] = df["_need_amb"] * df["_wc"]
+#     df["_amb_seat"] = df["_need_amb"] * df["_seat"]
+
+#     df["_mini_wc"] = df["_need_mini"] * df["_wc"]
+#     df["_mini_seat"] = df["_need_mini"] * df["_seat"]
+
+#     df["_push_cnt"] = df["_need_push"]  # 1 pusher per "No Vehicle" job if enabled
+
+#     # Aggregate demand to (bucket, flight_key)
+#     fb = (
+#         df.groupby([bucket_col, "flight_key"])[
+#             ["_amb_wc", "_amb_seat", "_mini_wc", "_mini_seat", "_push_cnt"]
+#         ]
+#         .sum()
+#         .reset_index()
+#     )
+
+#     # Vehicles required per flight/bucket (capacity-based)
+#     def ceildiv(a, b):
+#         return int(np.ceil(a / b)) if a > 0 else 0
+
+#     amb_req = []
+#     mini_req = []
+#     push_req = []
+
+#     for _, r in fb.iterrows():
+#         a_wc = int(r["_amb_wc"])
+#         a_seat = int(r["_amb_seat"])
+#         m_wc = int(r["_mini_wc"])
+#         m_seat = int(r["_mini_seat"])
+
+#         amb_needed = max(ceildiv(a_seat, amb_seatcap), ceildiv(a_wc, amb_wccap))
+#         mini_needed = max(ceildiv(m_seat, mini_seatcap), ceildiv(m_wc, mini_wccap))
+
+#         amb_req.append(amb_needed)
+#         mini_req.append(mini_needed)
+#         push_req.append(int(r["_push_cnt"]))
+
+#     fb["Amb_req"] = amb_req
+#     fb["Mini_req"] = mini_req
+#     fb["Push_req"] = push_req
+
+#     # Curves per bucket (sum across flights)
+#     amb_curve = fb.groupby(bucket_col)["Amb_req"].sum().sort_index()
+#     mini_curve = fb.groupby(bucket_col)["Mini_req"].sum().sort_index()
+#     push_curve = fb.groupby(bucket_col)["Push_req"].sum().sort_index()
+
+#     # Staff curves (separate, as requested)
+#     driver_curve = (amb_curve + mini_curve).astype(int)        # 1 driver per vehicle
+#     veh_agent_curve = (amb_curve + mini_curve).astype(int)     # 1 vehicle agent per vehicle
+
+#     return {
+#         "ambulift_curve": amb_curve.astype(int),
+#         "minibus_curve": mini_curve.astype(int),
+#         "pusher_curve": push_curve.astype(int),                # computed but you can ignore in output
+#         "driver_curve": driver_curve,
+#         "veh_agent_curve": veh_agent_curve,
+#         "fb_detail": fb,                                       # VERY useful for debugging
+#     }
+
+
 def baseline_s1_vehicle_curves_capacity(
     jobs,
     decision_col="s1_decision",
-    bucket_col="s",
+    bucket_col="s",   # retained for backward compatibility; not used in time-based S1
     *,
     count_no_vehicle_as_push: bool = False,
     # effective capacities (current fleet, conservative defaults)
@@ -288,24 +402,28 @@ def baseline_s1_vehicle_curves_capacity(
     amb_wccap: int = 1,
     mini_seatcap: int = 6,
     mini_wccap: int = 2,
+    duration_mins: int = 35,
+    time_freq: str = "5min",
 ):
     """
-    Capacity-aware S1 baseline curves.
+    Capacity-aware S1 baseline curves (TIME-BASED).
 
-    For each (bucket, flight_key), compute required vehicles as:
-      req = max(ceil(seat_demand/seatcap), ceil(wc_demand/wccap))
+    This version uses:
+      - sla_start_time as the job start anchor
+      - a fixed job duration (default 35 mins)
+      - rolling active demand over time
+      - capacity conversion from active passenger demand -> required vehicles
 
     Demand is based on job-level policy decisions:
       - "Ambulift Only" -> Amb demand
       - "Mini Bus Only" -> Mini demand
       - "Both" -> Amb demand + Mini demand
-      - "No Vehicle" -> optionally pusher demand (not reported)
+      - "No Vehicle" -> optionally pusher demand
 
-    Staff convention (your requirement):
-      - 1 driver per vehicle (Amb or Mini)
-      - 1 vehicle agent per vehicle (Amb or Mini)
-      - "Both" implies 2 vehicles -> 2 drivers + 2 agents
-      - pushers tracked optionally but not needed in final output
+    Staff convention:
+      - 1 driver per active vehicle (Amb or Mini)
+      - 1 vehicle agent per active vehicle (Amb or Mini)
+      - "Both" implies both vehicle types are active
     """
     import pandas as pd
     import numpy as np
@@ -313,83 +431,177 @@ def baseline_s1_vehicle_curves_capacity(
     if decision_col not in jobs.columns:
         raise ValueError(f"Missing {decision_col} in jobs")
 
+    if "sla_start_time" not in jobs.columns:
+        raise ValueError("Missing 'sla_start_time' in jobs")
+
     df = jobs.copy()
 
-    # Job needs: treat needs_wc as wheelchair, otherwise seated
-    # (This assumes each row = one PRM passenger/job)
+    # ------------------------------------------------------------------
+    # Time windows
+    # ------------------------------------------------------------------
+    
+    df["job_start_time"] = pd.to_datetime(df["sla_start_time"])
+
+    np.random.seed(42)
+
+    df["job_start_time"] = (
+        df["job_start_time"]
+        + pd.to_timedelta(
+            np.random.uniform(0, df["sla_limit"]),
+            unit="m"
+        )
+    )
+
+    df["job_end_time"] = df["job_start_time"] + pd.Timedelta(minutes=duration_mins)
+
+    df = df.dropna(subset=["job_start_time", "job_end_time"]).copy()
+
+    if df.empty:
+        empty_series = pd.Series(dtype=int)
+        empty_fb = pd.DataFrame(columns=[
+            "timestamp", "flight_key",
+            "_amb_wc", "_amb_seat", "_mini_wc", "_mini_seat", "_push_cnt",
+            "Amb_req", "Mini_req", "Push_req"
+        ])
+        return {
+            "ambulift_curve": empty_series,
+            "minibus_curve": empty_series,
+            "pusher_curve": empty_series,
+            "driver_curve": empty_series,
+            "veh_agent_curve": empty_series,
+            "fb_detail": empty_fb,
+        }
+
+    # ------------------------------------------------------------------
+    # Passenger/job demand flags
+    # ------------------------------------------------------------------
+    # Each row = one PRM job
+    # needs_wc means wheelchair-demanding; else seated demand
     df["_wc"] = (df["needs_wc"].fillna(0).astype(int) > 0).astype(int)
     df["_seat"] = 1 - df["_wc"]
 
-    # Which vehicle types does the policy require?
     dec = df[decision_col].fillna("No Vehicle")
 
-    df["_need_amb"] = dec.isin(["Ambulift Only", "Both"]).astype(int)
-    df["_need_mini"] = dec.isin(["Mini Bus Only", "Both"]).astype(int)
+    
+    df["_need_amb"] = dec.isin(["Ambulift Only"]).astype(int)
+    df["_need_mini"] = dec.isin(["Mini Bus Only"]).astype(int)
+
+    # FIX: split "Both" across vehicles (not double counting)
+    both_mask = dec == "Both"
+
+    df["_need_amb"] += 0.5 * both_mask.astype(float)
+    df["_need_mini"] += 0.5 * both_mask.astype(float)
+
     df["_need_push"] = 0
     if count_no_vehicle_as_push:
         df["_need_push"] = (dec == "No Vehicle").astype(int)
 
-    # Demand contributions (seat/wc) by vehicle type
+    # Demand contributions by vehicle type
     df["_amb_wc"] = df["_need_amb"] * df["_wc"]
     df["_amb_seat"] = df["_need_amb"] * df["_seat"]
 
     df["_mini_wc"] = df["_need_mini"] * df["_wc"]
     df["_mini_seat"] = df["_need_mini"] * df["_seat"]
 
-    df["_push_cnt"] = df["_need_push"]  # 1 pusher per "No Vehicle" job if enabled
+    df["_push_cnt"] = df["_need_push"]
 
-    # Aggregate demand to (bucket, flight_key)
-    fb = (
-        df.groupby([bucket_col, "flight_key"])[
-            ["_amb_wc", "_amb_seat", "_mini_wc", "_mini_seat", "_push_cnt"]
-        ]
-        .sum()
-        .reset_index()
-    )
+    # ------------------------------------------------------------------
+    # Time grid
+    # ------------------------------------------------------------------
+    start = df["job_start_time"].min().floor(time_freq)
+    end = df["job_end_time"].max().ceil(time_freq)
 
-    # Vehicles required per flight/bucket (capacity-based)
+    time_index = pd.date_range(start=start, end=end, freq=time_freq)
+
     def ceildiv(a, b):
         return int(np.ceil(a / b)) if a > 0 else 0
 
-    amb_req = []
-    mini_req = []
-    push_req = []
+    curve_rows = []
+    fb_rows = []
 
-    for _, r in fb.iterrows():
-        a_wc = int(r["_amb_wc"])
-        a_seat = int(r["_amb_seat"])
-        m_wc = int(r["_mini_wc"])
-        m_seat = int(r["_mini_seat"])
+    # ------------------------------------------------------------------
+    # For each time slice, find active jobs and convert active demand
+    # into required vehicles by (timestamp, flight_key)
+    # ------------------------------------------------------------------
+    for ts in time_index:
+        active = df[
+            (df["job_start_time"] <= ts) &
+            (df["job_end_time"] > ts)
+        ].copy()
 
-        amb_needed = max(ceildiv(a_seat, amb_seatcap), ceildiv(a_wc, amb_wccap))
-        mini_needed = max(ceildiv(m_seat, mini_seatcap), ceildiv(m_wc, mini_wccap))
+        if active.empty:
+            curve_rows.append({
+                "timestamp": ts,
+                "Amb_req": 0,
+                "Mini_req": 0,
+                "Push_req": 0,
+            })
+            continue
 
-        amb_req.append(amb_needed)
-        mini_req.append(mini_needed)
-        push_req.append(int(r["_push_cnt"]))
+        active_fb = (
+            active.groupby("flight_key")[
+                ["_amb_wc", "_amb_seat", "_mini_wc", "_mini_seat", "_push_cnt"]
+            ]
+            .sum()
+            .reset_index()
+        )
 
-    fb["Amb_req"] = amb_req
-    fb["Mini_req"] = mini_req
-    fb["Push_req"] = push_req
+        amb_total = 0
+        mini_total = 0
+        push_total = 0
 
-    # Curves per bucket (sum across flights)
-    amb_curve = fb.groupby(bucket_col)["Amb_req"].sum().sort_index()
-    mini_curve = fb.groupby(bucket_col)["Mini_req"].sum().sort_index()
-    push_curve = fb.groupby(bucket_col)["Push_req"].sum().sort_index()
+        for _, r in active_fb.iterrows():
+            a_wc = int(r["_amb_wc"])
+            a_seat = int(r["_amb_seat"])
+            m_wc = int(r["_mini_wc"])
+            m_seat = int(r["_mini_seat"])
 
-    # Staff curves (separate, as requested)
-    driver_curve = (amb_curve + mini_curve).astype(int)        # 1 driver per vehicle
-    veh_agent_curve = (amb_curve + mini_curve).astype(int)     # 1 vehicle agent per vehicle
+            amb_needed = max(ceildiv(a_seat, amb_seatcap), ceildiv(a_wc, amb_wccap))
+            mini_needed = max(ceildiv(m_seat, mini_seatcap), ceildiv(m_wc, mini_wccap))
+            push_needed = int(r["_push_cnt"])
+
+            amb_total += amb_needed
+            mini_total += mini_needed
+            push_total += push_needed
+
+            fb_rows.append({
+                "timestamp": ts,
+                "flight_key": r["flight_key"],
+                "_amb_wc": a_wc,
+                "_amb_seat": a_seat,
+                "_mini_wc": m_wc,
+                "_mini_seat": m_seat,
+                "_push_cnt": push_needed,
+                "Amb_req": amb_needed,
+                "Mini_req": mini_needed,
+                "Push_req": push_needed,
+            })
+
+        curve_rows.append({
+            "timestamp": ts,
+            "Amb_req": amb_total,
+            "Mini_req": mini_total,
+            "Push_req": push_total,
+        })
+
+    curve_df = pd.DataFrame(curve_rows).set_index("timestamp").sort_index()
+    fb_detail = pd.DataFrame(fb_rows)
+
+    amb_curve = curve_df["Amb_req"].astype(int)
+    mini_curve = curve_df["Mini_req"].astype(int)
+    push_curve = curve_df["Push_req"].astype(int)
+
+    driver_curve = (amb_curve + mini_curve).astype(int)
+    veh_agent_curve = (amb_curve + mini_curve).astype(int)
 
     return {
-        "ambulift_curve": amb_curve.astype(int),
-        "minibus_curve": mini_curve.astype(int),
-        "pusher_curve": push_curve.astype(int),                # computed but you can ignore in output
+        "ambulift_curve": amb_curve,
+        "minibus_curve": mini_curve,
+        "pusher_curve": push_curve,
         "driver_curve": driver_curve,
         "veh_agent_curve": veh_agent_curve,
-        "fb_detail": fb,                                       # VERY useful for debugging
+        "fb_detail": fb_detail,
     }
-
 
 
 def baseline_s1_summary(

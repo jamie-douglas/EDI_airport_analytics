@@ -427,6 +427,20 @@ def load_lane_movements_as_target_month(
 sep_2025_bookings_df = load_fastpark_bookings_as_target_month(2024, 2025, 9)
 sep_2025_actuals_df = load_fastpark_actuals_as_target_month(2024, 2025, 9, drop_null_checkout=True)
 
+
+aug_to_oct_2025_bookings_df = pd.concat([
+    load_fastpark_bookings_as_target_month(2024, 2025, 8),
+    load_fastpark_bookings_as_target_month(2024, 2025, 9),
+    load_fastpark_bookings_as_target_month(2024, 2025, 10)
+], ignore_index=True)
+
+aug_to_oct_2026_bookings_df = pd.concat([
+    load_fastpark_bookings_as_target_month(2025, 2026, 8),
+    load_fastpark_bookings_as_target_month(2025, 2026, 9),
+    load_fastpark_bookings_as_target_month(2025, 2026, 10)
+], ignore_index=True)
+
+
 sep_2026_bookings_df = load_fastpark_bookings_as_target_month(2025, 2026, 9)
 sep_2026_actuals_df = load_fastpark_actuals_as_target_month(2025, 2026, 9, drop_null_checkout=True)
 
@@ -675,13 +689,15 @@ with pd.ExcelWriter(clean_output_path, engine="openpyxl", mode="w") as writer:
     drop_source_columns(flights_2026_df).to_excel(writer, sheet_name="Pseudo Sep2026 flights", index=False)
 
 
-debug_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol2_debug.xlsx"
+debug_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol3.xlsx"
 
 with pd.ExcelWriter(debug_output_path, engine="openpyxl", mode="w") as writer:
     sep_2025_fp_merged.to_excel(writer, sheet_name="Pseudo Sep2025 actuals+book", index=False)
     sep_2026_fp_merged.to_excel(writer, sheet_name="Pseudo Sep2026 actuals+book", index=False)
     sep_2025_bookings_df.to_excel(writer, sheet_name="Pseudo Sep2025 bookings", index=False)
     sep_2026_bookings_df.to_excel(writer, sheet_name="Pseudo Sep2026 bookings", index=False)
+    aug_to_oct_2025_bookings_df.to_excel(writer, sheet_name="Pseudo Aug-Oct 2025 bookings", index=False)
+    aug_to_oct_2026_bookings_df.to_excel(writer, sheet_name="Pseudo Aug-Oct 2026 bookings", index=False)
     block_hourly_df.to_excel(writer, sheet_name="Pseudo Sep2025 block occ", index=False)
     lane_hourly_df.to_excel(writer, sheet_name="Pseudo Sep2025 lane occ", index=False)
     current_system.to_excel(writer, sheet_name="Pseudo current_system", index=False)

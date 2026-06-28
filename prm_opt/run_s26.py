@@ -119,6 +119,18 @@ def run_s26_s1(
     decisions = apply_policy_s1(jobs)
     jobs["s1_decision"] = jobs.index.map(decisions.get)
 
+    # curves = baseline_s1_vehicle_curves_capacity(
+    #     jobs,
+    #     decision_col="s1_decision",
+    #     bucket_col="s",
+    #     count_no_vehicle_as_push=True,
+    #     amb_seatcap=3,
+    #     amb_wccap=1,
+    #     mini_seatcap=6,
+    #     mini_wccap=2,
+    # )
+
+    
     curves = baseline_s1_vehicle_curves_capacity(
         jobs,
         decision_col="s1_decision",
@@ -128,7 +140,10 @@ def run_s26_s1(
         amb_wccap=1,
         mini_seatcap=6,
         mini_wccap=2,
+        duration_mins=35,
+        time_freq="5min",
     )
+
 
     classes = build_vehicle_classes(include_future=False)
     current_amb = sum(int(c["count"]) for c in classes.get("Amb", []))
