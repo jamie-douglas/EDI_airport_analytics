@@ -206,6 +206,7 @@ def extract_summary(model, jobs):
     # SLA
     y = pd.Series({j: float(pyo.value(model.y[j]) or 0.0) for j in model.J})
     sla_all = 1.0 - y.mean() if len(y) else 1.0
+    actual_breaches = int(round(float(y.sum()))) if len(y) else 0
 
     arr_idx = jobs.index[jobs["dir"] == "A"]
     dep_idx = jobs.index[jobs["dir"] == "D"]
@@ -258,10 +259,30 @@ def extract_summary(model, jobs):
     gap_amb = max(0, peak_amb - current_amb)
     gap_mini = max(0, peak_mini - current_mini)
 
+    n_jobs = int(len(jobs))
+    if hasattr(model, "allowed_breaches"):
+        try:
+            allowed_breaches = int(round(float(pyo.value(model.allowed_breaches))))
+        except Exception:
+            allowed_breaches = int(round(0.02 * n_jobs))
+    else:
+        allowed_breaches = int(round(0.02 * n_jobs))
+
+    sla_floor_slack = 0.0
+    if hasattr(model, "sla_floor_slack"):
+        try:
+            sla_floor_slack = float(pyo.value(model.sla_floor_slack) or 0.0)
+        except Exception:
+            sla_floor_slack = 0.0
+
     return {
         "SLA_all": sla_all,
         "SLA_arr": sla_arr,
         "SLA_dep": sla_dep,
+        "allowed_breaches": int(allowed_breaches),
+        "actual_breaches": int(actual_breaches),
+        "sla_percent": float(sla_all * 100.0),
+        "sla_floor_slack": float(sla_floor_slack),
 
         "PeakAmb": int(peak_amb),
         "PeakMini": int(peak_mini),
@@ -404,13 +425,16 @@ def baseline_s1_vehicle_curves_capacity(
     mini_wccap: int = 2,
     duration_mins: int = 35,
     time_freq: str = "5min",
+    randomize_within_sla: bool = False,
 ):
     """
     Capacity-aware S1 baseline curves (TIME-BASED).
 
-    This version uses:
-      - sla_start_time as the job start anchor
-      - a fixed job duration (default 35 mins)
+        This version uses:
+            - sla_start_time as the job start anchor
+            - mode-specific durations when available (tau_amb/mini/push)
+            - base_duration_mins as secondary fallback
+            - duration_mins as final fallback
       - rolling active demand over time
       - capacity conversion from active passenger demand -> required vehicles
 
@@ -442,19 +466,12 @@ def baseline_s1_vehicle_curves_capacity(
     
     df["job_start_time"] = pd.to_datetime(df["sla_start_time"])
 
-    np.random.seed(42)
+    if randomize_within_sla:
+        np.random.seed(42)
+        jitter = np.random.uniform(0, pd.to_numeric(df["sla_limit"], errors="coerce").fillna(0).clip(lower=0))
+        df["job_start_time"] = df["job_start_time"] + pd.to_timedelta(jitter, unit="m")
 
-    df["job_start_time"] = (
-        df["job_start_time"]
-        + pd.to_timedelta(
-            np.random.uniform(0, df["sla_limit"]),
-            unit="m"
-        )
-    )
-
-    df["job_end_time"] = df["job_start_time"] + pd.Timedelta(minutes=duration_mins)
-
-    df = df.dropna(subset=["job_start_time", "job_end_time"]).copy()
+    df = df.dropna(subset=["job_start_time"]).copy()
 
     if df.empty:
         empty_series = pd.Series(dtype=int)
@@ -482,6 +499,21 @@ def baseline_s1_vehicle_curves_capacity(
 
     dec = df[decision_col].fillna("No Vehicle")
 
+    # Duration hierarchy for each mode:
+    # 1) mode-specific tau column
+    # 2) base_duration_mins from observed/generated job spans
+    # 3) fixed duration_mins fallback
+    base_fallback = pd.to_numeric(df.get("base_duration_mins", duration_mins), errors="coerce")
+    base_fallback = base_fallback.fillna(float(duration_mins)).clip(lower=1)
+
+    amb_dur = pd.to_numeric(df.get("tau_amb_mins", base_fallback), errors="coerce").fillna(base_fallback).clip(lower=1)
+    mini_dur = pd.to_numeric(df.get("tau_mini_mins", base_fallback), errors="coerce").fillna(base_fallback).clip(lower=1)
+    push_dur = pd.to_numeric(df.get("tau_push_mins", base_fallback), errors="coerce").fillna(base_fallback).clip(lower=1)
+
+    df["_dur_amb_mins"] = amb_dur
+    df["_dur_mini_mins"] = mini_dur
+    df["_dur_push_mins"] = push_dur
+
     
     df["_need_amb"] = dec.isin(["Ambulift Only"]).astype(int)
     df["_need_mini"] = dec.isin(["Mini Bus Only"]).astype(int)
@@ -505,11 +537,20 @@ def baseline_s1_vehicle_curves_capacity(
 
     df["_push_cnt"] = df["_need_push"]
 
+    # Mode-specific active windows.
+    df["_amb_end_time"] = df["job_start_time"] + pd.to_timedelta(df["_dur_amb_mins"], unit="m")
+    df["_mini_end_time"] = df["job_start_time"] + pd.to_timedelta(df["_dur_mini_mins"], unit="m")
+    df["_push_end_time"] = df["job_start_time"] + pd.to_timedelta(df["_dur_push_mins"], unit="m")
+
     # ------------------------------------------------------------------
     # Time grid
     # ------------------------------------------------------------------
     start = df["job_start_time"].min().floor(time_freq)
-    end = df["job_end_time"].max().ceil(time_freq)
+    end = max(
+        df["_amb_end_time"].max(),
+        df["_mini_end_time"].max(),
+        df["_push_end_time"].max(),
+    ).ceil(time_freq)
 
     time_index = pd.date_range(start=start, end=end, freq=time_freq)
 
@@ -524,12 +565,23 @@ def baseline_s1_vehicle_curves_capacity(
     # into required vehicles by (timestamp, flight_key)
     # ------------------------------------------------------------------
     for ts in time_index:
-        active = df[
-            (df["job_start_time"] <= ts) &
-            (df["job_end_time"] > ts)
-        ].copy()
+        amb_active = df[
+            (df["_need_amb"] > 0)
+            & (df["job_start_time"] <= ts)
+            & (df["_amb_end_time"] > ts)
+        ]
+        mini_active = df[
+            (df["_need_mini"] > 0)
+            & (df["job_start_time"] <= ts)
+            & (df["_mini_end_time"] > ts)
+        ]
+        push_active = df[
+            (df["_need_push"] > 0)
+            & (df["job_start_time"] <= ts)
+            & (df["_push_end_time"] > ts)
+        ]
 
-        if active.empty:
+        if amb_active.empty and mini_active.empty and push_active.empty:
             curve_rows.append({
                 "timestamp": ts,
                 "Amb_req": 0,
@@ -538,13 +590,11 @@ def baseline_s1_vehicle_curves_capacity(
             })
             continue
 
-        active_fb = (
-            active.groupby("flight_key")[
-                ["_amb_wc", "_amb_seat", "_mini_wc", "_mini_seat", "_push_cnt"]
-            ]
-            .sum()
-            .reset_index()
-        )
+        amb_fb = amb_active.groupby("flight_key")[["_amb_wc", "_amb_seat"]].sum()
+        mini_fb = mini_active.groupby("flight_key")[["_mini_wc", "_mini_seat"]].sum()
+        push_fb = push_active.groupby("flight_key")[["_push_cnt"]].sum()
+
+        active_fb = amb_fb.join(mini_fb, how="outer").join(push_fb, how="outer").fillna(0).reset_index()
 
         amb_total = 0
         mini_total = 0
@@ -601,6 +651,23 @@ def baseline_s1_vehicle_curves_capacity(
         "driver_curve": driver_curve,
         "veh_agent_curve": veh_agent_curve,
         "fb_detail": fb_detail,
+        "duration_stats": {
+            "Amb": {
+                "count": int((df["_need_amb"] > 0).sum()),
+                "mean_mins": float(df.loc[df["_need_amb"] > 0, "_dur_amb_mins"].mean()) if (df["_need_amb"] > 0).any() else None,
+                "median_mins": float(df.loc[df["_need_amb"] > 0, "_dur_amb_mins"].median()) if (df["_need_amb"] > 0).any() else None,
+            },
+            "Mini": {
+                "count": int((df["_need_mini"] > 0).sum()),
+                "mean_mins": float(df.loc[df["_need_mini"] > 0, "_dur_mini_mins"].mean()) if (df["_need_mini"] > 0).any() else None,
+                "median_mins": float(df.loc[df["_need_mini"] > 0, "_dur_mini_mins"].median()) if (df["_need_mini"] > 0).any() else None,
+            },
+            "Push": {
+                "count": int((df["_need_push"] > 0).sum()),
+                "mean_mins": float(df.loc[df["_need_push"] > 0, "_dur_push_mins"].mean()) if (df["_need_push"] > 0).any() else None,
+                "median_mins": float(df.loc[df["_need_push"] > 0, "_dur_push_mins"].median()) if (df["_need_push"] > 0).any() else None,
+            },
+        },
     }
 
 
@@ -641,6 +708,13 @@ def baseline_s1_summary(
         "PeakDrivers": peak_drv,
         "PeakVehAgents": peak_agents,
     }
+
+    if "duration_stats" in curves:
+        for mode_name, mode_stats in curves["duration_stats"].items():
+            prefix = f"Dur{mode_name}"
+            out[f"{prefix}Count"] = mode_stats.get("count")
+            out[f"{prefix}MeanMins"] = mode_stats.get("mean_mins")
+            out[f"{prefix}MedianMins"] = mode_stats.get("median_mins")
 
     # Optional fleet comparison (CURRENT fleet only — no future vehicles)
     if current_amb is not None:
@@ -820,6 +894,10 @@ def print_run_report(report: dict, *, show_hours: int = 24, show_top: int = 10):
     print(f"  SLA_all      : {summ.get('SLA_all'):.3f}" if summ.get("SLA_all") is not None else "  SLA_all      : n/a")
     print(f"  SLA_arr      : {summ.get('SLA_arr'):.3f}" if summ.get("SLA_arr") is not None else "  SLA_arr      : n/a")
     print(f"  SLA_dep      : {summ.get('SLA_dep'):.3f}" if summ.get("SLA_dep") is not None else "  SLA_dep      : n/a")
+    print(f"  allowed_breaches: {summ.get('allowed_breaches')}")
+    print(f"  actual_breaches : {summ.get('actual_breaches')}")
+    print(f"  sla_percent     : {summ.get('sla_percent'):.2f}%" if summ.get("sla_percent") is not None else "  sla_percent     : n/a")
+    print(f"  sla_floor_slack : {summ.get('sla_floor_slack'):.2f}" if summ.get("sla_floor_slack") is not None else "  sla_floor_slack : n/a")
 
     print(f"  PeakAmb      : {summ.get('PeakAmb')}   (Current={summ.get('CurrentAmb')} | Gap={summ.get('GapAmb')})")
     print(f"  PeakMini     : {summ.get('PeakMini')}  (Current={summ.get('CurrentMini')} | Gap={summ.get('GapMini')})")
@@ -1016,6 +1094,23 @@ def print_run_report_s1(report: dict, *, show_hours: int = 24):
     for k in ["PeakAmb","PeakMini","PeakDrivers","PeakVehAgents","CurrentAmb","CurrentMini","GapAmb","GapMini"]:
         if k in summ:
             print(f"  {k:14s}: {summ[k]}")
+
+    dur_keys = [
+        ("DurAmbCount", "DurAmbMeanMins", "DurAmbMedianMins"),
+        ("DurMiniCount", "DurMiniMeanMins", "DurMiniMedianMins"),
+        ("DurPushCount", "DurPushMeanMins", "DurPushMedianMins"),
+    ]
+    if any(count_key in summ for count_key, _, _ in dur_keys):
+        print("\n  Duration diagnostics (rows contributing by mode)")
+        for count_key, mean_key, median_key in dur_keys:
+            if count_key not in summ:
+                continue
+            print(
+                "  "
+                f"{count_key:14s}: {summ.get(count_key)} | "
+                f"{mean_key}: {summ.get(mean_key)} | "
+                f"{median_key}: {summ.get(median_key)}"
+            )
 
     peak = report.get("peak_day_report", {})
     print("\n[2] Peak Day (most PRM jobs) — Hourly Requirement + Gaps")

@@ -110,6 +110,7 @@ from .config import (
     LIFT_CAPACITY_MINS,
     VEHICLE_MODELS,
     PlanningToggles,
+    is_remote_stand,
 )
 from .params import build_vehicle_classes
 from modules.utils.progress import step
@@ -636,9 +637,21 @@ def build_pyomo_model(
     # Soft SLA target (still soft)
     # -----------------------------
     SLA_TARGET = float(getattr(toggles, "sla_target_rate", 0.98) or 0.98)
+    ENFORCE_HARD_SLA_FLOOR = bool(getattr(toggles, "enforce_hard_sla_floor", False))
+    ALLOW_SLA_FLOOR_SLACK = bool(getattr(toggles, "allow_sla_floor_slack", True))
+    SLA_FLOOR_SLACK_WEIGHT = float(getattr(toggles, "obj_sla_floor_slack_weight", 20_000_000.0) or 20_000_000.0)
 
     # allowed breaches at target (e.g. 2% of jobs)
-    allowed_breaches = int((1.0 - SLA_TARGET) * len(jobs))
+    # - Legacy mode (toggle off): floor via int(...) for backward compatibility.
+    # - Hard-floor mode (toggle on): use ceil(...) so integer allowance aligns with SLA target policy.
+    if ENFORCE_HARD_SLA_FLOOR:
+        allowed_breaches = int(math.ceil((1.0 - SLA_TARGET) * len(jobs)))
+    else:
+        allowed_breaches = int((1.0 - SLA_TARGET) * len(jobs))
+
+    # Expose SLA policy values on model for debugging/reporting.
+    m.allowed_breaches = pyo.Param(initialize=float(allowed_breaches), mutable=False)
+    m.sla_target_rate = pyo.Param(initialize=float(SLA_TARGET), mutable=False)
 
     # sla_excess = max(0, total_breaches - allowed_breaches)
     m.sla_excess = pyo.Var(domain=pyo.NonNegativeReals)
@@ -646,6 +659,21 @@ def build_pyomo_model(
     m.SLAExcessDef = pyo.Constraint(
         expr=m.sla_excess >= pyo.quicksum(m.y[j] for j in m.J) - allowed_breaches
     )
+
+    # Optional hard SLA floor (toggle-controlled): cap total breaches at target allowance.
+    # Optional slack keeps model solvable while quantifying how many breaches exceed the floor.
+    if ENFORCE_HARD_SLA_FLOOR and ALLOW_SLA_FLOOR_SLACK:
+        m.sla_floor_slack = pyo.Var(domain=pyo.NonNegativeReals)
+        m.HardSLAFloor = pyo.Constraint(
+            expr=pyo.quicksum(m.y[j] for j in m.J) <= allowed_breaches + m.sla_floor_slack
+        )
+    elif ENFORCE_HARD_SLA_FLOOR:
+        m.sla_floor_slack = pyo.Param(initialize=0.0, mutable=False)
+        m.HardSLAFloor = pyo.Constraint(
+            expr=pyo.quicksum(m.y[j] for j in m.J) <= allowed_breaches
+        )
+    else:
+        m.sla_floor_slack = pyo.Param(initialize=0.0, mutable=False)
 
 
     # Linearisation: U[j,b,m] = A[j,b] AND x[j,m]
@@ -721,6 +749,11 @@ def build_pyomo_model(
 
         sla_pen = LAMBDA * pyo.quicksum(m.y[j] for j in m.J)
         sla_excess_pen = EXCESS_WEIGHT * m.sla_excess
+        sla_floor_slack_pen = (
+            SLA_FLOOR_SLACK_WEIGHT * m.sla_floor_slack
+            if ENFORCE_HARD_SLA_FLOOR and ALLOW_SLA_FLOOR_SLACK
+            else 0.0
+        )
 
         WAGE = {"Drv": 1.0, "VehAg": 1.0, "Push": 1.0}
         staff_reg = pyo.quicksum(
@@ -734,7 +767,7 @@ def build_pyomo_model(
             for (vtype, cid) in m.VC
         )
 
-        return trips_cost + soft + sla_pen + sla_excess_pen + staff_reg + veh_capex
+        return trips_cost + soft + sla_pen + sla_excess_pen + sla_floor_slack_pen + staff_reg + veh_capex
 
     m.OBJ = pyo.Objective(rule=obj_rule, sense=pyo.minimize)
     t = step(t, "objective created")
@@ -797,6 +830,13 @@ def build_pyomo_model(
         return pyo.Constraint.Skip
 
     m.SafetyStand = pyo.Constraint(m.J, rule=safety_rule)
+
+    def no_push_remote_stands(m, j):
+        if is_remote_stand(jobs.loc[j, "Stand"]):
+            return m.x[j, "Push"] == 0
+        return pyo.Constraint.Skip
+
+    m.NoPushRemoteStands = pyo.Constraint(m.J, rule=no_push_remote_stands)
 
     def no_amb_horizontal_domestic_arrivals(m, j):
         if str(jobs.loc[j, "Sector"]) == "Domestic" and str(jobs.loc[j, "dir"]) == "A":

@@ -1,3 +1,8 @@
-month,S1_PeakAmb,S1_PeakMini
-2025-04,15,5
-2025-05,17,8
+month,S1_PeakAmb,S1_PeakMini,S2_PeakAmb,S2_PeakMini,SLA_all,SLA_arr,SLA_dep,allowed_breaches,actual_breaches,sla_percent,sla_floor_slack,S2_status,S2_tc,S2_st
+2025-04,14,4,,,,,,,,,,,,
+2025-05,19,5,,,,,,,,,,,,
+2025-06,12,7,,,,,,,,,,,,
+2025-07,14,5,,,,,,,,,,,,
+2025-08,13,5,,,,,,,,,,,,
+2025-09,15,6,,,,,,,,,,,,
+2025-10,22,5,,,,,,,,,,,,

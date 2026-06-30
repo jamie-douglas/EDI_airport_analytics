@@ -120,7 +120,7 @@ def run_s25_s1(start, end, toggles: PlanningToggles = PlanningToggles()):
         amb_wccap=1,
         mini_seatcap=6,
         mini_wccap=2,
-        duration_mins=35,                # NEW: fixed job duration
+        duration_mins=20,                # NEW: fixed job duration
         time_freq="5min",                # NEW: time resolution for active demand
     )
 
@@ -691,6 +691,20 @@ def run_month_s25(month_start, toggles):
         "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
         "S1_PeakMini": report_s1["summary"]["PeakMini"],
 
+        # Keep monthly schema aligned with S26 output even when S2 is disabled here.
+        "S2_PeakAmb": None,
+        "S2_PeakMini": None,
+        "SLA_all": None,
+        "SLA_arr": None,
+        "SLA_dep": None,
+        "allowed_breaches": None,
+        "actual_breaches": None,
+        "sla_percent": None,
+        "sla_floor_slack": None,
+        "S2_status": None,
+        "S2_tc": None,
+        "S2_st": None,
+
         # "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
         # "S2_PeakMini": report_s2["summary"]["PeakMini"],
 
@@ -698,4 +712,7 @@ def run_month_s25(month_start, toggles):
         # "SLA_all": report_s2["summary"]["SLA_all"],
         # "SLA_arr": report_s2["summary"]["SLA_arr"],
         # "SLA_dep": report_s2["summary"]["SLA_dep"],
+        # "S2_status": report_s2.get("status"),
+        # "S2_tc": report_s2.get("tc"),
+        # "S2_st": report_s2.get("st"),
     }

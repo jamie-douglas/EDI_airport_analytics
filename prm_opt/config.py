@@ -49,6 +49,11 @@ class PlanningToggles:
     
     sla_target_rate: float = 0.98
 
+    # Optional hard SLA floor controls (disabled by default to preserve legacy behaviour)
+    enforce_hard_sla_floor: bool = False
+    allow_sla_floor_slack: bool = True
+    obj_sla_floor_slack_weight: float = 20_000_000.0
+
     obj_trip_weight: float = 50.0
     obj_sla_weight: float = 200_000.0
     obj_sla_excess_weight: float = 5_000_000.0
@@ -178,7 +183,7 @@ STAND_ZONES = {
     "10": "Z2", "11": "Z2", "12": "Z2", "14": "Z2",
 
     # Zone 3
-    "51": "Z3", "51A": "Z3", "51B": "Z3",
+    "15": "Z3", "15A": "Z3", "15B": "Z3",
     "16": "Z3", "16A": "Z3", "16B": "Z3", "17": "Z3",
     "18": "Z3", "19": "Z3",
     "20": "Z3", "21": "Z3", "22": "Z3", "23": "Z3",
@@ -202,3 +207,48 @@ STAND_ZONES = {
     "200": "Z7", "201": "Z7", "202": "Z7", "203": "Z7",
     "204": "Z7", "205": "Z7", "206": "Z7", "207": "Z7", "208": "Z7",
 }
+
+
+# =========================================================
+# Stand remote/contact classification rules
+# =========================================================
+
+# Zones where all stands are remote.
+REMOTE_ZONES: Set[str] = {"Z4", "Z5", "Z6", "Z7"}
+
+# Zone 1 mixed logic: only these stands are remote; all other Z1 stands are contact.
+ZONE1_REMOTE_STANDS: Set[str] = {str(s) for s in range(99, 107)}
+
+
+def normalise_stand_code(stand: object) -> str:
+    """
+    Normalise stand labels to match STAND_ZONES keys.
+    """
+    s = str(stand).upper().strip()
+    if s in {"", "NAN", "NONE"}:
+        return ""
+    s = s.replace("-T1", "")
+    if "-" in s:
+        s = s.split("-", 1)[0]
+    return s.strip()
+
+
+def is_remote_stand(stand: object) -> bool:
+    """
+    Classify remote vs contact stand using configured zone rules.
+
+    Rules:
+    - Z1: only stands in ZONE1_REMOTE_STANDS are remote
+    - Z2, Z3: contact
+    - Z4-Z7: remote
+    """
+    stand_code = normalise_stand_code(stand)
+    if stand_code == "":
+        return False
+
+    zone = STAND_ZONES.get(stand_code)
+    if zone in REMOTE_ZONES:
+        return True
+    if zone == "Z1":
+        return stand_code in ZONE1_REMOTE_STANDS
+    return False

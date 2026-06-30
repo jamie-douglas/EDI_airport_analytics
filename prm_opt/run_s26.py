@@ -140,7 +140,7 @@ def run_s26_s1(
         amb_wccap=1,
         mini_seatcap=6,
         mini_wccap=2,
-        duration_mins=35,
+        duration_mins=20,
         time_freq="5min",
     )
 
@@ -612,6 +612,18 @@ def run_month_s26(month_start, assumptions, toggles):
 
     report_s1 = build_run_report_s1(out_s1)
     report_s2 = build_run_report(r)
+    s2_summary = report_s2.get("summary", {})
+    has_s2_summary = bool(s2_summary)
+
+    s2_peak_amb = s2_summary.get("PeakAmb")
+    s2_peak_mini = s2_summary.get("PeakMini")
+    sla_all = s2_summary.get("SLA_all")
+    sla_arr = s2_summary.get("SLA_arr")
+    sla_dep = s2_summary.get("SLA_dep")
+    allowed_breaches = s2_summary.get("allowed_breaches")
+    actual_breaches = s2_summary.get("actual_breaches")
+    sla_percent = s2_summary.get("sla_percent")
+    sla_floor_slack = s2_summary.get("sla_floor_slack")
 
     
     # --------------------------------------------------
@@ -627,17 +639,37 @@ def run_month_s26(month_start, assumptions, toggles):
     )
 
     print("Scenario 2:")
-    print(
-        f"  PeakAmb={report_s2['summary']['PeakAmb']} | "
-        f"PeakMini={report_s2['summary']['PeakMini']}"
-    )
+    if has_s2_summary:
+        print(f"  PeakAmb={s2_peak_amb} | PeakMini={s2_peak_mini}")
+    else:
+        print(
+            f"  No S2 summary available (status={report_s2.get('status')}, "
+            f"tc={report_s2.get('tc')}, st={report_s2.get('st')})"
+        )
 
     print("SLA:")
+    if sla_all is not None and sla_arr is not None and sla_dep is not None:
+        print(f"  All={sla_all:.4f} | Arr={sla_arr:.4f} | Dep={sla_dep:.4f}")
+    else:
+        print("  All=None | Arr=None | Dep=None")
+
+    print("SLA diagnostics:")
     print(
-        f"  All={report_s2['summary']['SLA_all']:.4f} | "
-        f"Arr={report_s2['summary']['SLA_arr']:.4f} | "
-        f"Dep={report_s2['summary']['SLA_dep']:.4f}"
+        f"  allowed_breaches={allowed_breaches} | "
+        f"actual_breaches={actual_breaches} | "
+        f"sla_percent={sla_percent:.2f}% | "
+        f"sla_floor_slack={sla_floor_slack:.2f}"
+        if sla_percent is not None and sla_floor_slack is not None
+        else (
+            f"  allowed_breaches={allowed_breaches} | "
+            f"actual_breaches={actual_breaches} | "
+            f"sla_percent={sla_percent} | "
+            f"sla_floor_slack={sla_floor_slack}"
+        )
     )
+
+    if bool(getattr(toggles, "enforce_hard_sla_floor", False)) and (sla_floor_slack is not None) and (float(sla_floor_slack) > 0):
+        print(f"  WARNING: hard SLA floor relaxed by slack on {float(sla_floor_slack):.2f} jobs")
     print("================================================\n")
 
 
@@ -648,10 +680,19 @@ def run_month_s26(month_start, assumptions, toggles):
         "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
         "S1_PeakMini": report_s1["summary"]["PeakMini"],
 
-        "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
-        "S2_PeakMini": report_s2["summary"]["PeakMini"],
+        "S2_PeakAmb": s2_peak_amb,
+        "S2_PeakMini": s2_peak_mini,
 
-        "SLA_all": report_s2["summary"]["SLA_all"],
-        "SLA_arr": report_s2["summary"]["SLA_arr"],
-        "SLA_dep": report_s2["summary"]["SLA_dep"],
+        "SLA_all": sla_all,
+        "SLA_arr": sla_arr,
+        "SLA_dep": sla_dep,
+
+        "allowed_breaches": allowed_breaches,
+        "actual_breaches": actual_breaches,
+        "sla_percent": sla_percent,
+        "sla_floor_slack": sla_floor_slack,
+
+        "S2_status": report_s2.get("status"),
+        "S2_tc": report_s2.get("tc"),
+        "S2_st": report_s2.get("st"),
     }

@@ -11,6 +11,42 @@ from prm_opt.config import STAND_ZONES, WCHS_OWN_CHAIR_PROB, NO_JETBRIDGE_AIRLIN
 from prm_opt.sector import normalise_sector
 
 
+ZONE1_REMOTE_STANDS = {str(s) for s in range(99, 107)}
+REMOTE_ZONES = {"Z4", "Z5", "Z6", "Z7"}
+
+
+def _normalise_stand_code(stand: object) -> str:
+    """
+    Normalise stand labels to match config STAND_ZONES keys.
+    """
+    s = str(stand).upper().strip()
+    if s in {"", "NAN", "NONE"}:
+        return ""
+    s = s.replace("-T1", "")
+    if "-" in s:
+        s = s.split("-", 1)[0]
+    return s.strip()
+
+
+def _is_remote_stand_from_zone(stand: object) -> int:
+    """
+    Remote stand rules:
+      - Zone 1: only stands 99-106 are remote
+      - Zones 2-3: all contact
+      - Zones 4-7: all remote
+    """
+    stand_code = _normalise_stand_code(stand)
+    if stand_code == "":
+        return 0
+
+    zone = STAND_ZONES.get(stand_code)
+    if zone in REMOTE_ZONES:
+        return 1
+    if zone == "Z1":
+        return int(stand_code in ZONE1_REMOTE_STANDS)
+    return 0
+
+
 def load_future_flights(start: str, end: str) -> pd.DataFrame:
     """
     Load future flight schedule from EAL.FlightPerformance_FutureFlights.
@@ -66,55 +102,47 @@ def assign_stand(
 
     
     
-    # Level 1: Airline + dir + Sector
-    fb = stand_dist[
-        (stand_dist["Airline"] == airline)
-        & (stand_dist["dir"] == direction)
-        & (stand_dist["Sector"] == sector)
-    ]
+    def _clean_candidates(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.dropna(subset=["stand", "prob"]).copy()
+        out["stand"] = out["stand"].astype(str)
+        out = out[out["stand"].str.strip() != ""]
+        out["prob"] = pd.to_numeric(out["prob"], errors="coerce")
+        out = out.dropna(subset=["prob"])
+        out = out[out["prob"] > 0]
+        return out
 
-    # Level 2: Airline + dir
-    if len(fb) == 0:
-        fb = stand_dist[
+    # Try fallback levels in order; only accept a level if it still has valid rows after cleaning.
+    candidate_levels = [
+        stand_dist[
             (stand_dist["Airline"] == airline)
             & (stand_dist["dir"] == direction)
-        ]
-
-    # ✅ NEW — Level 3: dir + Sector
-    if len(fb) == 0:
-        fb = stand_dist[
+            & (stand_dist["Sector"] == sector)
+        ],
+        stand_dist[
+            (stand_dist["Airline"] == airline)
+            & (stand_dist["dir"] == direction)
+        ],
+        stand_dist[
             (stand_dist["dir"] == direction)
             & (stand_dist["Sector"] == sector)
-        ]
-
-    # Level 4: Airline only
-    if len(fb) == 0:
-        fb = stand_dist[
+        ],
+        stand_dist[
             (stand_dist["Airline"] == airline)
-        ]
-
-    # Level 5: Sector only
-    if len(fb) == 0:
-        fb = stand_dist[
+        ],
+        stand_dist[
             (stand_dist["Sector"] == sector)
-        ]
+        ],
+        stand_dist,
+    ]
 
-    # Level 6: Global
-    if len(fb) == 0:
-        fb = stand_dist
-
-
-    # Final safety check
-    if len(fb) == 0:
-        raise ValueError(f"Completely empty stand_dist — cannot assign stands")
-
-    
-    fb = fb.copy()
-
-    # drop bad stands
-    fb = fb.dropna(subset=["stand", "prob"])
-    fb["stand"] = fb["stand"].astype(str)
-    fb = fb[fb["stand"].str.strip() != ""]
+    fb = pd.DataFrame()
+    for level_df in candidate_levels:
+        if len(level_df) == 0:
+            continue
+        cleaned = _clean_candidates(level_df)
+        if len(cleaned) > 0:
+            fb = cleaned
+            break
 
     if len(fb) == 0:
         raise ValueError(f"No valid stands after cleaning for {airline}|{direction}|{sector}")
@@ -307,6 +335,18 @@ def ingest_s26(
         stands.append(stand)
 
     df_flights["Stand"] = stands
+
+    # Effective remote follows stand allocation first, then no-jetbridge override on contact stands.
+    df_flights["IsRemoteStand"] = df_flights["Stand"].apply(_is_remote_stand_from_zone).astype(int)
+    df_flights["IsEffectiveRemote"] = np.where(
+        (df_flights["IsRemoteStand"] == 1)
+        | (
+            (df_flights["IsRemoteStand"] == 0)
+            & (df_flights["Airline"].astype(str).isin(NO_JETBRIDGE_AIRLINES))
+        ),
+        1,
+        0,
+    )
 
     # Build chocks offset lookup
     offset_lookup = build_offset_lookup(chocks_offset_params)
@@ -668,7 +708,7 @@ def ingest_s26(
                 "Departure Gate": None,
                 "SSR Code": ssr,
                 "Has Own Chair": has_own,
-                "IsEffectiveRemote": int(airline in NO_JETBRIDGE_AIRLINES),
+                "IsEffectiveRemote": int(f.get("IsEffectiveRemote", 0)),
                 "PRM Flight Count": prm_flight_count,
                 "Concurrent Stress": concurrent_stress,
                 "Turnaround PRM Count": turnaround_prm_count,
