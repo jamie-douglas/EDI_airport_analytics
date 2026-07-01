@@ -36,7 +36,7 @@ def apply_policy_s1(jobs):
 
     jobs = jobs.copy()
 
-    DURATION_MINS = 35
+    DURATION_MINS = 20
 
     jobs["job_start_time"] = pd.to_datetime(jobs["sla_start_time"])
     jobs["job_end_time"] = jobs["job_start_time"] + pd.Timedelta(minutes=DURATION_MINS)

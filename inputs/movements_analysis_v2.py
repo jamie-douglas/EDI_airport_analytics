@@ -1,6 +1,12 @@
 import os
 import pandas as pd
 import numpy as np
+import pathlib
+import sys
+
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+
+from modules.utils.query import query
 
 # ============================================================
 # VERSION 2 - W24 VS W25 PRODUCTIVITY COMPARISON
@@ -54,7 +60,7 @@ INPUT_FILES = {
     "2025": "inputs/movements_W25.csv"
 }
 
-OUTPUT_EXCEL = "inputs/winter_productivity_comparison_v2.xlsx"
+OUTPUT_EXCEL = "inputs/winter_productivity_comparison_v2_todelete.xlsx"
 
 HOUR_COLUMNS = [f"{h:02d}:00" for h in range(24)]
 
@@ -305,6 +311,35 @@ def add_excel_formatting(writer, sheet_name, df):
             worksheet.cell(row=1, column=col_idx).column_letter
         ].width = adjusted_width
 
+# =========================
+# FASTPARK CHECK-IN DATA
+# =========================
+
+def load_fastpark_checkins(start_date, end_date):
+
+    fp = query(
+        table="FastPark.v_EntryAndExits",
+        columns=[
+            "BookingReference AS [Booking ID]",
+            "CheckInEnded"
+        ],
+        date_column="CheckInEnded",
+        start=start_date,
+        end=end_date
+    )
+
+    fp["Booking ID"] = (
+        fp["Booking ID"]
+        .astype(str)
+        .str.strip()
+    )
+
+    fp["CheckInEnded"] = pd.to_datetime(
+        fp["CheckInEnded"],
+        errors="coerce"
+    )
+
+    return fp
 
 # =========================
 # 1. LOAD BOTH FILES
@@ -346,6 +381,449 @@ if df["start_dt"].isna().any():
 # Drop rows where no usable datetime could be parsed
 df = df[df["start_dt"].notna()].copy()
 
+# =========================
+# EXTRA ANALYSIS:
+# ONE-WAY VS TWO-WAY MOVEMENTS
+# + KEY PICKUP / DROP-OFF TIME ASSUMPTION
+# =========================
+#
+# Purpose:
+#   Prints extra operational assumptions only.
+#   Does NOT write anything to the Excel workbook.
+#
+# Location logic:
+#   Customer -> Block*   = customer drop-off car taken to storage
+#   Block* -> Returns*   = stored car brought back for customer collection
+#
+# Two-way logic:
+#   Within the same driver shift:
+#     if Customer -> Block is followed by Block -> Returns within 15 minutes,
+#     both movement rows are treated as part of a two-way movement cycle.
+#
+# One-way logic:
+#   Customer -> Block or Block -> Returns that is not paired within 15 minutes.
+#
+# Key pickup/drop-off logic:
+#   If a job ends at Returns* and the next job starts at Customer within 20 minutes,
+#   the gap is treated as key handling / walking / admin time.
+#   The gap is divided by 2 to estimate time each way.
+#
+# Shift logic:
+#   If the gap between a driver's previous end time and next start time is > 6 hours,
+#   this is treated as a new shift.
+# =========================
+
+
+# -------------------------
+# CONFIG
+# -------------------------
+
+NEW_SHIFT_GAP_HOURS = 6
+TWO_WAY_MAX_GAP_MINUTES = 15
+KEY_GAP_MAX_MINUTES = 20
+
+
+# -------------------------
+# 1. NORMALISE LOCATIONS FOR MATCHING
+# -------------------------
+
+df["from_match"] = df["from_clean"].astype(str).str.strip().str.lower()
+df["to_match"] = df["to_clean"].astype(str).str.strip().str.lower()
+
+
+# -------------------------
+# 2. CREATE DRIVER SHIFTS
+# -------------------------
+
+df = df.sort_values([
+    "comparison_year",
+    "driver",
+    "start_dt",
+    "end_dt"
+]).copy()
+
+df["prev_end_dt"] = df.groupby([
+    "comparison_year",
+    "driver"
+])["end_dt"].shift(1)
+
+df["gap_from_previous_hours"] = (
+    (df["start_dt"] - df["prev_end_dt"]).dt.total_seconds() / 3600
+)
+
+df["new_shift"] = (
+    df["gap_from_previous_hours"].isna() |
+    (df["gap_from_previous_hours"] > NEW_SHIFT_GAP_HOURS)
+)
+
+df["shift_id"] = df.groupby([
+    "comparison_year",
+    "driver"
+])["new_shift"].cumsum()
+
+
+# -------------------------
+# 3. FLAG DIRECTIONAL MOVEMENTS
+# -------------------------
+
+df["customer_to_block"] = (
+    (df["from_match"] == "customer") &
+    (df["to_match"].str.startswith("block", na=False))
+)
+
+df["block_to_returns"] = (
+    (df["from_match"].str.startswith("block", na=False)) &
+    (df["to_match"].str.startswith("returns", na=False))
+)
+
+df["qualifying_directional_movement"] = (
+    df["customer_to_block"] |
+    df["block_to_returns"]
+)
+
+
+# -------------------------
+# 4. LOOK AT NEXT MOVEMENT IN SAME DRIVER SHIFT
+# -------------------------
+
+shift_group_cols = [
+    "comparison_year",
+    "driver",
+    "shift_id"
+]
+
+df["next_start_dt"] = df.groupby(shift_group_cols)["start_dt"].shift(-1)
+df["next_end_dt"] = df.groupby(shift_group_cols)["end_dt"].shift(-1)
+
+df["next_from_match"] = df.groupby(shift_group_cols)["from_match"].shift(-1)
+df["next_to_match"] = df.groupby(shift_group_cols)["to_match"].shift(-1)
+
+df["next_customer_to_block"] = df.groupby(shift_group_cols)["customer_to_block"].shift(-1)
+df["next_block_to_returns"] = df.groupby(shift_group_cols)["block_to_returns"].shift(-1)
+
+df["gap_to_next_minutes"] = (
+    (df["next_start_dt"] - df["end_dt"]).dt.total_seconds() / 60
+)
+
+
+# -------------------------
+# 5. TWO-WAY PAIR LOGIC
+# -------------------------
+#
+# Two-way pair starts when:
+#   current row = Customer -> Block
+#   next row    = Block -> Returns
+#   gap         = 0 to 15 minutes
+#
+# Both rows are then counted as two-way movements.
+# -------------------------
+
+df["starts_two_way_pair"] = (
+    df["customer_to_block"] &
+    (df["next_block_to_returns"] == True) &
+    (df["gap_to_next_minutes"] >= 0) &
+    (df["gap_to_next_minutes"] <= TWO_WAY_MAX_GAP_MINUTES)
+)
+
+df["is_second_leg_of_two_way_pair"] = (
+    df.groupby(shift_group_cols)["starts_two_way_pair"].shift(1)
+)
+
+df["is_second_leg_of_two_way_pair"] = (
+    df["is_second_leg_of_two_way_pair"].fillna(False)
+)
+
+df["two_way_movement"] = (
+    df["starts_two_way_pair"] |
+    df["is_second_leg_of_two_way_pair"]
+)
+
+df["one_way_movement"] = (
+    df["qualifying_directional_movement"] &
+    (~df["two_way_movement"])
+)
+
+
+# -------------------------
+# 6. ONE-WAY VS TWO-WAY SUMMARY BY YEAR
+# -------------------------
+
+one_two_summary = df.groupby("comparison_year").agg(
+    total_qualifying_movements=("qualifying_directional_movement", "sum"),
+    one_way_movements=("one_way_movement", "sum"),
+    two_way_movements=("two_way_movement", "sum"),
+    two_way_pairs=("starts_two_way_pair", "sum")
+).reset_index()
+
+one_two_summary["one_way_pct"] = np.where(
+    one_two_summary["total_qualifying_movements"] > 0,
+    one_two_summary["one_way_movements"] /
+    one_two_summary["total_qualifying_movements"] * 100,
+    np.nan
+)
+
+one_two_summary["two_way_pct"] = np.where(
+    one_two_summary["total_qualifying_movements"] > 0,
+    one_two_summary["two_way_movements"] /
+    one_two_summary["total_qualifying_movements"] * 100,
+    np.nan
+)
+
+one_two_summary[[
+    "one_way_pct",
+    "two_way_pct"
+]] = one_two_summary[[
+    "one_way_pct",
+    "two_way_pct"
+]].round(1)
+
+print("\n============================================================")
+print("ONE-WAY VS TWO-WAY MOVEMENT SUMMARY")
+print("============================================================")
+print(one_two_summary)
+
+
+# -------------------------
+# 7. ONE-WAY VS TWO-WAY OVERALL SUMMARY
+# -------------------------
+
+total_qualifying = df["qualifying_directional_movement"].sum()
+total_one_way = df["one_way_movement"].sum()
+total_two_way = df["two_way_movement"].sum()
+total_two_way_pairs = df["starts_two_way_pair"].sum()
+
+overall_one_two_summary = pd.DataFrame({
+    "metric": [
+        "total_qualifying_movements",
+        "one_way_movements",
+        "two_way_movements",
+        "two_way_pairs",
+        "one_way_pct",
+        "two_way_pct"
+    ],
+    "value": [
+        total_qualifying,
+        total_one_way,
+        total_two_way,
+        total_two_way_pairs,
+        round(total_one_way / total_qualifying * 100, 1)
+        if total_qualifying > 0 else np.nan,
+        round(total_two_way / total_qualifying * 100, 1)
+        if total_qualifying > 0 else np.nan
+    ]
+})
+
+print("\n============================================================")
+print("OVERALL ONE-WAY VS TWO-WAY SUMMARY - BOTH YEARS")
+print("============================================================")
+print(overall_one_two_summary)
+
+
+# -------------------------
+# 8. KEY PICKUP / DROP-OFF TIME ASSUMPTION
+# -------------------------
+#
+# Logic:
+#   current row ends at Returns*
+#   next row starts at Customer
+#   gap is between 0 and 20 minutes
+#
+# Assumption:
+#   gap / 2 = estimated key handling time each way
+# -------------------------
+
+df["ends_at_returns"] = (
+    df["to_match"].str.startswith("returns", na=False)
+)
+
+df["next_starts_at_customer"] = (
+    df["next_from_match"] == "customer"
+)
+
+df["key_gap_flag"] = (
+    df["ends_at_returns"] &
+    df["next_starts_at_customer"] &
+    (df["gap_to_next_minutes"] >= 0) &
+    (df["gap_to_next_minutes"] <= KEY_GAP_MAX_MINUTES)
+)
+
+key_gap_df = df[df["key_gap_flag"]].copy()
+
+key_gap_df["assumed_key_time_each_way_minutes"] = (
+    key_gap_df["gap_to_next_minutes"] / 2
+)
+
+
+# -------------------------
+# 9. KEY TIME SUMMARY BY YEAR
+# -------------------------
+
+key_time_summary = key_gap_df.groupby("comparison_year").agg(
+    key_gap_instances=("gap_to_next_minutes", "count"),
+    avg_total_gap_minutes=("gap_to_next_minutes", "mean"),
+    median_total_gap_minutes=("gap_to_next_minutes", "median"),
+    avg_assumed_key_time_each_way_minutes=("assumed_key_time_each_way_minutes", "mean"),
+    median_assumed_key_time_each_way_minutes=("assumed_key_time_each_way_minutes", "median")
+).reset_index()
+
+key_time_summary[[
+    "avg_total_gap_minutes",
+    "median_total_gap_minutes",
+    "avg_assumed_key_time_each_way_minutes",
+    "median_assumed_key_time_each_way_minutes"
+]] = key_time_summary[[
+    "avg_total_gap_minutes",
+    "median_total_gap_minutes",
+    "avg_assumed_key_time_each_way_minutes",
+    "median_assumed_key_time_each_way_minutes"
+]].round(2)
+
+print("\n============================================================")
+print("KEY PICKUP / DROP-OFF TIME ASSUMPTION BY YEAR")
+print("============================================================")
+print(key_time_summary)
+
+
+# -------------------------
+# 10. KEY TIME OVERALL SUMMARY
+# -------------------------
+
+overall_key_summary = pd.DataFrame({
+    "metric": [
+        "key_gap_instances",
+        "avg_total_gap_minutes",
+        "median_total_gap_minutes",
+        "avg_assumed_key_time_each_way_minutes",
+        "median_assumed_key_time_each_way_minutes"
+    ],
+    "value": [
+        len(key_gap_df),
+        round(key_gap_df["gap_to_next_minutes"].mean(), 2),
+        round(key_gap_df["gap_to_next_minutes"].median(), 2),
+        round(key_gap_df["assumed_key_time_each_way_minutes"].mean(), 2),
+        round(key_gap_df["assumed_key_time_each_way_minutes"].median(), 2)
+    ]
+})
+
+print("\n============================================================")
+print("OVERALL KEY PICKUP / DROP-OFF ASSUMPTION - BOTH YEARS")
+print("============================================================")
+print(overall_key_summary)
+
+
+# =========================
+# CHECK-IN -> BLOCK MOVE TIME
+# =========================
+
+print("\n============================================================")
+print("CHECK-IN TO BLOCK MOVE ANALYSIS")
+print("============================================================")
+
+# Get date range from movements file
+
+start_date = df["start_dt"].min().date()
+end_date = (df["start_dt"].max() + pd.Timedelta(days=1)).date()
+
+print(f"Loading FastPark check-ins: {start_date} -> {end_date}")
+
+fp_checkins = load_fastpark_checkins(
+    str(start_date),
+    str(end_date)
+)
+
+# Standardise movement booking reference
+
+df["Booking ID"] = (
+    df["booking ref"]
+    .astype(str)
+    .str.strip()
+)
+
+# Customer -> Block movements only
+
+customer_to_block = df[
+    (df["from_clean"].str.lower() == "customer") &
+    (df["to_clean"].str.lower().str.startswith("block"))
+].copy()
+
+# First movement to block per booking
+
+customer_to_block = (
+    customer_to_block
+    .sort_values("start_dt")
+    .groupby("Booking ID", as_index=False)
+    .first()
+)
+
+# Merge onto FastPark check-ins
+
+block_move_analysis = customer_to_block.merge(
+    fp_checkins,
+    on="Booking ID",
+    how="inner"
+)
+
+# Calculate minutes from check-in complete to movement
+
+block_move_analysis["minutes_to_move_to_block"] = (
+    (
+        block_move_analysis["start_dt"] -
+        block_move_analysis["CheckInEnded"]
+    )
+    .dt.total_seconds()
+    / 60
+)
+
+# Remove bad records
+
+block_move_analysis = block_move_analysis[
+    block_move_analysis["minutes_to_move_to_block"].between(0, 720)
+].copy()
+
+# Summary by comparison year
+
+checkin_block_summary = (
+    block_move_analysis
+    .groupby("comparison_year")
+    .agg(
+        bookings=("Booking ID", "count"),
+        avg_minutes=("minutes_to_move_to_block", "mean"),
+        median_minutes=("minutes_to_move_to_block", "median"),
+        p10_minutes=("minutes_to_move_to_block",
+                    lambda x: x.quantile(0.10)),
+        p90_minutes=("minutes_to_move_to_block",
+                    lambda x: x.quantile(0.90))
+    )
+    .reset_index()
+)
+
+checkin_block_summary = checkin_block_summary.round(2)
+
+print("\n=== CHECK-IN TO BLOCK MOVE SUMMARY ===")
+print(checkin_block_summary)
+
+# Overall
+
+overall_avg = (
+    block_move_analysis["minutes_to_move_to_block"]
+    .mean()
+)
+
+overall_median = (
+    block_move_analysis["minutes_to_move_to_block"]
+    .median()
+)
+
+print("\n=== OVERALL ===")
+print(
+    f"Bookings matched: {len(block_move_analysis):,}"
+)
+print(
+    f"Average mins from check-in to block: {overall_avg:.2f}"
+)
+print(
+    f"Median mins from check-in to block: {overall_median:.2f}"
+)
 
 # =========================
 # 3. ADJUSTED MOVEMENT BASE
