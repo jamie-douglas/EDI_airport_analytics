@@ -34,6 +34,14 @@ class PlanningToggles:
     # Spillover control: max number of buckets a single job’s minutes can span
     spill_bucket_cap: int = 10   # 8 * 15min = 2 hours
 
+    # Demand scenario control:
+    # - p100: current behaviour (no demand capping)
+    # - p90_stratified: apply per-flight cap by SSR/own-chair/dir strata
+    demand_mode: str = "p100"
+    run_p100_risk_check_with_p90: bool = False
+    p90_quantile: float = 0.90
+    p90_strata: tuple[str, ...] = ("SSR Code", "Has Own Chair", "A/D")
+
     
     vertical_cycle_mins: float = 0.0     
     vertical_wccap: int | None = None    # optional override

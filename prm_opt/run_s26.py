@@ -525,6 +525,108 @@ def run_s26_s2_v2_sensitivity(
 
 
 def run_month_s26(month_start, assumptions, toggles):
+    demand_mode = str(getattr(toggles, "demand_mode", "p100") or "p100").lower()
+
+    compare_fields = [
+        "demand_mode",
+        "S1_PeakAmb",
+        "S1_PeakMini",
+        "S2_PeakAmb",
+        "S2_PeakMini",
+        "SLA_all",
+        "SLA_arr",
+        "SLA_dep",
+        "allowed_breaches",
+        "actual_breaches",
+        "sla_percent",
+        "sla_floor_slack",
+        "S2_status",
+        "S2_tc",
+        "S2_st",
+        "peak_day",
+        "peak_day_job_count",
+    ]
+
+    if bool(getattr(toggles, "run_p100_risk_check_with_p90", False)) and demand_mode == "p90_stratified":
+        print("\n[MONTH COMPARE] Running both p90_stratified and p100 for risk check")
+
+        toggles_p90 = replace(
+            toggles,
+            demand_mode="p90_stratified",
+            run_p100_risk_check_with_p90=False,
+        )
+        toggles_p100 = replace(
+            toggles,
+            demand_mode="p100",
+            run_p100_risk_check_with_p90=False,
+        )
+
+        out_p90 = run_month_s26(month_start, assumptions, toggles_p90)
+        out_p100 = run_month_s26(month_start, assumptions, toggles_p100)
+
+        merged = {
+            "month": out_p90.get("month"),
+            "demand_mode": "compare_p90_vs_p100",
+        }
+
+        for k in compare_fields:
+            merged[f"{k}_p90"] = out_p90.get(k)
+            merged[f"{k}_p100"] = out_p100.get(k)
+
+        return merged
+
+    def _save_peak_hourly(report: dict, prefix: str, month_tag: str, mode_tag: str):
+        peak = report.get("peak_day_report", {}) if isinstance(report, dict) else {}
+        hourly = peak.get("hourly", None)
+        if isinstance(hourly, pd.DataFrame) and len(hourly):
+            out_path = f"{prefix}_{mode_tag}_{month_tag}.csv"
+            hourly.to_csv(out_path)
+            return out_path, peak.get("peak_day"), peak.get("peak_day_job_count")
+        return None, None, None
+
+    def _save_true_peak_amb_hourly(report: dict, prefix: str, month_tag: str, mode_tag: str):
+        veh = report.get("vehicle_allocations", None) if isinstance(report, dict) else None
+        if not isinstance(veh, pd.DataFrame) or len(veh) == 0:
+            return None, None, None
+
+        tmp = veh.copy()
+        tmp["bucket"] = pd.to_datetime(tmp["bucket"])
+        amb = (
+            tmp[tmp["vehicle_type"] == "Amb"]
+            .groupby("bucket")["count"]
+            .sum()
+            .sort_index()
+        )
+        if len(amb) == 0:
+            return None, None, None
+
+        amb_by_day = amb.groupby(amb.index.date).max()
+        peak_day = amb_by_day.idxmax()
+        peak_amb_15min = int(amb_by_day.max())
+
+        day_tmp = tmp[tmp["bucket"].dt.date == peak_day].copy()
+        bucket_totals = (
+            day_tmp.groupby(["bucket", "vehicle_type"])["count"]
+            .sum()
+            .unstack("vehicle_type", fill_value=0)
+            .sort_index()
+        )
+        if "Amb" not in bucket_totals.columns:
+            bucket_totals["Amb"] = 0
+        if "Mini" not in bucket_totals.columns:
+            bucket_totals["Mini"] = 0
+
+        hourly = bucket_totals.resample("H").max().rename(columns={"Amb": "Amb_req", "Mini": "Mini_req"})
+        classes_current = build_vehicle_classes(include_future=False)
+        current_amb = sum(int(c["count"]) for c in classes_current.get("Amb", []))
+        current_mini = sum(int(c["count"]) for c in classes_current.get("Mini", []))
+        hourly["Amb_gap"] = (hourly["Amb_req"] - current_amb).clip(lower=0)
+        hourly["Mini_gap"] = (hourly["Mini_req"] - current_mini).clip(lower=0)
+
+        out_path = f"{prefix}_{mode_tag}_{month_tag}.csv"
+        hourly.to_csv(out_path)
+        return out_path, str(peak_day), peak_amb_15min
+
     month_start_str = month_start.strftime("%Y-%m-%d")
     month_end_str = (month_start + pd.offsets.MonthBegin(1)).strftime("%Y-%m-%d")
 
@@ -612,6 +714,27 @@ def run_month_s26(month_start, assumptions, toggles):
 
     report_s1 = build_run_report_s1(out_s1)
     report_s2 = build_run_report(r)
+
+    month_tag = month_start.strftime("%Y_%m")
+    mode_tag = demand_mode
+    s1_hourly_table_path, s1_peak_day, s1_peak_day_job_count = _save_peak_hourly(
+        report_s1,
+        "S26_S1_peak_day_hourly_need",
+        month_tag,
+        mode_tag,
+    )
+    s2_hourly_table_path, s2_peak_day, s2_peak_day_job_count = _save_peak_hourly(
+        report_s2,
+        "S26_S2_peak_day_hourly_need",
+        month_tag,
+        mode_tag,
+    )
+    s2_true_peak_amb_path, s2_true_peak_amb_day, s2_true_peak_amb_15min = _save_true_peak_amb_hourly(
+        report_s2,
+        "S26_S2_true_peak_amb_day_hourly_need",
+        month_tag,
+        mode_tag,
+    )
     s2_summary = report_s2.get("summary", {})
     has_s2_summary = bool(s2_summary)
 
@@ -670,12 +793,26 @@ def run_month_s26(month_start, assumptions, toggles):
 
     if bool(getattr(toggles, "enforce_hard_sla_floor", False)) and (sla_floor_slack is not None) and (float(sla_floor_slack) > 0):
         print(f"  WARNING: hard SLA floor relaxed by slack on {float(sla_floor_slack):.2f} jobs")
+
+    if s2_hourly_table_path:
+        print(f"Hourly table saved (S2): {s2_hourly_table_path}")
+        if s2_true_peak_amb_path:
+            print(
+                "True peak-amb day hourly saved (S2): "
+                f"{s2_true_peak_amb_path} | day={s2_true_peak_amb_day} | "
+                f"peak_amb_15min={s2_true_peak_amb_15min}"
+            )
+    elif s1_hourly_table_path:
+        print(f"Hourly table saved (S1): {s1_hourly_table_path}")
     print("================================================\n")
+
+    peak_day = s2_peak_day if s2_peak_day is not None else s1_peak_day
+    peak_day_job_count = s2_peak_day_job_count if s2_peak_day_job_count is not None else s1_peak_day_job_count
 
 
     return {
         "month": month_start.strftime("%Y-%m"),
-        "cutoff_used": cutoff.strftime("%Y-%m-%d"),
+        "demand_mode": demand_mode,
 
         "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
         "S1_PeakMini": report_s1["summary"]["PeakMini"],
@@ -695,4 +832,7 @@ def run_month_s26(month_start, assumptions, toggles):
         "S2_status": report_s2.get("status"),
         "S2_tc": report_s2.get("tc"),
         "S2_st": report_s2.get("st"),
+
+        "peak_day": peak_day,
+        "peak_day_job_count": peak_day_job_count,
     }

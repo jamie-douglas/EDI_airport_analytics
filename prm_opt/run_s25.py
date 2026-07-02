@@ -660,6 +660,65 @@ def run_s25_s2_lp(
 
 
 def run_month_s25(month_start, toggles):
+    demand_mode = str(getattr(toggles, "demand_mode", "p100") or "p100").lower()
+
+    compare_fields = [
+        "demand_mode",
+        "S1_PeakAmb",
+        "S1_PeakMini",
+        "S2_PeakAmb",
+        "S2_PeakMini",
+        "SLA_all",
+        "SLA_arr",
+        "SLA_dep",
+        "allowed_breaches",
+        "actual_breaches",
+        "sla_percent",
+        "sla_floor_slack",
+        "S2_status",
+        "S2_tc",
+        "S2_st",
+        "peak_day",
+        "peak_day_job_count",
+    ]
+
+    if bool(getattr(toggles, "run_p100_risk_check_with_p90", False)) and demand_mode == "p90_stratified":
+        print("\n[MONTH COMPARE] Running both p90_stratified and p100 for risk check")
+
+        toggles_p90 = replace(
+            toggles,
+            demand_mode="p90_stratified",
+            run_p100_risk_check_with_p90=False,
+        )
+        toggles_p100 = replace(
+            toggles,
+            demand_mode="p100",
+            run_p100_risk_check_with_p90=False,
+        )
+
+        out_p90 = run_month_s25(month_start, toggles_p90)
+        out_p100 = run_month_s25(month_start, toggles_p100)
+
+        merged = {
+            "month": out_p90.get("month"),
+            "demand_mode": "compare_p90_vs_p100",
+        }
+
+        for k in compare_fields:
+            merged[f"{k}_p90"] = out_p90.get(k)
+            merged[f"{k}_p100"] = out_p100.get(k)
+
+        return merged
+
+    def _save_peak_hourly(report: dict, prefix: str, month_tag: str, mode_tag: str):
+        peak = report.get("peak_day_report", {}) if isinstance(report, dict) else {}
+        hourly = peak.get("hourly", None)
+        if isinstance(hourly, pd.DataFrame) and len(hourly):
+            out_path = f"{prefix}_{mode_tag}_{month_tag}.csv"
+            hourly.to_csv(out_path)
+            return out_path, peak.get("peak_day"), peak.get("peak_day_job_count")
+        return None, None, None
+
     month_start_str = month_start.strftime("%Y-%m-%d")
     month_end_str = (month_start + pd.offsets.MonthBegin(1)).strftime("%Y-%m-%d")
 
@@ -683,10 +742,22 @@ def run_month_s25(month_start, toggles):
     # r = sens["runs"][0]
 
     report_s1 = build_run_report_s1(out_s1)
+    month_tag = month_start.strftime("%Y_%m")
+    mode_tag = demand_mode
+    s1_hourly_table_path, s1_peak_day, s1_peak_day_job_count = _save_peak_hourly(
+        report_s1,
+        "S25_S1_peak_day_hourly_need",
+        month_tag,
+        mode_tag,
+    )
+
+    if s1_hourly_table_path:
+        print(f"Hourly table saved (S1): {s1_hourly_table_path}")
     # report_s2 = build_run_report(r)
 
     return {
         "month": month_start.strftime("%Y-%m"),
+        "demand_mode": demand_mode,
 
         "S1_PeakAmb": report_s1["summary"]["PeakAmb"],
         "S1_PeakMini": report_s1["summary"]["PeakMini"],
@@ -704,6 +775,9 @@ def run_month_s25(month_start, toggles):
         "S2_status": None,
         "S2_tc": None,
         "S2_st": None,
+
+        "peak_day": s1_peak_day,
+        "peak_day_job_count": s1_peak_day_job_count,
 
         # "S2_PeakAmb": report_s2["summary"]["PeakAmb"],
         # "S2_PeakMini": report_s2["summary"]["PeakMini"],

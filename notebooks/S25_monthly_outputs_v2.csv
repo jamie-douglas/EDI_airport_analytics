@@ -1,8 +1,8 @@
-month,S1_PeakAmb,S1_PeakMini,S2_PeakAmb,S2_PeakMini,SLA_all,SLA_arr,SLA_dep,allowed_breaches,actual_breaches,sla_percent,sla_floor_slack,S2_status,S2_tc,S2_st
-2025-04,14,4,,,,,,,,,,,,
-2025-05,19,5,,,,,,,,,,,,
-2025-06,12,7,,,,,,,,,,,,
-2025-07,14,5,,,,,,,,,,,,
-2025-08,13,5,,,,,,,,,,,,
-2025-09,15,6,,,,,,,,,,,,
-2025-10,22,5,,,,,,,,,,,,
+month,demand_mode,demand_mode_p90,S1_PeakAmb_p90,S1_PeakMini_p90,S2_PeakAmb_p90,S2_PeakMini_p90,SLA_all_p90,SLA_arr_p90,SLA_dep_p90,allowed_breaches_p90,actual_breaches_p90,sla_percent_p90,sla_floor_slack_p90,S2_status_p90,S2_tc_p90,S2_st_p90,S1_peak_day_p90,S1_peak_day_job_count_p90,S1_hourly_table_path_p90,S2_peak_day_p90,S2_peak_day_job_count_p90,S2_hourly_table_path_p90,demand_mode_p100,S1_PeakAmb_p100,S1_PeakMini_p100,S2_PeakAmb_p100,S2_PeakMini_p100,SLA_all_p100,SLA_arr_p100,SLA_dep_p100,allowed_breaches_p100,actual_breaches_p100,sla_percent_p100,sla_floor_slack_p100,S2_status_p100,S2_tc_p100,S2_st_p100,S1_peak_day_p100,S1_peak_day_job_count_p100,S1_hourly_table_path_p100,S2_peak_day_p100,S2_peak_day_job_count_p100,S2_hourly_table_path_p100
+2025-04,compare_p90_vs_p100,p90_stratified,14,3,,,,,,,,,,,,,2025-04-28,472,S25_S1_peak_day_hourly_need_2025_04.csv,,,,p100,14,4,,,,,,,,,,,,,2025-04-29,504,S25_S1_peak_day_hourly_need_2025_04.csv,,,
+2025-05,compare_p90_vs_p100,p90_stratified,18,4,,,,,,,,,,,,,2025-05-27,596,S25_S1_peak_day_hourly_need_2025_05.csv,,,,p100,19,5,,,,,,,,,,,,,2025-05-27,630,S25_S1_peak_day_hourly_need_2025_05.csv,,,
+2025-06,compare_p90_vs_p100,p90_stratified,11,5,,,,,,,,,,,,,2025-06-27,601,S25_S1_peak_day_hourly_need_2025_06.csv,,,,p100,12,7,,,,,,,,,,,,,2025-06-27,636,S25_S1_peak_day_hourly_need_2025_06.csv,,,
+2025-07,compare_p90_vs_p100,p90_stratified,10,3,,,,,,,,,,,,,2025-07-31,558,S25_S1_peak_day_hourly_need_2025_07.csv,,,,p100,14,5,,,,,,,,,,,,,2025-07-07,587,S25_S1_peak_day_hourly_need_2025_07.csv,,,
+2025-08,compare_p90_vs_p100,p90_stratified,12,2,,,,,,,,,,,,,2025-08-26,542,S25_S1_peak_day_hourly_need_2025_08.csv,,,,p100,13,5,,,,,,,,,,,,,2025-08-26,577,S25_S1_peak_day_hourly_need_2025_08.csv,,,
+2025-09,compare_p90_vs_p100,p90_stratified,14,5,,,,,,,,,,,,,2025-09-17,701,S25_S1_peak_day_hourly_need_2025_09.csv,,,,p100,15,6,,,,,,,,,,,,,2025-09-17,729,S25_S1_peak_day_hourly_need_2025_09.csv,,,
+2025-10,compare_p90_vs_p100,p90_stratified,12,3,,,,,,,,,,,,,2025-10-01,613,S25_S1_peak_day_hourly_need_2025_10.csv,,,,p100,22,5,,,,,,,,,,,,,2025-10-02,654,S25_S1_peak_day_hourly_need_2025_10.csv,,,

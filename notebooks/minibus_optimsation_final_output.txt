@@ -1,0 +1,546 @@
+
+================ MONTH SUMMARY =================
+Month: 2026-09 | Cutoff: 2026-07-01
+Scenario 1:
+  PeakAmb=14 | PeakMini=2
+Scenario 2:
+  PeakAmb=12 | PeakMini=5
+SLA:
+  All=0.9366 | Arr=0.9486 | Dep=0.9247
+SLA diagnostics:
+  allowed_breaches=361 | actual_breaches=1143 | sla_percent=93.66% | sla_floor_slack=782.00
+  WARNING: hard SLA floor relaxed by slack on 782.00 jobs
+================================================
+
+
+Running S26 2026-10 | cutoff=2026-07-01
+→ FORECAST ONLY
+
+================================================================================
+[DEBUG A] Future flights loaded & Pax computed
+================================================================================
+df_flights rows: 11490
+Airlines (sample): ['AF' 'LH' 'U2' 'FR' 'KL' 'BA' 'AA' 'DY' 'EI' 'PC']
+Countries (sample): ['FRANCE' 'GERMANY' 'GREAT BRITAIN' 'POLAND' 'NETHERLANDS'
+ 'UNITED STATES OF AMERICA' 'NORWAY' 'IRISH REPUBLIC' 'TURKEY' 'DENMARK']
+
+Pax describe:
+count    11490.000000
+mean       149.146649
+std         54.677870
+min          0.000000
+25%        123.000000
+50%        163.000000
+75%        183.000000
+max        397.000000
+Name: Pax, dtype: float64
+
+Top 10 rows (Airline, CountryName, Sector, dir, Pax):
+   Airline               CountryName         Sector dir    Pax
+0       AF                    FRANCE  International   D  138.0
+1       LH                   GERMANY  International   D  148.0
+2       U2             GREAT BRITAIN       Domestic   D  175.0
+3       FR                    POLAND  International   D  185.0
+4       KL               NETHERLANDS  International   D  186.0
+5       BA             GREAT BRITAIN       Domestic   D  101.0
+6       AA  UNITED STATES OF AMERICA  International   D  285.0
+7       DY                    NORWAY  International   D  178.0
+8       EI            IRISH REPUBLIC            CTA   D   67.0
+9       PC                    TURKEY  International   D  239.0
+10      EC                    FRANCE  International   D  229.0
+11      BA             GREAT BRITAIN       Domestic   D  180.0
+12      D8                   DENMARK  International   D  133.0
+13      BA             GREAT BRITAIN       Domestic   D  171.0
+14      FR                   GERMANY  International   D  185.0
+
+================================================================================
+[DEBUG B] Penetration lookup match rate
+================================================================================
+Penetration keys available: 118
+Flights with penetration match: 10,762 / 11,490 (93.7%)
+
+Top missing (Airline, CountryName) combos in future flights:
+   Airline     CountryName  flight_rows
+5       EA  IRISH REPUBLIC          112
+8       EC           ITALY          112
+1       CJ   GREAT BRITAIN           88
+6       EC          FRANCE           82
+10      EC           SPAIN           72
+9       EC     NETHERLANDS           62
+4       EA   GREAT BRITAIN           54
+3       DS     SWITZERLAND           54
+12      LG      LUXEMBOURG           18
+15      RK           MALTA           16
+18      U2        SLOVENIA           14
+11      IB           SPAIN           14
+0       BA           ITALY            8
+16      RK         ROMANIA            8
+7       EC         GERMANY            4
+
+Example missing keys:
+    Airline  CountryName    Pax
+10       EC       FRANCE  229.0
+19       EC        ITALY  138.0
+82       DS  SWITZERLAND  131.0
+84       EC  NETHERLANDS  185.0
+124      RK        MALTA  189.0
+213      EC        ITALY  152.0
+217      EC        ITALY  120.0
+237      EC        ITALY  138.0
+253      EC        SPAIN  149.0
+285      EC       FRANCE  147.0
+303      DS  SWITZERLAND  107.0
+340      LG   LUXEMBOURG  124.0
+388      EC        ITALY  161.0
+430      EC        SPAIN  143.0
+435      EC       FRANCE  180.0
+
+================================================================================
+[DEBUG C] Expected PRMs vs rounding
+================================================================================
+Total expected PRMs (raw sum, BEFORE rounding): 17762.963860704513
+Total PRMs after rounding: 18036
+
+Raw PRM demand distribution (prm_raw):
+count    11490.000000
+mean         1.545950
+std          1.277379
+min          0.000000
+25%          0.765722
+50%          1.211466
+75%          1.709124
+max          8.312373
+Name: _prm_raw, dtype: float64
+
+Top flights by raw PRM demand:
+     Airline CountryName    Pax  _pen_used  _prm_raw  _prm_round
+883       QR       QATAR  311.0   0.026728  8.312373           8
+37        QR       QATAR  311.0   0.026728  8.312373           8
+1368      QR       QATAR  311.0   0.026728  8.312373           8
+2208      QR       QATAR  311.0   0.026728  8.312373           8
+2006      QR       QATAR  311.0   0.026728  8.312373           8
+1653      QR       QATAR  311.0   0.026728  8.312373           8
+1453      QR       QATAR  311.0   0.026728  8.312373           8
+1919      QR       QATAR  311.0   0.026728  8.312373           8
+1757      QR       QATAR  311.0   0.026728  8.312373           8
+1836      QR       QATAR  311.0   0.026728  8.312373           8
+3083      QR       QATAR  311.0   0.026728  8.312373           8
+2978      QR       QATAR  311.0   0.026728  8.312373           8
+3246      QR       QATAR  311.0   0.026728  8.312373           8
+2588      QR       QATAR  311.0   0.026728  8.312373           8
+2692      QR       QATAR  311.0   0.026728  8.312373           8
+[DEBUG flight] Airline=AF | Country=FRANCE | Pax=138.0 | Pen=0.00755 | Pax*Pen=1.042 | PRMs=1
+[DEBUG flight] Airline=LH | Country=GERMANY | Pax=148.0 | Pen=0.00569 | Pax*Pen=0.842 | PRMs=1
+[DEBUG flight] Airline=U2 | Country=GREAT BRITAIN | Pax=175.0 | Pen=0.00918 | Pax*Pen=1.606 | PRMs=2
+[DEBUG flight] Airline=FR | Country=POLAND | Pax=185.0 | Pen=0.00313 | Pax*Pen=0.579 | PRMs=1
+[DEBUG flight] Airline=KL | Country=NETHERLANDS | Pax=186.0 | Pen=0.00831 | Pax*Pen=1.545 | PRMs=2
+[DEBUG flight] Airline=BA | Country=GREAT BRITAIN | Pax=101.0 | Pen=0.00962 | Pax*Pen=0.971 | PRMs=1
+[DEBUG flight] Airline=AA | Country=UNITED STATES OF AMERICA | Pax=285.0 | Pen=0.01552 | Pax*Pen=4.423 | PRMs=4
+[DEBUG flight] Airline=DY | Country=NORWAY | Pax=178.0 | Pen=0.00440 | Pax*Pen=0.783 | PRMs=1
+[DEBUG flight] Airline=EI | Country=IRISH REPUBLIC | Pax=67.0 | Pen=0.01035 | Pax*Pen=0.693 | PRMs=1
+[DEBUG flight] Airline=PC | Country=TURKEY | Pax=239.0 | Pen=0.00852 | Pax*Pen=2.036 | PRMs=2
+[DEBUG flight] Airline=EC | Country=FRANCE | Pax=229.0 | Pen=0.01000 | Pax*Pen=2.290 | PRMs=2
+[DEBUG flight] Airline=BA | Country=GREAT BRITAIN | Pax=180.0 | Pen=0.00962 | Pax*Pen=1.731 | PRMs=2
+[DEBUG flight] Airline=D8 | Country=DENMARK | Pax=133.0 | Pen=0.00531 | Pax*Pen=0.707 | PRMs=1
+[DEBUG flight] Airline=BA | Country=GREAT BRITAIN | Pax=171.0 | Pen=0.00962 | Pax*Pen=1.645 | PRMs=2
+[DEBUG flight] Airline=FR | Country=GERMANY | Pax=185.0 | Pen=0.00282 | Pax*Pen=0.521 | PRMs=1
+
+[DEBUG ingest_s26]
+Total PRM jobs (rows): 18036
+Columns: ['Passenger ID', 'Airline Code', 'Flight Number', 'A/D', 'Sector', 'CountryName', 'Stand', 'Scheduled Flight DT', 'Chocks DT', 'Minutes on Chocks', 'ScheduledDateTime_Local', 'Chocks_Est', 'Departure Gate', 'SSR Code', 'Has Own Chair', 'IsEffectiveRemote', 'PRM Flight Count', 'Concurrent Stress', 'Turnaround PRM Count', 'Turnaround Vertical Count', 'IsArrival', 'Adhoc Or Planned', 'IsAdhoc', 'Job Start Time', 'Job End Time', 'tau_amb_mins', 'tau_mini_mins', 'tau_push_mins']
+SSR Code present: True
+SSR Code distribution:
+SSR Code
+WCHR     9440
+WCHS     7448
+WCHC      997
+OTHER     151
+Name: count, dtype: int64
+
+PRM OPT — S26 Scenario 2 (v2) — Sensitivity
+Window : 2026-10-01 → 2026-11-01
+vertical_cycle_grid: [10]
+
+[1/4] ingest_s26…
+
+================================================================================
+[DEBUG A] Future flights loaded & Pax computed
+================================================================================
+df_flights rows: 11490
+Airlines (sample): ['U2' 'AF' 'FR' 'KL' 'BA' 'LS' 'LM' 'RK' 'QR' 'AY']
+Countries (sample): ['ITALY' 'FRANCE' 'LATVIA' 'NETHERLANDS' 'GREAT BRITAIN' 'PORTUGAL'
+ 'GREECE' 'SPAIN' 'POLAND' 'MOROCCO']
+
+Pax describe:
+count    11490.000000
+mean       149.146649
+std         54.677870
+min          0.000000
+25%        123.000000
+50%        163.000000
+75%        183.000000
+max        397.000000
+Name: Pax, dtype: float64
+
+Top 10 rows (Airline, CountryName, Sector, dir, Pax):
+   Airline    CountryName         Sector dir    Pax
+0       U2          ITALY  International   D  155.0
+1       AF         FRANCE  International   D   99.0
+2       FR         LATVIA  International   D  184.0
+3       KL    NETHERLANDS  International   D  122.0
+4       BA  GREAT BRITAIN       Domestic   D  116.0
+5       U2       PORTUGAL  International   D  158.0
+6       U2          ITALY  International   D  138.0
+7       LS         GREECE  International   D  186.0
+8       U2  GREAT BRITAIN       Domestic   D  104.0
+9       U2         FRANCE  International   D  191.0
+10      FR          ITALY  International   D  180.0
+11      LM  GREAT BRITAIN       Domestic   D    0.0
+12      LS          SPAIN  International   D  219.0
+13      BA  GREAT BRITAIN       Domestic   D   62.0
+14      FR         FRANCE  International   D   90.0
+
+================================================================================
+[DEBUG B] Penetration lookup match rate
+================================================================================
+Penetration keys available: 118
+Flights with penetration match: 10,762 / 11,490 (93.7%)
+
+Top missing (Airline, CountryName) combos in future flights:
+   Airline     CountryName  flight_rows
+5       EA  IRISH REPUBLIC          112
+8       EC           ITALY          112
+1       CJ   GREAT BRITAIN           88
+6       EC          FRANCE           82
+10      EC           SPAIN           72
+9       EC     NETHERLANDS           62
+4       EA   GREAT BRITAIN           54
+3       DS     SWITZERLAND           54
+12      LG      LUXEMBOURG           18
+15      RK           MALTA           16
+18      U2        SLOVENIA           14
+11      IB           SPAIN           14
+0       BA           ITALY            8
+16      RK         ROMANIA            8
+7       EC         GERMANY            4
+
+Example missing keys:
+    Airline  CountryName    Pax
+38       EC        ITALY  156.0
+43       DS  SWITZERLAND   95.0
+100      EC        ITALY  102.0
+121      EC       FRANCE  174.0
+148      RK        MALTA  172.0
+169      IB        SPAIN  151.0
+177      DS  SWITZERLAND   74.0
+182      EC       FRANCE  174.0
+186      EC        SPAIN  156.0
+194      EC        SPAIN  139.0
+241      EC       FRANCE  147.0
+254      EC        ITALY  138.0
+263      EC        ITALY  120.0
+301      EC       FRANCE  229.0
+310      EC        ITALY  138.0
+
+================================================================================
+[DEBUG C] Expected PRMs vs rounding
+================================================================================
+Total expected PRMs (raw sum, BEFORE rounding): 17762.963860704513
+Total PRMs after rounding: 18036
+
+Raw PRM demand distribution (prm_raw):
+count    11490.000000
+mean         1.545950
+std          1.277379
+min          0.000000
+25%          0.765722
+50%          1.211466
+75%          1.709124
+max          8.312373
+Name: _prm_raw, dtype: float64
+
+Top flights by raw PRM demand:
+     Airline CountryName    Pax  _pen_used  _prm_raw  _prm_round
+3162      QR       QATAR  311.0   0.026728  8.312373           8
+3535      QR       QATAR  311.0   0.026728  8.312373           8
+8952      QR       QATAR  311.0   0.026728  8.312373           8
+3246      QR       QATAR  311.0   0.026728  8.312373           8
+3083      QR       QATAR  311.0   0.026728  8.312373           8
+1368      QR       QATAR  311.0   0.026728  8.312373           8
+1453      QR       QATAR  311.0   0.026728  8.312373           8
+683       QR       QATAR  311.0   0.026728  8.312373           8
+2978      QR       QATAR  311.0   0.026728  8.312373           8
+1076      QR       QATAR  311.0   0.026728  8.312373           8
+3333      QR       QATAR  311.0   0.026728  8.312373           8
+2208      QR       QATAR  311.0   0.026728  8.312373           8
+4485      QR       QATAR  311.0   0.026728  8.312373           8
+328       QR       QATAR  311.0   0.026728  8.312373           8
+5429      QR       QATAR  311.0   0.026728  8.312373           8
+[DEBUG flight] Airline=U2 | Country=ITALY | Pax=155.0 | Pen=0.00872 | Pax*Pen=1.351 | PRMs=1
+[DEBUG flight] Airline=AF | Country=FRANCE | Pax=99.0 | Pen=0.00755 | Pax*Pen=0.747 | PRMs=1
+[DEBUG flight] Airline=FR | Country=LATVIA | Pax=184.0 | Pen=0.00414 | Pax*Pen=0.761 | PRMs=1
+[DEBUG flight] Airline=KL | Country=NETHERLANDS | Pax=122.0 | Pen=0.00831 | Pax*Pen=1.013 | PRMs=1
+[DEBUG flight] Airline=BA | Country=GREAT BRITAIN | Pax=116.0 | Pen=0.00962 | Pax*Pen=1.116 | PRMs=1
+[DEBUG flight] Airline=U2 | Country=PORTUGAL | Pax=158.0 | Pen=0.00785 | Pax*Pen=1.240 | PRMs=1
+[DEBUG flight] Airline=U2 | Country=ITALY | Pax=138.0 | Pen=0.00872 | Pax*Pen=1.203 | PRMs=1
+[DEBUG flight] Airline=LS | Country=GREECE | Pax=186.0 | Pen=0.01748 | Pax*Pen=3.251 | PRMs=3
+[DEBUG flight] Airline=U2 | Country=GREAT BRITAIN | Pax=104.0 | Pen=0.00918 | Pax*Pen=0.954 | PRMs=1
+[DEBUG flight] Airline=U2 | Country=FRANCE | Pax=191.0 | Pen=0.00839 | Pax*Pen=1.602 | PRMs=2
+[DEBUG flight] Airline=FR | Country=ITALY | Pax=180.0 | Pen=0.00547 | Pax*Pen=0.984 | PRMs=1
+[DEBUG flight] Airline=LM | Country=GREAT BRITAIN | Pax=0.0 | Pen=0.01980 | Pax*Pen=0.000 | PRMs=0
+[DEBUG flight] Airline=LS | Country=SPAIN | Pax=219.0 | Pen=0.02578 | Pax*Pen=5.646 | PRMs=6
+[DEBUG flight] Airline=BA | Country=GREAT BRITAIN | Pax=62.0 | Pen=0.00962 | Pax*Pen=0.596 | PRMs=1
+[DEBUG flight] Airline=FR | Country=FRANCE | Pax=90.0 | Pen=0.00686 | Pax*Pen=0.618 | PRMs=1
+
+[DEBUG ingest_s26]
+Total PRM jobs (rows): 18036
+Columns: ['Passenger ID', 'Airline Code', 'Flight Number', 'A/D', 'Sector', 'CountryName', 'Stand', 'Scheduled Flight DT', 'Chocks DT', 'Minutes on Chocks', 'ScheduledDateTime_Local', 'Chocks_Est', 'Departure Gate', 'SSR Code', 'Has Own Chair', 'IsEffectiveRemote', 'PRM Flight Count', 'Concurrent Stress', 'Turnaround PRM Count', 'Turnaround Vertical Count', 'IsArrival', 'Adhoc Or Planned', 'IsAdhoc', 'Job Start Time', 'Job End Time', 'tau_amb_mins', 'tau_mini_mins', 'tau_push_mins']
+SSR Code present: True
+SSR Code distribution:
+SSR Code
+WCHR     9491
+WCHS     7402
+WCHC     1002
+OTHER     141
+Name: count, dtype: int64
+    ✓ ingest_s26 done | rows=18,036   [300.39s]
+[2/4] build_jobs…
+[BUILD_JOBS] Dropping 2 jobs already impossible at release (beyond SLA + max late)
+    ✓ build_jobs done | jobs=18,034   [0.37s]
+[3/4] build_tau + classes + spin_removed…
+    ✓ params built | N_AMB=14   [0.51s]
+[4/4] pre_solve_debug (no solver)…
+
+======================================================================
+PRE-SOLVER FEASIBILITY DEBUG (no solver)
+======================================================================
+✅ Required columns present.
+Missingness: {'sla_start_time': 0, 'Scheduled Flight DT': 0, 'Chocks DT': 89}
+
+Top missing-flight-anchor by Airline Code + dir (top 20):
+Airline Code  dir
+EA            D      68
+              A      21
+dtype: int64
+
+Bucket horizon: start=2026-10-01 00:00:00 end=2026-11-01 05:45:00 buckets=3000
+✅ All t buckets lie in horizon.
+✅ All sla_start buckets lie in horizon.
+
+Jobs with release bucket AFTER hard deadline: 0
+
+Jobs impossible even with SLA breach y=1 (earliest_delay > L + M_BIG): 0
+
+spin_removed > total amb minutes (impossible): 0
+spin_removed >= total amb minutes (SATURATED -> available=0): 0
+Top 10 spin_removed buckets (bucket, removed_mins, cap_mins):
+  2026-10-09 15:00:00 | 60.0 / 210.0
+  2026-10-08 09:15:00 | 60.0 / 210.0
+  2026-10-09 19:00:00 | 60.0 / 210.0
+  2026-10-30 09:30:00 | 60.0 / 210.0
+  2026-10-12 08:15:00 | 60.0 / 210.0
+  2026-10-12 08:30:00 | 60.0 / 210.0
+  2026-10-09 18:45:00 | 60.0 / 210.0
+  2026-10-05 20:30:00 | 60.0 / 210.0
+  2026-10-05 21:00:00 | 60.0 / 210.0
+  2026-10-10 14:30:00 | 60.0 / 210.0
+
+[Spin flag debug]
+  is_spin rows: 391
+  is_spin by dir:
+dir
+A    391
+Name: count, dtype: int64
+  Minutes on Chocks (spin rows) min/median/max: 0.17416258333333332 30.90926585 59.94731263333333
+  Turnaround Vertical Count (spin rows) min/median/max: 1.0 1.0 6.0
+
+Amb minutes (necessary condition):
+  min required (vertical-only): 83194.6
+  total available over horizon: 610980.0
+
+Minibus forced-only (necessary condition):
+  forced Mini jobs: 23
+  min mini minutes required (forced): 397.5
+  total mini minutes available: 225000.0
+
+Lift rough check:
+  lift jobs: 63
+  max jobs per bucket: 20
+
+Ferry mini reservation: none
+
+Jobs with ZERO feasible horizontal modes: 0
+
+Missing tau keys: 0
+
+spin_removed keys off-grid: 0
+
+======================================================================
+TIGHT-WINDOW FEASIBILITY CHECKS (2A–2E) — NO SOLVER
+======================================================================
+Deadlines off bucket grid (count): 0
+
+Tight-window jobs (must be served in exactly one bucket): 3094
+Examples (first 20):
+   Passenger ID                   flight_key dir                   t  \
+j                                                                      
+0    S26_3273_0  U2_3273_2026-10-01 05:45:00   D 2026-10-01 05:30:00   
+5    S26_3321_0  U2_3321_2026-10-01 06:00:00   D 2026-10-01 05:45:00   
+10   S26_0301_0  U2_0301_2026-10-01 06:00:00   D 2026-10-01 06:00:00   
+11   S26_3245_0  U2_3245_2026-10-01 06:15:00   D 2026-10-01 06:15:00   
+12   S26_3245_1  U2_3245_2026-10-01 06:15:00   D 2026-10-01 06:15:00   
+21   S26_8750_0  FR_8750_2026-10-01 07:00:00   D 2026-10-01 06:45:00   
+24   S26_0769_0  LS_0769_2026-10-01 06:45:00   D 2026-10-01 06:45:00   
+25   S26_0769_1  LS_0769_2026-10-01 06:45:00   D 2026-10-01 06:45:00   
+26   S26_0769_2  LS_0769_2026-10-01 06:45:00   D 2026-10-01 06:45:00   
+28   S26_0353_0  LM_0353_2026-10-01 06:45:00   D 2026-10-01 06:45:00   
+44   S26_0597_0  RK_0597_2026-10-01 07:30:00   D 2026-10-01 07:30:00   
+56   S26_3264_0  FR_3264_2026-10-01 08:30:00   D 2026-10-01 08:30:00   
+57   S26_3651_0  EI_3651_2026-10-01 09:30:00   D 2026-10-01 09:15:00   
+58   S26_3834_0  EC_3834_2026-10-01 09:00:00   D 2026-10-01 09:00:00   
+59   S26_3834_1  EC_3834_2026-10-01 09:00:00   D 2026-10-01 09:00:00   
+61   S26_1437_0  BA_1437_2026-10-01 09:00:00   D 2026-10-01 09:00:00   
+62   S26_1437_1  BA_1437_2026-10-01 09:00:00   D 2026-10-01 09:00:00   
+66   S26_0214_0  U2_0214_2026-10-01 09:15:00   D 2026-10-01 09:00:00   
+78   S26_5091_0  FR_5091_2026-10-01 10:00:00   D 2026-10-01 10:00:00   
+79   S26_5091_1  FR_5091_2026-10-01 10:00:00   D 2026-10-01 10:00:00   
+
+              hard_deadline_time      sla_start_time Stand Airline Code  
+j                                                                        
+0  2026-10-01 05:43:45.517337850 2026-10-01 05:35:00    25           U2  
+5  2026-10-01 05:55:45.831412092 2026-10-01 05:55:00     8           U2  
+10 2026-10-01 06:08:02.537020548 2026-10-01 06:05:00   15B           U2  
+11 2026-10-01 06:19:00.359190198 2026-10-01 06:10:00    20           U2  
+12 2026-10-01 06:19:00.359190198 2026-10-01 06:10:00    20           U2  
+21 2026-10-01 06:56:57.249499710 2026-10-01 06:35:00   16B           FR  
+24 2026-10-01 06:53:47.427718758 2026-10-01 06:45:00   15A           LS  
+25 2026-10-01 06:53:47.427718758 2026-10-01 06:45:00   15A           LS  
+26 2026-10-01 06:53:47.427718758 2026-10-01 06:45:00   15A           LS  
+28 2026-10-01 06:50:00.000000000 2026-10-01 06:50:00     7           LM  
+44 2026-10-01 07:30:23.469160092 2026-10-01 07:25:00    24           RK  
+56 2026-10-01 08:31:11.118795150 2026-10-01 08:15:00   15A           FR  
+57 2026-10-01 09:28:06.541559814 2026-10-01 08:25:00    20           EI  
+58 2026-10-01 09:08:18.070829520 2026-10-01 08:25:00   15A           EC  
+59 2026-10-01 09:08:18.070829520 2026-10-01 08:25:00   15A           EC  
+61 2026-10-01 09:02:03.064392456 2026-10-01 08:35:00     6           BA  
+62 2026-10-01 09:02:03.064392456 2026-10-01 08:35:00     6           BA  
+66 2026-10-01 09:13:50.380405290 2026-10-01 08:55:00   311           U2  
+78 2026-10-01 10:05:56.714255808 2026-10-01 09:40:00   15A           FR  
+79 2026-10-01 10:05:56.714255808 2026-10-01 09:40:00   15A           FR  
+
+Lift tight-window check:
+  max lift jobs per bucket: 20
+  worst tight lift count in a bucket: 1
+
+Amb tight-window time check (vertical-only, spillover-aware):
+  Total ambulifts (from classes): 14
+  Spill cap (buckets): 10
+  tight vertical jobs: 882
+  saturated (avail=0) buckets: 0
+  tight vertical jobs starting in saturated bucket: 0
+  buckets with spilled vertical demand: 674
+  infeasible buckets (req > avail): 0
+✅ No spillover-aware ambulift time overload from tight vertical jobs.
+
+Flight+bucket vertical seat check (vertical-only):
+  total ambulift seats in a bucket (if all ambs assigned to one flight): 90
+  worst tight vertical seats for a flight in a bucket: 6
+
+✅ Tight-window checks complete.
+
+✅ Pre-solver debug complete.
+    ✓ pre_solve_debug done   [0.31s]
+
+----------------------------------------------------------------------
+[SENS] vertical_cycle_mins = 10
+----------------------------------------------------------------------
+    ✓ ConcreteModel created   [0.02s]
+    ✓ constants + toggles loaded   [0.00s]
+    ✓ bucket timeline built | buckets=3,000   [0.03s]
+    ✓ sets built | J=18,034 | F=10,580   [0.02s]
+    ✓ SLA maps built (release/sla_start/deadline)   [1.35s]
+    ✓ JB set built | JB=167,498   [0.76s]
+    ✓ FB set built | FB=98,261   [0.21s]
+    ✓ vehicle classes set | VC=19 | N_AMB=14 | N_MINI=5   [0.01s]
+    ✓ vars created | x=54,102 | JB=167,498 | A=167,498 | U=502,494 | k=1,866,959 | V=98,261 | Z=98,261 | W=98,261   [4.23s]
+    ✓ objective created   [18.02s]
+    ✓ constraints: U linearisation (JB x M)   [71.15s]
+    ✓ constraints: passenger timing + SLA   [0.77s]
+    ✓ constraints: eligibility   [0.35s]
+    ✓ constraints: vertical visit   [78.16s]
+    ✓ constraints: standby indicators   [9.84s]
+    ✓ constraints: per-flight capacity (seat/wc)   [32.43s]
+    ✓ constraints: FleetExclusive + TotalMiniCapWithFerry   [12.50s]
+    ✓ constraints: AmbTimeCap + MiniTimeCap (trip-based)   [216.26s]
+    ✓ constraints: staff   [22.60s]
+    ✓ constraints: LiftCap   [0.19s]
+    ✓ build_pyomo_model complete | total=468.90s   [0.00s]
+Running HiGHS 1.14.0 (git hash: 7df0786): Copyright (c) 2026 under MIT licence terms
+MIP has 3706899 rows; 3305916 cols; 23157011 nonzeros; 3305914 integer variables (1429955 binary)
+Assessing costs and bounds after applying user_objective_scale option value of -3
+Coefficient ranges:
+  Matrix  [7e-02, 3e+02]
+  Cost    [1e-01, 2e+06]
+  Bound   [1e+00, 1e+00]
+  RHS     [1e+00, 4e+02]
+WARNING: User-scaled problem has some excessively large costs
+WARNING:    Consider setting the user_objective_scale option to -5
+Presolving model
+2678885 rows, 2777214 cols, 16921248 nonzeros 20s
+2261961 rows, 2581082 cols, 15991213 nonzeros 141s
+Presolve reductions: rows 2261961(-1444938); columns 2581082(-724834); nonzeros 15991213(-7165798) 
+Objective function is integral with scale 1752
+
+Solving MIP model with:
+   2261961 rows
+   2581082 cols (2572103 binary, 8979 integer, 0 implied int., 0 continuous, 0 domain fixed)
+   15991213 nonzeros
+
+Src: B => Branching; C => Central rounding; F => Feasibility pump; H => Heuristic;
+     I => Shifting; J => Feasibility jump; L => Sub-MIP; P => Empty MIP; R => Randomized rounding;
+     S => Solve LP; T => Evaluate node; U => Unbounded; X => User solution; Y => HiGHS solution;
+     Z => ZI Round; l => Trivial lower; p => Trivial point; u => Trivial upper; z => Trivial zero
+
+        Nodes      |    B&B Tree     |            Objective Bounds              |  Dynamic Constraints |       Work      
+Src  Proc. InQueue |  Leaves   Expl. | BestBound       BestSol              Gap |   Cuts   InLp Confl. | LpIters     Time
+
+ J       0       0         0   0.00%   -inf            2803581624.349     Large        0      0      0         0   483.6s
+         0       0         0   0.00%   519325414.75    2803581624.349    81.48%        0      0      0         0   504.7s
+         0       0         0   0.00%   519325414.75    2803581624.349    81.48%        0      0     11    206886   606.1s
+
+Solving report
+  Status            Time limit reached
+  Primal bound      2803581624.35
+  Dual bound        519325414.75
+  Gap               81.48% (tolerance: 30%)
+  P-D integral      82.5786477189
+  Solution status   feasible
+                    2803581624.35 (objective)
+                    0 (bound viol.)
+                    0 (int. viol.)
+                    0 (row viol.)
+  Timing            606.06
+  Max sub-MIP depth 0
+  Nodes             0
+  Repair LPs        0
+  LP iterations     206886
+                    0 (strong br.)
+                    0 (separation)
+                    0 (heuristics)
+After solving the user-scaled model, the unscaled solution has objective value 22428652994.8
+WARNING: Loading a SolverResults object with an 'aborted' status, but
+containing a solution
+
+================ MONTH SUMMARY =================
+Month: 2026-10 | Cutoff: 2026-07-01
+Scenario 1:
+  PeakAmb=11 | PeakMini=2
+Scenario 2:
+  PeakAmb=12 | PeakMini=5
+SLA:
+  All=0.9308 | Arr=0.9373 | Dep=0.9244
+SLA diagnostics:
+  allowed_breaches=361 | actual_breaches=1248 | sla_percent=93.08% | sla_floor_slack=887.00
+  WARNING: hard SLA floor relaxed by slack on 887.00 jobs
+================================================
+

@@ -421,7 +421,65 @@ def build_jobs(
     # This ensures that the most operationally constraining PRMs
     # are always preserved.
     # --------------------------------------------------
-    if use_90th_percentile_cap:
+    demand_mode = str(getattr(toggles, "demand_mode", "p100") or "p100").lower()
+
+    if demand_mode == "p90_stratified":
+
+        strata_requested = list(getattr(toggles, "p90_strata", ("SSR Code", "Has Own Chair", "A/D")) or ())
+        strata_cols = [c for c in strata_requested if c in x.columns]
+        quant = float(getattr(toggles, "p90_quantile", 0.90) or 0.90)
+        quant = min(max(quant, 0.0), 1.0)
+
+        if len(strata_cols) == 0:
+            print("[BUILD_JOBS] demand_mode=p90_stratified but no requested strata columns found; skipping stratified cap")
+        else:
+            print(f"[BUILD_JOBS] Applying stratified percentile cap: q={quant:.2f} | strata={strata_cols}")
+
+            # Per-flight, per-stratum PRM counts
+            grp_cols = ["flight_key", *strata_cols]
+            per_flight_stratum = x.groupby(grp_cols).size().rename("n").reset_index()
+
+            # Cap for each stratum = ceil(q-th percentile of per-flight stratum counts), floored to 1
+            caps = (
+                per_flight_stratum
+                .groupby(strata_cols)["n"]
+                .quantile(quant)
+                .apply(lambda v: int(max(1, np.ceil(v))))
+                .rename("_cap_n")
+                .reset_index()
+            )
+
+            x = x.merge(caps, on=strata_cols, how="left")
+            x["_cap_n"] = x["_cap_n"].fillna(1).astype(int)
+
+            # Deterministic priority within each (flight, stratum)
+            x = x.sort_values(
+                [
+                    "flight_key",
+                    *strata_cols,
+                    "needs_vertical",
+                    "needs_wc",
+                    "SSR numeric",
+                    "Job Start Time",
+                ],
+                ascending=[True] * (1 + len(strata_cols)) + [False, False, False, True],
+            )
+
+            x["_rank_in_flight_stratum"] = x.groupby(grp_cols).cumcount() + 1
+
+            before = len(x)
+            x = x[x["_rank_in_flight_stratum"] <= x["_cap_n"]].copy()
+            after = len(x)
+
+            print(f"[BUILD_JOBS] Dropped {before - after} PRM jobs via stratified percentile cap")
+
+            x.drop(columns=["_cap_n", "_rank_in_flight_stratum"], inplace=True)
+
+            # Recalculate per-flight PRM counts after demand shaping
+            new_counts = x.groupby("flight_key").size()
+            x["PRM Flight Count"] = x["flight_key"].map(new_counts).astype(int)
+
+    elif use_90th_percentile_cap:
 
         # Count PRMs per flight
         prm_per_flight = x.groupby("flight_key").size()
