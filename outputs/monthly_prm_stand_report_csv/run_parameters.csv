@@ -1,0 +1,12 @@
+Parameter,Value
+Start date inclusive,2025-01-01
+End date exclusive,2027-01-01
+Month field used,Scheduled DateTime converted to YYYY-MM
+Ambulift metric,Vehicle Type = Ambulift; deduplicated by Stand + Year Month + Passenger ID
+WCHC/WCHS metric,SSR Code in WCHC/WCHS; deduplicated by Year Month + Stand Group + Passenger ID
+WCHC/WCHS focus stand Ambulift usage metric,"For WCHC/WCHS passengers on stands 8/9/10, Passenger ID is treated as the unique passenger journey identifier. Qualifying Passenger IDs are identified using SSR Code in WCHC/WCHS and Stand in 8/9/10. All associated job rows for those Passenger IDs are then checked. If any associated row has Vehicle Type = Ambulift, the passenger is classified as Had Ambulift job; otherwise No Ambulift job / assumed Jetbridge."
+Focus stands,"8, 9, 10"
+Other stand group,"All stands excluding 8, 9 and 10"
+Passenger flights only,True
+Excel output,outputs/monthly_prm_stand_report.xlsx
+CSV output directory,outputs/monthly_prm_stand_report_csv

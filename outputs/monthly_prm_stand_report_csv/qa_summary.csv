@@ -1,0 +1,12 @@
+Check,Value
+Raw PRM job rows loaded,542496
+Flight rows loaded,192102
+PRM job rows after merge/filter,542469
+Unique PRM passengers in raw PRM data,261798
+Unique PRM passengers after merge/filter,261787
+Unique Flight IDs in raw PRM data,104772
+Unique Flight IDs after merge/filter,104767
+Rows missing Passenger ID after merge/filter,0
+Rows missing Stand after merge/filter,939
+Raw Ambulift job rows after merge/filter,200932
+Raw WCHC/WCHS job rows after merge/filter,248259
