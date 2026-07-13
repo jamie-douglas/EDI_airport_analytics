@@ -10,6 +10,7 @@ import time
 
 
 from modules.utils.progress import step
+from prm_opt.build_assumptions_v2 import build_assumptions_v2
 from prm_opt.ingest_s25_v2 import ingest_s25_v2
 from prm_opt.ingest_s26_v2 import ingest_s26_v2
 from prm_opt.build_flights_v2 import build_flights_v2
@@ -17,6 +18,7 @@ from prm_opt.optimise_prm_fleet_v2 import (
     OptimiserConfig,
     optimise_prm_fleet_v2,
 )
+
 from prm_opt.sla_reporting_v2b import add_passenger_sla_reporting
 from prm_opt.fleet_requirements_report_v2c import (
     run_fleet_requirements_report_v2c,
@@ -175,6 +177,42 @@ def run_s25_s26_v2(
 
         if stand_dist is None:
             raise ValueError("stand_dist required when run_s26=True.")
+        
+        if (
+            penetration_rates is None
+            or ssr_mix is None
+            or stand_actuals is None
+            or stand_dist is None
+        ):
+
+            assumptions = build_assumptions_v2(
+                s25_start=s25_start,
+                s25_end=s25_end,
+            )
+
+            penetration_rates = (
+                assumptions["penetration_rates"]
+            )
+
+            ssr_mix = (
+                assumptions["ssr_mix"]
+            )
+
+            stand_actuals = (
+                assumptions["stand_actuals"]
+            )
+
+            stand_dist = (
+                assumptions["stand_dist"]
+            )
+
+            tau_mode_params = (
+                assumptions["tau_mode_params"]
+            )
+
+            print(
+                "\n[V2] Assumptions built automatically."
+            )
 
         passengers_s26 = ingest_s26_v2(
             start=s26_start,

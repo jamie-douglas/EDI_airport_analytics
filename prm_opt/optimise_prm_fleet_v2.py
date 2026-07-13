@@ -69,7 +69,7 @@ class OptimiserConfig:
     penalty_shortfall: float = 1_000_000.0
     penalty_future_buy: float = 100_000.0
     penalty_current_use: float = 1.0
-    penalty_staff_minues: float = 1.0
+    penalty_staff_minutes: float = 1.0
 
     solver_name_preferred: str = "appsi_highs"
     show_solver_log: bool = True
