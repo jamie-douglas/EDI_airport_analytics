@@ -7,6 +7,7 @@ from typing import Dict, Any
 
 import pandas as pd
 import time
+from datetime import date, timedelta
 
 
 from modules.utils.progress import step
@@ -165,18 +166,6 @@ def run_s25_s26_v2(
     if run_s26:
         if not s26_start or not s26_end:
             raise ValueError("s26_start and s26_end required when run_s26=True.")
-
-        if penetration_rates is None:
-            raise ValueError("penetration_rates required when run_s26=True.")
-
-        if ssr_mix is None:
-            raise ValueError("ssr_mix required when run_s26=True.")
-
-        if stand_actuals is None:
-            raise ValueError("stand_actuals required when run_s26=True.")
-
-        if stand_dist is None:
-            raise ValueError("stand_dist required when run_s26=True.")
         
         if (
             penetration_rates is None
@@ -185,30 +174,29 @@ def run_s25_s26_v2(
             or stand_dist is None
         ):
 
+            assumption_end = str(
+                date.today() - timedelta(days=1)
+            )
+
+            print(
+                "\n[V2] Building assumptions using "
+                f"historical data through {assumption_end}"
+            )
+
             assumptions = build_assumptions_v2(
                 s25_start=s25_start,
-                s25_end=s25_end,
+                s25_end=assumption_end,
             )
 
-            penetration_rates = (
-                assumptions["penetration_rates"]
-            )
+            penetration_rates = assumptions["penetration_rates"]
 
-            ssr_mix = (
-                assumptions["ssr_mix"]
-            )
+            ssr_mix = assumptions["ssr_mix"]
 
-            stand_actuals = (
-                assumptions["stand_actuals"]
-            )
+            stand_actuals = assumptions["stand_actuals"]
 
-            stand_dist = (
-                assumptions["stand_dist"]
-            )
+            stand_dist = assumptions["stand_dist"]
 
-            tau_mode_params = (
-                assumptions["tau_mode_params"]
-            )
+            tau_mode_params = assumptions["tau_mode_params"]
 
             print(
                 "\n[V2] Assumptions built automatically."

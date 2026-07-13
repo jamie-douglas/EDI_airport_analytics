@@ -74,6 +74,8 @@ class OptimiserConfig:
     solver_name_preferred: str = "appsi_highs"
     show_solver_log: bool = True
 
+    solver_relative_gap: float = 0.001
+
 
 # ---------------------------------------------------------------------
 # Vehicle expansion
@@ -923,6 +925,12 @@ def solve_model(model: pyo.ConcreteModel, config: OptimiserConfig):
                 f"Flights={len(model.F):,} "
                 f"Vehicles={len(model.R):,}"
             )
+
+            if hasattr(solver, "options"):
+
+                solver.options["mip_rel_gap"] = (
+                    config.solver_relative_gap
+                )
 
             results = solver.solve(model, tee=config.show_solver_log)
             return results

@@ -104,6 +104,16 @@ def _summarise_one_scenario(
     short = outputs.get("shortfalls", pd.DataFrame())
     solver = outputs.get("solver_results", pd.DataFrame())
 
+    fleet_util = outputs.get(
+        "fleet_utilisation",
+        pd.DataFrame()
+    )
+
+    staff = outputs.get(
+        "staff_summary",
+        pd.DataFrame()
+    )
+
     if len(sla) == 0:
         sla_row = {}
     else:
@@ -114,19 +124,32 @@ def _summarise_one_scenario(
         current_used = 0
         future_used = 0
     else:
+
         future_bought = int(
-            fleet.loc[fleet["is_future"].astype(int) == 1, "bought"].sum()
-            if "bought" in fleet.columns else 0
+            fleet.loc[
+                fleet["is_future"].astype(int) == 1,
+                "bought"
+            ].sum()
+            if "bought" in fleet.columns
+            else 0
         )
 
         current_used = int(
-            fleet.loc[fleet["is_future"].astype(int) == 0, "used"].sum()
-            if "used" in fleet.columns else 0
+            fleet.loc[
+                fleet["is_future"].astype(int) == 0,
+                "used"
+            ].sum()
+            if "used" in fleet.columns
+            else 0
         )
 
         future_used = int(
-            fleet.loc[fleet["is_future"].astype(int) == 1, "used"].sum()
-            if "used" in fleet.columns else 0
+            fleet.loc[
+                fleet["is_future"].astype(int) == 1,
+                "used"
+            ].sum()
+            if "used" in fleet.columns
+            else 0
         )
 
     if len(short) == 0:
@@ -134,11 +157,14 @@ def _summarise_one_scenario(
         shortfall_value = 0.0
     else:
         shortfall_rows = int(len(short))
+
         shortfall_value = float(
             pd.to_numeric(
                 short["shortfall_value"],
                 errors="coerce",
-            ).fillna(0.0).sum()
+            )
+            .fillna(0.0)
+            .sum()
         )
 
     if len(solver) == 0:
@@ -146,30 +172,111 @@ def _summarise_one_scenario(
         termination_condition = None
         objective_value = None
     else:
-        solver_status = solver.iloc[0].get("solver_status")
-        termination_condition = solver.iloc[0].get("termination_condition")
-        objective_value = solver.iloc[0].get("objective_value")
+        solver_status = solver.iloc[0].get(
+            "solver_status"
+        )
+
+        termination_condition = solver.iloc[0].get(
+            "termination_condition"
+        )
+
+        objective_value = solver.iloc[0].get(
+            "objective_value"
+        )
+
+    # ----------------------------------------
+    # Peak fleet requirements
+    # ----------------------------------------
+
+    peak_amb_required = 0
+    peak_mini_required = 0
+
+    if len(fleet_util) > 0:
+
+        peak_amb_required = int(
+            fleet_util.loc[
+                fleet_util["vehicle_type"] == "Amb",
+                "required_for_schedule"
+            ].sum()
+        )
+
+        peak_mini_required = int(
+            fleet_util.loc[
+                fleet_util["vehicle_type"] == "Mini",
+                "required_for_schedule"
+            ].sum()
+        )
+
+    # ----------------------------------------
+    # Peak staff
+    # ----------------------------------------
+
+    peak_staff = 0.0
+
+    if len(staff) > 0:
+
+        peak_staff = float(
+            pd.to_numeric(
+                staff["staff_required"],
+                errors="coerce",
+            )
+            .max()
+        )
 
     return {
+
         "scenario": scenario_name,
 
-        "arrival_prms": sla_row.get("arrival_prms"),
-        "arrival_prm_breaches": sla_row.get("arrival_prm_breaches"),
-        "arrival_sla_pct": sla_row.get("arrival_sla_pct"),
-        "arrival_target_pct": sla_row.get("arrival_target_pct"),
-        "arrival_meets_target": sla_row.get("arrival_meets_target"),
-        "arrival_breached_flights": sla_row.get("arrival_breached_flights"),
+        "arrival_prms":
+            sla_row.get("arrival_prms"),
 
-        "future_minibuses_bought": future_bought,
-        "future_vehicles_used": future_used,
-        "current_vehicles_used": current_used,
+        "arrival_prm_breaches":
+            sla_row.get("arrival_prm_breaches"),
 
-        "shortfall_rows": shortfall_rows,
-        "shortfall_value": shortfall_value,
+        "arrival_sla_pct":
+            sla_row.get("arrival_sla_pct"),
 
-        "solver_status": solver_status,
-        "termination_condition": termination_condition,
-        "objective_value": objective_value,
+        "arrival_target_pct":
+            sla_row.get("arrival_target_pct"),
+
+        "arrival_meets_target":
+            sla_row.get("arrival_meets_target"),
+
+        "arrival_breached_flights":
+            sla_row.get("arrival_breached_flights"),
+
+        "future_minibuses_bought":
+            future_bought,
+
+        "future_vehicles_used":
+            future_used,
+
+        "current_vehicles_used":
+            current_used,
+
+        "peak_amb_required":
+            peak_amb_required,
+
+        "peak_mini_required":
+            peak_mini_required,
+
+        "peak_staff":
+            peak_staff,
+
+        "shortfall_rows":
+            shortfall_rows,
+
+        "shortfall_value":
+            shortfall_value,
+
+        "solver_status":
+            solver_status,
+
+        "termination_condition":
+            termination_condition,
+
+        "objective_value":
+            objective_value,
     }
 
 
