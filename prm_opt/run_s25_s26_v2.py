@@ -257,6 +257,7 @@ def run_s25_s26_v2(
                 "p100_fleet_requirements": outputs_p100["fleet_requirements"],
                 "p100_fleet_utilisation": outputs_p100["fleet_utilisation"],
                 "p100_staff_summary": outputs_p100["staff_summary"],
+                "p100_staff_jobs": outputs_p100["staff_jobs"],
                 "p100_shortfalls": outputs_p100["shortfalls"],
                 "p100_sla_summary": outputs_p100["sla_summary"],
                 "p100_arrival_breaches": outputs_p100.get(
@@ -342,6 +343,7 @@ def run_s25_s26_v2(
                 "p90_fleet_requirements": outputs_p90["fleet_requirements"],
                 "p90_fleet_utilisation": outputs_p90["fleet_utilisation"],
                 "p90_staff_summary": outputs_p90["staff_summary"],
+                "p90_staff_jobs": outputs_p90["staff_jobs"],
                 "p90_shortfalls": outputs_p90["shortfalls"],
                 "p90_sla_summary": outputs_p90["sla_summary"],
                 "p90_arrival_breaches": outputs_p90.get(

@@ -69,7 +69,7 @@ class OptimiserConfig:
     penalty_shortfall: float = 1_000_000.0
     penalty_future_buy: float = 100_000.0
     penalty_current_use: float = 1.0
-    penalty_staff_peak: float = 100.0
+    penalty_staff_minues: float = 1.0
 
     solver_name_preferred: str = "appsi_highs"
     show_solver_log: bool = True
@@ -441,30 +441,22 @@ def prepare_model_data(
         f"minibus overlaps built | overlaps={len(mini_overlap_pairs):,}"
     )
 
-    # Staff event points: endpoints only, not buckets.
-    # Staff event points: endpoints only, not buckets.
-    event_points = sorted(
-        set(
-            t
-            for interval in staff_interval.values()
-            for t in interval
-        )
-    )
+    # --------------------------------------------------
+    # Staff event matrix deliberately NOT built here
+    # --------------------------------------------------
+    # We do not build staff_active[(event, flight, mode)] because for month-scale
+    # runs this becomes too large and causes MemoryError.
+    #
+    # Staff still affects optimisation through staff_minutes[(f, m)] in the
+    # objective. Peak staff is calculated after solve from the chosen solution.
 
+    event_points = []
     staff_active = {}
-    for tau in event_points:
-        for f in flights_list:
-            for m in modes:
-                s, e = staff_interval[(f, m)]
-                staff_active[(tau, f, m)] = 1 if (s <= tau < e) else 0
 
     t = step(
-    t,
-    (
-        f"staff event matrix built | "
-        f"events={len(event_points):,}"
+        t,
+        "staff event matrix skipped; staff cost will use mode-level staff minutes"
     )
-)
 
 
     # Staff by mode.
@@ -475,6 +467,35 @@ def prepare_model_data(
         staff_req[(f, "CM")] = config.staff_amb + config.staff_mini
         staff_req[(f, "CP")] = config.staff_amb + config.staff_per_prm_push * P_total[f]
         staff_req[(f, "SP")] = config.staff_per_prm_push * P_total[f]
+
+    # --------------------------------------------------
+    # Staff minutes by flight and mode
+    # --------------------------------------------------
+    # This is the staff cost used in the objective.
+    #
+    # Example:
+    #   8 PRMs by solo pusher:
+    #       staff = 8
+    #       duration = tau_push
+    #
+    #   8 PRMs by solo minibus:
+    #       staff = 2
+    #       duration = tau_mini
+    #
+    # This is what makes the optimiser prefer a minibus for high-volume PRM
+    # flights where appropriate.
+
+    staff_minutes = {}
+
+    for f in flights_list:
+        for m in modes:
+            duration = float(mode_duration_for_staff[(f, m)])
+            staff_minutes[(f, m)] = float(staff_req[(f, m)]) * duration
+
+    t = step(
+        t,
+        "staff requirements and staff-minutes calculated"
+    )
 
     t = step(
         t,
@@ -520,6 +541,7 @@ def prepare_model_data(
         "event_points": event_points,
         "staff_active": staff_active,
         "staff_req": staff_req,
+        "staff_minutes": staff_minutes,
         "config": config,
     }
 
@@ -591,7 +613,9 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
     model.short_mini_seat = pyo.Var(model.F, model.MINIBUS_MODES, domain=pyo.NonNegativeReals)
     model.short_mini_wc = pyo.Var(model.F, model.MINIBUS_MODES, domain=pyo.NonNegativeReals)
 
-    model.N_staff = pyo.Var(domain=pyo.NonNegativeReals)
+    # Peak staff is calculated after solve.
+    # Staff still affects optimisation through staff_minutes in the objective.
+    model.N_staff = pyo.Param(initialize=0.0, mutable=False)
 
     n_x = len(F) * len(M)
 
@@ -816,25 +840,12 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
     )   
 
     # ---------------------------------------------------------
-    # Peak staff over event timeline, not buckets
+    # Peak staff is not a Pyomo constraint in V2A
     # ---------------------------------------------------------
+    # Staff affects optimisation via staff-minutes in the objective.
+    # Peak staff is calculated after solve for reporting.
 
-    event_points = data["event_points"]
-    model.EVENTS = pyo.Set(initialize=event_points)
-
-    def staff_peak_rule(mdl, tau):
-        return (
-            sum(
-                data["staff_active"][(tau, f, mm)]
-                * data["staff_req"][(f, mm)]
-                * mdl.x[f, mm]
-                for f in mdl.F
-                for mm in mdl.M
-            )
-            <= mdl.N_staff
-        )
-
-    model.staff_peak = pyo.Constraint(model.EVENTS, rule=staff_peak_rule)
+    model.EVENTS = pyo.Set(initialize=[])
 
     # ---------------------------------------------------------
     # Objective
@@ -855,7 +866,13 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
             sum(data["vehicle_capex"][r] * mdl.use[r] for r in mdl.R)
         )
 
-        staff_penalty = cfg.penalty_staff_peak * mdl.N_staff
+        staff_penalty = cfg.penalty_staff_minutes * (
+            sum(
+                data["staff_minutes"][(f, mm)] * mdl.x[f, mm]
+                for f in mdl.F
+                for mm in mdl.M
+            )
+        )
 
         return (
             shortfall_penalty
@@ -1306,25 +1323,88 @@ def extract_solution(
         fleet_req_rows
     )
 
-    # Staff summary.
-    staff_rows = []
-    for tau in data["event_points"]:
-        active_staff = 0.0
-        for f in F:
-            for m in M:
-                if data["staff_active"][(tau, f, m)]:
-                    active_staff += data["staff_req"][(f, m)] * pyo.value(model.x[f, m])
+    # --------------------------------------------------
+    # Staff summary calculated post-solve
+    # --------------------------------------------------
 
-        staff_rows.append(
+    chosen_mode = {
+        row["flight_key"]: row["chosen_mode"]
+        for _, row in df_modes.iterrows()
+    }
+
+    staff_jobs = []
+
+    for f in F:
+        m_chosen = chosen_mode.get(f)
+
+        if m_chosen is None:
+            continue
+
+        if (f, m_chosen) not in data["staff_interval"]:
+            continue
+
+        s, e = data["staff_interval"][(f, m_chosen)]
+
+        staff_jobs.append(
             {
-                "event_min": tau,
-                "event_time": data["origin"] + pd.to_timedelta(tau, unit="m"),
-                "staff_required": active_staff,
-                "N_staff_peak": pyo.value(model.N_staff),
+                "flight_key": f,
+                "chosen_mode": m_chosen,
+                "interval_start_min": s,
+                "interval_end_min": e,
+                "staff_required": float(data["staff_req"][(f, m_chosen)]),
+                "staff_minutes": float(data["staff_minutes"][(f, m_chosen)]),
             }
         )
 
+    df_staff_jobs = pd.DataFrame(staff_jobs)
+
+    staff_rows = []
+
+    if len(df_staff_jobs) > 0:
+        staff_event_points = sorted(
+            set(df_staff_jobs["interval_start_min"].tolist())
+            | set(df_staff_jobs["interval_end_min"].tolist())
+        )
+
+        for tau in staff_event_points:
+            active = df_staff_jobs[
+                (df_staff_jobs["interval_start_min"] <= tau)
+                & (tau < df_staff_jobs["interval_end_min"])
+            ]
+
+            staff_required = float(active["staff_required"].sum())
+
+            staff_rows.append(
+                {
+                    "event_min": tau,
+                    "event_time": data["origin"] + pd.to_timedelta(tau, unit="m"),
+                    "staff_required": staff_required,
+                    "active_flights": int(active["flight_key"].nunique()),
+                }
+            )
+
     df_staff = pd.DataFrame(staff_rows)
+
+    if len(df_staff) > 0:
+        final_peak_staff = float(df_staff["staff_required"].max())
+        df_staff["N_staff_peak"] = final_peak_staff
+    else:
+        final_peak_staff = 0.0
+
+    if len(df_staff_jobs) > 0:
+        df_staff_jobs["N_staff_peak"] = final_peak_staff
+    else:
+        df_staff_jobs = pd.DataFrame(
+            columns=[
+                "flight_key",
+                "chosen_mode",
+                "interval_start_min",
+                "interval_end_min",
+                "staff_required",
+                "staff_minutes",
+                "N_staff_peak",
+            ]
+        )
 
     df_sla = pd.DataFrame(
     [{
@@ -1348,6 +1428,7 @@ def extract_solution(
         "fleet_requirements": df_fleet_requirements,
         "fleet_utilisation": df_fleet_utilisation,
         "staff_summary": df_staff,
+        "staff_jobs": df_staff_jobs,
         "shortfalls": df_short,
         "sla_summary": df_sla,
     }
