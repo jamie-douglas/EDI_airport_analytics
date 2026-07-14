@@ -74,7 +74,7 @@ class OptimiserConfig:
     solver_name_preferred: str = "appsi_highs"
     show_solver_log: bool = True
 
-    solver_relative_gap: float = 0.001
+    solver_relative_gap: float = 0.005
 
 
 # ---------------------------------------------------------------------
