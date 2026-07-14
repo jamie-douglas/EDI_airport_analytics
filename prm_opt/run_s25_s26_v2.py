@@ -351,7 +351,7 @@ def run_s25_s26_v2(
     output_xlsx_name: str = "prm_v2_outputs.xlsx",
     run_p100: bool = True,
     run_p90: bool = True,
-   run_fleet_report: bool = True,
+    run_fleet_report: bool = True,
     fleet_report_policy: str = "if_needed",
     current_fleet_only_first: bool = True,
     max_ev10: int = 5,
