@@ -54,6 +54,13 @@ class OptimiserConfig:
     tau_amb_comb_mins: float = 14.0
     tau_mini_mins: float = 14.0
     tau_push_mins: float = 15.0
+
+    # Spin-specific ambulift timings.
+    # Arrival spin: ambulift remains at aircraft / vertical process only.
+    # Departure spin: vertical movement plus departure positioning component.
+    tau_amb_spin_arr_mins: float = 14.0
+    tau_amb_spin_dep_mins: float = 26.0
+
     handover_buffer_mins: float = 5.0
     arrival_sla_target_pct: float = 0.98
     arrival_sla_target_mins: int = 20
@@ -70,6 +77,13 @@ class OptimiserConfig:
     penalty_future_buy: float = 100_000.0
     penalty_current_use: float = 1.0
     penalty_staff_minutes: float = 1.0
+
+    # Small penalty to discourage unnecessary extra vehicle assignments.
+    penalty_vehicle_assignment: float = 10.0
+
+    # Penalty for estimated arrival PRMs whose service starts after SLA
+    # because they are on later sequential ambulift trips.
+    penalty_arrival_trip_sla_prm: float = 250_000.0
 
     solver_name_preferred: str = "appsi_highs"
     show_solver_log: bool = True
@@ -169,6 +183,102 @@ def _intervals_overlap(a_start: float, a_end: float, b_start: float, b_end: floa
     """
     return (a_start < b_end) and (b_start < a_end)
 
+def _amb_trip_duration_mins(
+    *,
+    mode: str,
+    is_arrival: bool,
+    is_spin_arrival: bool,
+    is_spin_candidate: bool,
+    config: OptimiserConfig,
+) -> float:
+    """
+    Return duration of one ambulift trip/cycle.
+
+    SA:
+        Full ambulift horizontal movement unless spin logic applies.
+
+    CM/CP:
+        Vertical component only.
+
+    Spin:
+        Arrival spin uses shorter duration because the ambulift is staying.
+        Departure spin uses vertical + departure positioning component.
+    """
+
+    if is_arrival and is_spin_arrival:
+        return float(config.tau_amb_spin_arr_mins)
+
+    if (not is_arrival) and is_spin_candidate:
+        return float(config.tau_amb_spin_dep_mins)
+
+    if mode == "SA":
+        return float(config.tau_amb_solo_mins)
+
+    return float(config.tau_amb_comb_mins)
+
+
+def _estimate_arrival_late_prms_from_trips(
+    *,
+    is_arrival: bool,
+    trips: int,
+    trip_duration_mins: float,
+    sla_target_mins: float,
+    seat_demand: int,
+    wc_demand: int,
+    seatcap: int,
+    wccap: int,
+) -> int:
+    """
+    Estimate PRMs at risk of missing arrival SLA because they would only
+    start service on a later sequential ambulift trip.
+
+    Trip 1 starts at 0.
+    Trip 2 starts at trip_duration.
+    Trip 3 starts at 2 * trip_duration.
+
+    A trip is on time if trip_start <= SLA target.
+    """
+
+    if not is_arrival:
+        return 0
+
+    trips = int(max(0, trips))
+
+    if trips <= 0:
+        return 0
+
+    on_time_trips = 0
+
+    for k in range(trips):
+        trip_start = float(k) * float(trip_duration_mins)
+
+        if trip_start <= float(sla_target_mins):
+            on_time_trips += 1
+
+    on_time_seat_capacity = int(on_time_trips) * int(seatcap)
+    on_time_wc_capacity = int(on_time_trips) * int(wccap)
+
+    on_time_seated = min(
+        int(seat_demand),
+        int(on_time_seat_capacity),
+    )
+
+    on_time_wc = min(
+        int(wc_demand),
+        int(on_time_wc_capacity),
+    )
+
+    total_demand = int(seat_demand) + int(wc_demand)
+
+    on_time_total = int(on_time_seated) + int(on_time_wc)
+
+    return int(
+        max(
+            0,
+            total_demand - on_time_total,
+        )
+    )
+
 
 # ---------------------------------------------------------------------
 # Duration and interval preparation
@@ -206,6 +316,9 @@ def prepare_model_data(
         "D_WCHS",
         "D_wc",
         "D_seat",
+        "D_vert_total",
+        "D_vert_wc",
+        "D_vert_seat",
         "Remote",
         "EffRemote",
         "NeedVertical",
@@ -257,43 +370,131 @@ def prepare_model_data(
     flight_params = fdf.set_index("flight_key").to_dict("index")
 
     # Demand parameters.
-    D_seat = {f: int(flight_params[f]["D_seat"]) for f in flights_list}
-    D_wc = {f: int(flight_params[f]["D_wc"]) for f in flights_list}
-    P_total = {f: int(flight_params[f]["P_total"]) for f in flights_list}
+    D_seat = {
+        f: int(flight_params[f]["D_seat"])
+        for f in flights_list
+    }
+
+    D_wc = {
+        f: int(flight_params[f]["D_wc"])
+        for f in flights_list
+    }
+
+    D_vert_total = {
+        f: int(flight_params[f]["D_vert_total"])
+        for f in flights_list
+    }
+
+    D_vert_wc = {
+        f: int(flight_params[f]["D_vert_wc"])
+        for f in flights_list
+    }
+
+    D_vert_seat = {
+        f: int(flight_params[f]["D_vert_seat"])
+        for f in flights_list
+    }
+
+    P_total = {
+        f: int(flight_params[f]["P_total"])
+        for f in flights_list
+    }
 
     NeedVertical = {f: int(flight_params[f]["NeedVertical"]) for f in flights_list}
     Remote = {f: int(flight_params[f]["Remote"]) for f in flights_list}
     Arrival = {f: 1 if str(flight_params[f]["arr_dep"]) == "A" else 0 for f in flights_list}
     Domestic = {f: int(flight_params[f]["Domestic"]) for f in flights_list}
-    Safety = {f: int(flight_params[f]["Safety"]) for f in flights_list}
-    arrival_sla_target = {f: config.arrival_sla_target_mins for f in flights_list}
+    Safety = {
+        f: int(flight_params[f]["Safety"])
+        for f in flights_list
+    }
 
-    # Precompute ambulift trips and assignment intervals.
+    SpinArrival = {
+        f: int(flight_params[f].get("is_spin", 0) or 0)
+        for f in flights_list
+    }
+
+    SpinCandidate = {
+        f: int(flight_params[f].get("is_spin_candidate", 0) or 0)
+        for f in flights_list
+    }
+
+    arrival_sla_target = {
+        f: config.arrival_sla_target_mins
+        for f in flights_list
+    }
+
+   # Precompute ambulift trips and assignment intervals.
     amb_trips = {}
     amb_duration = {}
     amb_interval = {}
+    amb_trip_duration = {}
+    amb_late_prms = {}
 
     for f in flights_list:
         anchor = float(flight_params[f]["anchor_min"])
         is_arr = Arrival[f] == 1
 
         for r in amb_vehicles:
-            trips = max(
-                _ceil_div(D_seat[f], vehicle_seatcap[r]),
-                _ceil_div(D_wc[f], vehicle_wccap[r]),
-            )
-
-            # If no demand, still at least 1 technical trip if assigned.
-            trips = max(1, trips)
-
-            amb_trips[(f, r)] = trips
 
             for m in vertical_modes:
-                if m == "SA":
-                    dur = trips * config.tau_amb_solo_mins
-                else:
-                    dur = trips * config.tau_amb_comb_mins
 
+                # --------------------------------------------------
+                # Mode-specific ambulift demand
+                # --------------------------------------------------
+                #
+                # SA:
+                #   Ambulift does vertical + horizontal transport.
+                #   It can carry all PRMs if they fit.
+                #
+                # CM / CP:
+                #   Ambulift does vertical component only.
+                #   Minibus/pushers handle horizontal movement.
+
+                if m == "SA":
+                    amb_wc_demand = D_wc[f]
+                    amb_seat_demand = D_seat[f]
+                else:
+                    amb_wc_demand = D_vert_wc[f]
+                    amb_seat_demand = D_vert_seat[f]
+
+                trips = max(
+                    _ceil_div(
+                        amb_seat_demand,
+                        vehicle_seatcap[r],
+                    ),
+                    _ceil_div(
+                        amb_wc_demand,
+                        vehicle_wccap[r],
+                    ),
+                )
+
+                trips = max(1, trips)
+
+                trip_mins = _amb_trip_duration_mins(
+                    mode=m,
+                    is_arrival=is_arr,
+                    is_spin_arrival=bool(SpinArrival[f]),
+                    is_spin_candidate=bool(SpinCandidate[f]),
+                    config=config,
+                )
+
+                late_prms = _estimate_arrival_late_prms_from_trips(
+                    is_arrival=is_arr,
+                    trips=trips,
+                    trip_duration_mins=trip_mins,
+                    sla_target_mins=arrival_sla_target[f],
+                    seat_demand=amb_seat_demand,
+                    wc_demand=amb_wc_demand,
+                    seatcap=vehicle_seatcap[r],
+                    wccap=vehicle_wccap[r],
+                )
+
+                dur = float(trips) * float(trip_mins)
+
+                amb_trips[(f, r, m)] = int(trips)
+                amb_trip_duration[(f, r, m)] = float(trip_mins)
+                amb_late_prms[(f, r, m)] = int(late_prms)
                 amb_duration[(f, r, m)] = float(dur)
 
                 if is_arr:
@@ -303,7 +504,10 @@ def prepare_model_data(
                     end = anchor
                     start = anchor - dur
 
-                amb_interval[(f, r, m)] = (float(start), float(end))
+                amb_interval[(f, r, m)] = (
+                    float(start),
+                    float(end),
+                )
 
     t = step(
         t,
@@ -527,14 +731,21 @@ def prepare_model_data(
         "vehicle_base_model": vehicle_base_model,
         "D_seat": D_seat,
         "D_wc": D_wc,
+        "D_vert_total": D_vert_total,
+        "D_vert_wc": D_vert_wc,
+        "D_vert_seat": D_vert_seat,
         "P_total": P_total,
         "NeedVertical": NeedVertical,
         "Remote": Remote,
         "Arrival": Arrival,
         "Domestic": Domestic,
         "Safety": Safety,
+        "SpinArrival": SpinArrival,
+        "SpinCandidate": SpinCandidate,
         "arrival_sla_target": arrival_sla_target,
         "amb_trips": amb_trips,
+        "amb_trip_duration": amb_trip_duration,
+        "amb_late_prms": amb_late_prms,
         "amb_interval": amb_interval,
         "mini_interval": mini_interval,
         "staff_interval": staff_interval,
@@ -876,11 +1087,39 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
             )
         )
 
+        vehicle_assignment_penalty = cfg.penalty_vehicle_assignment * (
+            sum(
+                mdl.amb[f, r, mm]
+                for f in mdl.F
+                for r in mdl.R_AMB
+                for mm in mdl.VERTICAL_MODES
+            )
+            +
+            sum(
+                mdl.mini[f, r, mm]
+                for f in mdl.F
+                for r in mdl.R_MINI
+                for mm in mdl.MINIBUS_MODES
+            )
+        )
+
+        arrival_trip_sla_penalty = cfg.penalty_arrival_trip_sla_prm * (
+            sum(
+                data["amb_late_prms"][(f, r, mm)]
+                * mdl.amb[f, r, mm]
+                for f in mdl.F
+                for r in mdl.R_AMB
+                for mm in mdl.VERTICAL_MODES
+            )
+        )
+
         return (
             shortfall_penalty
             + future_purchase_penalty
             + current_use_penalty
             + staff_penalty
+            + vehicle_assignment_penalty
+            + arrival_trip_sla_penalty
         )
 
     model.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
@@ -1003,9 +1242,33 @@ def extract_solution(
                                 f"{data['vehicle_wccap'][r]}wc"
                             ),
                             "mode": m,
+                            "amb_service_role": (
+                                "solo_vertical_and_horizontal"
+                                if m == "SA"
+                                else "vertical_only"
+                            ),
+                            "uses_spin_duration": int(
+                                (
+                                    data["Arrival"][f] == 1
+                                    and data["SpinArrival"][f] == 1
+                                )
+                                or
+                                (
+                                    data["Arrival"][f] == 0
+                                    and data["SpinCandidate"][f] == 1
+                                )
+                            ),
                             "interval_start_min": s,
                             "interval_end_min": e,
-                            "trips": data["amb_trips"][(f, r)],
+                            "trips": data["amb_trips"][(f, r, m)],
+                            "amb_trip_duration_mins": data["amb_trip_duration"][(f, r, m)],
+                            "estimated_late_arrival_prms": data["amb_late_prms"][(f, r, m)],
+                            "total_prms": data["P_total"][f],
+                            "seat_prms": data["D_seat"][f],
+                            "wc_prms": data["D_wc"][f],
+                            "vertical_prms": data["D_vert_total"][f],
+                            "vertical_seat_prms": data["D_vert_seat"][f],
+                            "vertical_wc_prms": data["D_vert_wc"][f],
                             "seatcap": data["vehicle_seatcap"][r],
                             "wccap": data["vehicle_wccap"][r],
                             "is_future": data["vehicle_is_future"][r],

@@ -252,8 +252,53 @@ def build_flights_v2(
     x["_is_wchr"] = (x["SSR Code"] == "WCHR").astype(int)
     x["_is_other"] = (~x["SSR Code"].isin(["WCHC", "WCHS", "WCHR"])).astype(int)
 
+    # Wheelchair-space demand:
+    # WCHC and WCHS own-chair take wheelchair capacity.
+    # Everyone else takes seated capacity.
     x["_is_wc"] = x["Has Own Chair"].astype(int)
     x["_is_seat"] = 1 - x["_is_wc"]
+
+    # --------------------------------------------------
+    # Vertical-demand indicators
+    # --------------------------------------------------
+    # Needs vertical is separate from wheelchair capacity.
+    #
+    # Vertical demand:
+    #   Effective remote + WCHC/WCHS
+    #
+    # Wheelchair demand:
+    #   WCHC + WCHS own-chair
+    #
+    # This allows:
+    #   SA    = ambulift can carry all PRMs
+    #   CM/CP = ambulift only handles vertical component
+
+    if "is_effective_remote" in x.columns:
+        x["_eff_remote_row"] = (
+            pd.to_numeric(
+                x["is_effective_remote"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .astype(int)
+        )
+    else:
+        x["_eff_remote_row"] = 0
+
+    x["_is_vertical_prm"] = (
+        (x["_eff_remote_row"] == 1)
+        & (x["SSR Code"].isin(["WCHC", "WCHS"]))
+    ).astype(int)
+
+    x["_is_vert_wc"] = (
+        x["_is_vertical_prm"]
+        * x["_is_wc"]
+    ).astype(int)
+
+    x["_is_vert_seat"] = (
+        x["_is_vertical_prm"]
+        * x["_is_seat"]
+    ).astype(int)
 
     first_cols = [
         "Flight ID",
@@ -294,6 +339,9 @@ def build_flights_v2(
             "_is_other": "sum",
             "_is_wc": "sum",
             "_is_seat": "sum",
+            "_is_vertical_prm": "sum",
+            "_is_vert_wc": "sum",
+            "_is_vert_seat": "sum",
         }
     )
 
@@ -312,6 +360,9 @@ def build_flights_v2(
             "_is_other": "D_OTHER",
             "_is_wc": "D_wc",
             "_is_seat": "D_seat",
+            "_is_vertical_prm": "D_vert_total",
+            "_is_vert_wc": "D_vert_wc",
+            "_is_vert_seat": "D_vert_seat",
             "Scheduled Flight DT": "scheduled_time",
             "A/D": "arr_dep",
             "is_remote": "Remote",
@@ -321,8 +372,30 @@ def build_flights_v2(
     )
 
     # Defensive fills.
-    for c in ["D_WCHC", "D_WCHS", "D_WCHR", "D_OTHER", "D_wc", "D_seat", "P_total"]:
-        flights[c] = pd.to_numeric(flights[c], errors="coerce").fillna(0).astype(int)
+    for c in [
+        "D_WCHC",
+        "D_WCHS",
+        "D_WCHR",
+        "D_OTHER",
+        "D_wc",
+        "D_seat",
+        "D_vert_total",
+        "D_vert_wc",
+        "D_vert_seat",
+        "P_total",
+    ]:
+        if c in flights.columns:
+            flights[c] = (
+                pd.to_numeric(
+                    flights[c],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .astype(int)
+            )
+        else:
+            flights[c] = 0
+
 
     for c in ["Remote", "EffRemote", "is_spin_candidate"]:
         if c in flights.columns:
@@ -420,6 +493,9 @@ def build_flights_v2(
         "D_OTHER",
         "D_wc",
         "D_seat",
+        "D_vert_total",
+        "D_vert_wc",
+        "D_vert_seat",
         "Remote",
         "EffRemote",
         "CanUsePusher",
