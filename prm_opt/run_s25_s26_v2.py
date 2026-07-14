@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any
+from dataclasses import replace
 
 import pandas as pd
 import time
 from datetime import date, timedelta
-
 
 from modules.utils.progress import step
 from prm_opt.build_assumptions_v2 import build_assumptions_v2
@@ -89,6 +89,248 @@ def run_single_demand_mode(
 
     return outputs
 
+# ---------------------------------------------------------------------
+# Fleet-report trigger helpers
+# ---------------------------------------------------------------------
+
+def _current_vehicle_models_only(
+    vehicle_models: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Return vehicle models excluding future purchase options.
+
+    Used when we want to test whether the current physical fleet is sufficient
+    before allowing the optimiser to buy future minibuses.
+    """
+    return {
+        k: v
+        for k, v in vehicle_models.items()
+        if not bool(v.get("is_future", False))
+    }
+
+
+def _arrival_sla_pct(
+    outputs: Dict[str, pd.DataFrame],
+) -> float:
+    """
+    Extract passenger-based arrival SLA percentage from outputs.
+    """
+    sla_df = outputs.get("sla_summary", pd.DataFrame())
+
+    if sla_df is None or len(sla_df) == 0:
+        return 0.0
+
+    row = sla_df.iloc[0]
+
+    if "arrival_sla_pct" in row:
+        return float(row.get("arrival_sla_pct", 0.0))
+
+    if "arrival_flight_sla_pct" in row:
+        return float(row.get("arrival_flight_sla_pct", 0.0))
+
+    return 0.0
+
+
+def _shortfall_total(
+    outputs: Dict[str, pd.DataFrame],
+) -> float:
+    """
+    Total optimiser shortfall value.
+    """
+    short = outputs.get("shortfalls", pd.DataFrame())
+
+    if short is None or len(short) == 0:
+        return 0.0
+
+    if "shortfall_value" not in short.columns:
+        return 0.0
+
+    return float(
+        pd.to_numeric(
+            short["shortfall_value"],
+            errors="coerce",
+        ).fillna(0.0).sum()
+    )
+
+
+def _fleet_gap_total(
+    outputs: Dict[str, pd.DataFrame],
+) -> int:
+    """
+    Total current-fleet gap from fleet utilisation output.
+    """
+    fleet_util = outputs.get("fleet_utilisation", pd.DataFrame())
+
+    if fleet_util is None or len(fleet_util) == 0:
+        return 0
+
+    if "gap_vs_current" not in fleet_util.columns:
+        return 0
+
+    return int(
+        pd.to_numeric(
+            fleet_util["gap_vs_current"],
+            errors="coerce",
+        ).fillna(0).sum()
+    )
+
+
+def _current_fleet_is_sufficient(
+    outputs: Dict[str, pd.DataFrame],
+) -> bool:
+    """
+    Current fleet is sufficient if:
+      - there are no capacity shortfalls
+      - fleet utilisation shows no current-fleet gap
+    """
+    return (
+        _shortfall_total(outputs) <= 1e-6
+        and _fleet_gap_total(outputs) == 0
+    )
+
+
+def _needs_fleet_expansion(
+    outputs: Dict[str, pd.DataFrame],
+    config: OptimiserConfig,
+) -> bool:
+    """
+    Decide whether to run future fleet expansion.
+
+    We run future fleet only if:
+      - arrival SLA is below target, OR
+      - current fleet is not sufficient.
+    """
+    target_pct = float(config.arrival_sla_target_pct) * 100.0
+    sla_pct = _arrival_sla_pct(outputs)
+
+    current_ok = _current_fleet_is_sufficient(outputs)
+
+    return (
+        sla_pct < target_pct
+        or not current_ok
+    )
+
+
+def _run_incremental_fleet_expansion(
+    *,
+    flights: pd.DataFrame,
+    vehicle_models: Dict[str, Dict[str, Any]],
+    base_config: OptimiserConfig,
+    max_future_copies: int,
+    demand_mode_label: str,
+) -> tuple[pd.DataFrame, Dict[str, Dict[str, pd.DataFrame]], pd.DataFrame]:
+    """
+    Incremental future fleet search.
+
+    Logic:
+      1. Try +1 future copy per future model.
+      2. Check SLA and current/future sufficiency.
+      3. Stop as soon as the scenario passes.
+      4. If no scenario passes, return all attempted scenarios.
+
+    This avoids brute-forcing every fleet scenario once a passing scenario is found.
+    """
+
+    report_rows = []
+    detailed_outputs = {}
+
+    for n in range(1, int(max_future_copies) + 1):
+
+        scenario_name = f"{demand_mode_label}_future_plus_{n}"
+
+        scenario_config = replace(
+            base_config,
+            max_future_copies_per_model=n,
+        )
+
+        print(
+            f"\n[{demand_mode_label.upper()}] Running fleet expansion scenario: "
+            f"+{n} future copy per future model"
+        )
+
+        outputs = run_single_demand_mode(
+            flights=flights,
+            vehicle_models=vehicle_models,
+            config=scenario_config,
+        )
+
+        detailed_outputs[scenario_name] = outputs
+
+        sla_pct = _arrival_sla_pct(outputs)
+        shortfall_total = _shortfall_total(outputs)
+        gap_total = _fleet_gap_total(outputs)
+        current_ok = _current_fleet_is_sufficient(outputs)
+
+        fleet = outputs.get("fleet_summary", pd.DataFrame())
+
+        if fleet is not None and len(fleet) > 0 and "bought" in fleet.columns:
+            future_bought = int(
+                fleet.loc[
+                    fleet["is_future"].astype(int) == 1,
+                    "bought",
+                ].sum()
+            )
+        else:
+            future_bought = 0
+
+        target_pct = float(scenario_config.arrival_sla_target_pct) * 100.0
+
+        meets_sla = int(sla_pct >= target_pct)
+        scenario_passes = (
+            meets_sla == 1
+            and shortfall_total <= 1e-6
+        )
+
+        report_rows.append(
+            {
+                "scenario": scenario_name,
+                "future_copies_per_model": n,
+                "arrival_sla_pct": sla_pct,
+                "arrival_target_pct": target_pct,
+                "meets_sla": meets_sla,
+                "shortfall_total": shortfall_total,
+                "gap_vs_current_total": gap_total,
+                "current_fleet_sufficient": int(current_ok),
+                "future_bought": future_bought,
+                "scenario_passes": int(scenario_passes),
+            }
+        )
+
+        if scenario_passes:
+            print(
+                f"[{demand_mode_label.upper()}] Stopping fleet expansion: "
+                f"scenario +{n} meets SLA and has no shortfall."
+            )
+            break
+
+    fleet_report = pd.DataFrame(report_rows)
+
+    if len(fleet_report) > 0:
+        passed = fleet_report[
+            fleet_report["scenario_passes"].astype(int) == 1
+        ].copy()
+
+        if len(passed) > 0:
+            recommended = passed.head(1).reset_index(drop=True)
+        else:
+            recommended = (
+                fleet_report
+                .sort_values(
+                    [
+                        "arrival_sla_pct",
+                        "shortfall_total",
+                        "future_bought",
+                    ],
+                    ascending=[False, True, True],
+                )
+                .head(1)
+                .reset_index(drop=True)
+            )
+    else:
+        recommended = pd.DataFrame()
+
+    return fleet_report, detailed_outputs, recommended
+
 
 def run_s25_s26_v2(
     *,
@@ -109,7 +351,9 @@ def run_s25_s26_v2(
     output_xlsx_name: str = "prm_v2_outputs.xlsx",
     run_p100: bool = True,
     run_p90: bool = True,
-    run_fleet_report: bool = True,
+   run_fleet_report: bool = True,
+    fleet_report_policy: str = "if_needed",
+    current_fleet_only_first: bool = True,
     max_ev10: int = 5,
     max_ev18: int = 5,
     config: OptimiserConfig | None = None,
@@ -137,6 +381,11 @@ def run_s25_s26_v2(
 
     if vehicle_models is None:
         raise ValueError("vehicle_models must be provided.")
+
+    if current_fleet_only_first:
+        base_vehicle_models = _current_vehicle_models_only(vehicle_models)
+    else:
+        base_vehicle_models = vehicle_models
 
     passenger_frames = []
 
@@ -256,7 +505,7 @@ def run_s25_s26_v2(
 
         outputs_p100 = run_single_demand_mode(
             flights=flights_p100,
-            vehicle_models=vehicle_models,
+            vehicle_models=base_vehicle_models,
             config=config,
         )
 
@@ -295,29 +544,87 @@ def run_s25_s26_v2(
         )
 
         if run_fleet_report:
-            fleet_report_p100, fleet_details_p100 = run_fleet_requirements_report_v2c(
-                flights=flights_p100,
-                vehicle_models=vehicle_models,
-                base_config=config,
-                max_ev10=max_ev10,
-                max_ev18=max_ev18,
+
+            needs_expansion_p100 = _needs_fleet_expansion(
+                outputs=outputs_p100,
+                config=config,
             )
 
-            t = step(
-                t,
-                f"P100 fleet requirements report complete"
+            p100_base_check = pd.DataFrame(
+                [
+                    {
+                        "demand_mode": "P100",
+                        "arrival_sla_pct": _arrival_sla_pct(outputs_p100),
+                        "arrival_target_pct": config.arrival_sla_target_pct * 100.0,
+                        "shortfall_total": _shortfall_total(outputs_p100),
+                        "gap_vs_current_total": _fleet_gap_total(outputs_p100),
+                        "current_fleet_sufficient": int(
+                            _current_fleet_is_sufficient(outputs_p100)
+                        ),
+                        "needs_fleet_expansion": int(needs_expansion_p100),
+                    }
+                ]
             )
 
-            recommended_p100 = get_recommended_fleet_scenario(
-                fleet_report_p100
-            )
+            result["p100_base_check"] = p100_base_check
+            workbook_sheets["p100_base_check"] = p100_base_check
 
-            result["fleet_requirements_p100"] = fleet_report_p100
-            result["fleet_details_p100"] = fleet_details_p100
-            result["recommended_p100"] = recommended_p100
+            if (
+                fleet_report_policy == "always"
+                or (
+                    fleet_report_policy == "if_needed"
+                    and needs_expansion_p100
+                )
+            ):
+                fleet_report_p100, fleet_details_p100, recommended_p100 = (
+                    _run_incremental_fleet_expansion(
+                        flights=flights_p100,
+                        vehicle_models=vehicle_models,
+                        base_config=config,
+                        max_future_copies=max(max_ev10, max_ev18),
+                        demand_mode_label="p100",
+                    )
+                )
 
-            workbook_sheets["p100_fleet_requirements"] = fleet_report_p100
-            workbook_sheets["p100_recommended"] = recommended_p100
+                t = step(
+                    t,
+                    "P100 fleet expansion search complete"
+                )
+
+                result["fleet_requirements_p100"] = fleet_report_p100
+                result["fleet_details_p100"] = fleet_details_p100
+                result["recommended_p100"] = recommended_p100
+
+                workbook_sheets["p100_fleet_requirements"] = fleet_report_p100
+                workbook_sheets["p100_recommended"] = recommended_p100
+
+            else:
+                print(
+                    "\n[P100] Current fleet meets SLA and has no current-fleet gap. "
+                    "Skipping fleet expansion search."
+                )
+
+                empty_report = pd.DataFrame(
+                    columns=[
+                        "scenario",
+                        "future_copies_per_model",
+                        "arrival_sla_pct",
+                        "arrival_target_pct",
+                        "meets_sla",
+                        "shortfall_total",
+                        "gap_vs_current_total",
+                        "current_fleet_sufficient",
+                        "future_bought",
+                        "scenario_passes",
+                    ]
+                )
+
+                result["fleet_requirements_p100"] = empty_report
+                result["fleet_details_p100"] = {}
+                result["recommended_p100"] = p100_base_check
+
+                workbook_sheets["p100_fleet_requirements"] = empty_report
+                workbook_sheets["p100_recommended"] = p100_base_check
 
     # --------------------------------------------------
     # P90
@@ -344,7 +651,7 @@ def run_s25_s26_v2(
 
         outputs_p90 = run_single_demand_mode(
             flights=flights_p90,
-            vehicle_models=vehicle_models,
+            vehicle_models=base_vehicle_models,
             config=config,
         )
 
@@ -381,29 +688,87 @@ def run_s25_s26_v2(
         )
 
         if run_fleet_report:
-            fleet_report_p90, fleet_details_p90 = run_fleet_requirements_report_v2c(
-                flights=flights_p90,
-                vehicle_models=vehicle_models,
-                base_config=config,
-                max_ev10=max_ev10,
-                max_ev18=max_ev18,
+
+            needs_expansion_p90 = _needs_fleet_expansion(
+                outputs=outputs_p90,
+                config=config,
             )
 
-            t = step(
-                t,
-                f"P90 fleet requirements report complete"
+            p90_base_check = pd.DataFrame(
+                [
+                    {
+                        "demand_mode": "P90",
+                        "arrival_sla_pct": _arrival_sla_pct(outputs_p90),
+                        "arrival_target_pct": config.arrival_sla_target_pct * 100.0,
+                        "shortfall_total": _shortfall_total(outputs_p90),
+                        "gap_vs_current_total": _fleet_gap_total(outputs_p90),
+                        "current_fleet_sufficient": int(
+                            _current_fleet_is_sufficient(outputs_p90)
+                        ),
+                        "needs_fleet_expansion": int(needs_expansion_p90),
+                    }
+                ]
             )
 
-            recommended_p90 = get_recommended_fleet_scenario(
-                fleet_report_p90
-            )
+            result["p90_base_check"] = p90_base_check
+            workbook_sheets["p90_base_check"] = p90_base_check
 
-            result["fleet_requirements_p90"] = fleet_report_p90
-            result["fleet_details_p90"] = fleet_details_p90
-            result["recommended_p90"] = recommended_p90
+            if (
+                fleet_report_policy == "always"
+                or (
+                    fleet_report_policy == "if_needed"
+                    and needs_expansion_p90
+                )
+            ):
+                fleet_report_p90, fleet_details_p90, recommended_p90 = (
+                    _run_incremental_fleet_expansion(
+                        flights=flights_p90,
+                        vehicle_models=vehicle_models,
+                        base_config=config,
+                        max_future_copies=max(max_ev10, max_ev18),
+                        demand_mode_label="p90",
+                    )
+                )
 
-            workbook_sheets["p90_fleet_requirements"] = fleet_report_p90
-            workbook_sheets["p90_recommended"] = recommended_p90
+                t = step(
+                    t,
+                    "P90 fleet expansion search complete"
+                )
+
+                result["fleet_requirements_p90"] = fleet_report_p90
+                result["fleet_details_p90"] = fleet_details_p90
+                result["recommended_p90"] = recommended_p90
+
+                workbook_sheets["p90_fleet_requirements"] = fleet_report_p90
+                workbook_sheets["p90_recommended"] = recommended_p90
+
+            else:
+                print(
+                    "\n[P90] Current fleet meets SLA and has no current-fleet gap. "
+                    "Skipping fleet expansion search."
+                )
+
+                empty_report = pd.DataFrame(
+                    columns=[
+                        "scenario",
+                        "future_copies_per_model",
+                        "arrival_sla_pct",
+                        "arrival_target_pct",
+                        "meets_sla",
+                        "shortfall_total",
+                        "gap_vs_current_total",
+                        "current_fleet_sufficient",
+                        "future_bought",
+                        "scenario_passes",
+                    ]
+                )
+
+                result["fleet_requirements_p90"] = empty_report
+                result["fleet_details_p90"] = {}
+                result["recommended_p90"] = p90_base_check
+
+                workbook_sheets["p90_fleet_requirements"] = empty_report
+                workbook_sheets["p90_recommended"] = p90_base_check
 
     # --------------------------------------------------
     # Export workbook
