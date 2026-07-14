@@ -620,13 +620,60 @@ def prepare_model_data(
 
     # Overlap pairs.
     amb_overlap_pairs = []
+
     for r in amb_vehicles:
-        options = [(f, r, m, amb_interval[(f, r, m)]) for f in flights_list for m in vertical_modes]
-        for (f1, r1, m1, int1), (f2, r2, m2, int2) in combinations(options, 2):
-            if f1 == f2:
-                continue
-            if _intervals_overlap(int1[0], int1[1], int2[0], int2[1]):
-                amb_overlap_pairs.append((f1, r, m1, f2, r, m2))
+
+        options = []
+
+        for f in flights_list:
+            for m in vertical_modes:
+
+                start, end = amb_interval[(f, r, m)]
+
+                options.append(
+                    (
+                        f,
+                        r,
+                        m,
+                        float(start),
+                        float(end),
+                    )
+                )
+
+        # Sort by start time
+        options.sort(key=lambda x: x[3])
+
+        n = len(options)
+
+        for i in range(n):
+
+            f1, _, m1, s1, e1 = options[i]
+
+            j = i + 1
+
+            while j < n:
+
+                f2, _, m2, s2, e2 = options[j]
+
+                # Because sorted by start time:
+                # if next interval starts after current ends
+                # there can be no more overlaps.
+                if s2 >= e1:
+                    break
+
+                if f1 != f2:
+                    amb_overlap_pairs.append(
+                        (
+                            f1,
+                            r,
+                            m1,
+                            f2,
+                            r,
+                            m2,
+                        )
+                    )
+
+                j += 1
 
     t = step(
         t,
@@ -634,13 +681,56 @@ def prepare_model_data(
     )
 
     mini_overlap_pairs = []
+
     for r in mini_vehicles:
-        options = [(f, r, m, mini_interval[(f, m)]) for f in flights_list for m in minibus_modes]
-        for (f1, r1, m1, int1), (f2, r2, m2, int2) in combinations(options, 2):
-            if f1 == f2:
-                continue
-            if _intervals_overlap(int1[0], int1[1], int2[0], int2[1]):
-                mini_overlap_pairs.append((f1, r, m1, f2, r, m2))
+
+        options = []
+
+        for f in flights_list:
+            for m in minibus_modes:
+
+                start, end = mini_interval[(f, m)]
+
+                options.append(
+                    (
+                        f,
+                        r,
+                        m,
+                        float(start),
+                        float(end),
+                    )
+                )
+
+        options.sort(key=lambda x: x[3])
+
+        n = len(options)
+
+        for i in range(n):
+
+            f1, _, m1, s1, e1 = options[i]
+
+            j = i + 1
+
+            while j < n:
+
+                f2, _, m2, s2, e2 = options[j]
+
+                if s2 >= e1:
+                    break
+
+                if f1 != f2:
+                    mini_overlap_pairs.append(
+                        (
+                            f1,
+                            r,
+                            m1,
+                            f2,
+                            r,
+                            m2,
+                        )
+                    )
+
+                j += 1
 
     t = step(
         t,
