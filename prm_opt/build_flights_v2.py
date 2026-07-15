@@ -252,10 +252,18 @@ def build_flights_v2(
     x["_is_wchr"] = (x["SSR Code"] == "WCHR").astype(int)
     x["_is_other"] = (~x["SSR Code"].isin(["WCHC", "WCHS", "WCHR"])).astype(int)
 
-    # Wheelchair-space demand:
-    # WCHC and WCHS own-chair take wheelchair capacity.
+    # Wheelchair-spacewheelchair space.
+    # WCHS requires a wheelchair space only if travelling in own chair.
     # Everyone else takes seated capacity.
-    x["_is_wc"] = x["Has Own Chair"].astype(int)
+    x["_is_wc"] = (
+        (x["SSR Code"] == "WCHC")
+        |
+        (
+            (x["SSR Code"] == "WCHS")
+            & (x["Has Own Chair"] == 1)
+        )
+    ).astype(int)
+
     x["_is_seat"] = 1 - x["_is_wc"]
 
     # --------------------------------------------------

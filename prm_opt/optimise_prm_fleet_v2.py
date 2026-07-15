@@ -1003,6 +1003,59 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
 
     model.amb_assignment = pyo.Constraint(model.F, model.VERTICAL_MODES, rule=amb_assignment_rule)
 
+   # ---------------------------------------------------------
+    # Block bad solo-ambulift arrival mode
+    # ---------------------------------------------------------
+    #
+    # This only applies to SA:
+    #   SA = ambulift does vertical + horizontal movement.
+    #
+    # It does NOT apply to CM / CP:
+    #   CM = ambulift vertical only + minibus horizontal
+    #   CP = ambulift vertical only + pusher horizontal
+    #
+    # Reason:
+    # If there are many wheelchair PRMs, multiple vertical cycles may be
+    # unavoidable because only one CAT / ambulift can attach.
+    # We should not make that infeasible.
+    #
+    # But we should stop the model from using SA where the same ambulift
+    # would need repeated full aircraft-to-terminal trips and later PRMs
+    # would only start after the SLA target.
+
+    def no_late_sa_arrival_mode_rule(mdl, f):
+
+        if data["Arrival"][f] != 1:
+            return pyo.Constraint.Skip
+
+        late_values = [
+            int(
+                data["amb_late_prms"].get(
+                    (f, r, "SA"),
+                    0,
+                )
+            )
+            for r in mdl.R_AMB
+        ]
+
+        if len(late_values) == 0:
+            return pyo.Constraint.Skip
+
+        # If at least one ambulift can do SA without late PRMs,
+        # keep SA available.
+        if min(late_values) <= 0:
+            return pyo.Constraint.Skip
+
+        # Otherwise, SA is not a valid mode for this arrival.
+        # The model should choose CM or CP instead.
+        return mdl.x[f, "SA"] == 0
+
+
+    model.no_late_sa_arrival_mode = pyo.Constraint(
+        model.F,
+        rule=no_late_sa_arrival_mode_rule,
+    )
+
     # ---------------------------------------------------------
     # Minibus capacity for CM / SM
     # ---------------------------------------------------------
@@ -1195,11 +1248,10 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
 
         arrival_trip_sla_penalty = cfg.penalty_arrival_trip_sla_prm * (
             sum(
-                data["amb_late_prms"][(f, r, mm)]
-                * mdl.amb[f, r, mm]
+                data["amb_late_prms"][(f, r, "SA")]
+                * mdl.amb[f, r, "SA"]
                 for f in mdl.F
                 for r in mdl.R_AMB
-                for mm in mdl.VERTICAL_MODES
             )
         )
 
@@ -1370,6 +1422,7 @@ def extract_solution(
             for m in data["MINIBUS_MODES"]:
                 if pyo.value(model.mini[f, r, m]) > 0.5:
                     s, e = data["mini_interval"][(f, m)]
+
                     assignment_rows.append(
                         {
                             "flight_key": f,
@@ -1380,9 +1433,31 @@ def extract_solution(
                                 f"{data['vehicle_wccap'][r]}wc"
                             ),
                             "mode": m,
+
+                            "amb_service_role": np.nan,
+                            "mini_service_role": (
+                                "horizontal_after_vertical"
+                                if m == "CM"
+                                else "solo_horizontal"
+                            ),
+
+                            "uses_spin_duration": 0,
+
                             "interval_start_min": s,
                             "interval_end_min": e,
                             "trips": np.nan,
+
+                            "amb_trip_duration_mins": np.nan,
+                            "mini_trip_duration_mins": float(e - s),
+                            "estimated_late_arrival_prms": 0,
+
+                            "total_prms": data["P_total"][f],
+                            "seat_prms": data["D_seat"][f],
+                            "wc_prms": data["D_wc"][f],
+                            "vertical_prms": data["D_vert_total"][f],
+                            "vertical_seat_prms": data["D_vert_seat"][f],
+                            "vertical_wc_prms": data["D_vert_wc"][f],
+
                             "seatcap": data["vehicle_seatcap"][r],
                             "wccap": data["vehicle_wccap"][r],
                             "is_future": data["vehicle_is_future"][r],
@@ -1409,8 +1484,48 @@ def extract_solution(
     # SLA REPORTING
     # --------------------------------------------------
 
-    df_flight_out["arrival_breach"] = 0
     df_flight_out["departure_breach"] = 0
+
+    # Default, overwritten below where assignment data exists.
+    df_flight_out["estimated_late_arrival_prms"] = 0
+
+    if len(df_assign) > 0 and "estimated_late_arrival_prms" in df_assign.columns:
+
+        late_arrival_map = (
+            df_assign[
+                (df_assign["vehicle_type"] == "Amb")
+                & (df_assign["mode"] == "SA")
+            ]
+            .groupby("flight_key")["estimated_late_arrival_prms"]
+            .sum()
+            .rename("estimated_late_arrival_prms")
+            .reset_index()
+        )
+
+        df_flight_out = df_flight_out.drop(
+            columns=[
+                c for c in ["estimated_late_arrival_prms"]
+                if c in df_flight_out.columns
+            ]
+        )
+
+        df_flight_out = df_flight_out.merge(
+            late_arrival_map,
+            on="flight_key",
+            how="left",
+        )
+
+        df_flight_out["estimated_late_arrival_prms"] = (
+            pd.to_numeric(
+                df_flight_out["estimated_late_arrival_prms"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .astype(int)
+        )
+
+    else:
+        df_flight_out["estimated_late_arrival_prms"] = 0
 
     arrival_mask = (
         df_flight_out["arr_dep"] == "A"
@@ -1419,6 +1534,13 @@ def extract_solution(
     departure_mask = (
         df_flight_out["arr_dep"] == "D"
     )
+
+    df_flight_out["arrival_breach"] = (
+        arrival_mask
+        & (
+            df_flight_out["estimated_late_arrival_prms"] > 0
+        )
+    ).astype(int)
 
     arrival_flights = int(arrival_mask.sum())
     arrival_breaches = int(df_flight_out["arrival_breach"].sum())
@@ -1767,19 +1889,56 @@ def extract_solution(
             ]
         )
 
-    df_sla = pd.DataFrame(
-    [{
-        "arrival_flights": arrival_flights,
-        "arrival_breaches": arrival_breaches,
-        "arrival_flight_sla_pct": arrival_flight_sla_pct,
-        "arrival_target_pct": (
-            data["config"].arrival_sla_target_pct * 100
-        ),
+    arrival_prms_total = int(
+        df_flight_out.loc[
+            arrival_mask,
+            "P_total",
+        ]
+        .fillna(0)
+        .astype(int)
+        .sum()
+    )
 
-        "departure_flights": departure_flights,
-        "departure_breaches": departure_breaches,
-        "departure_sla_pct": departure_sla_pct,
-    }]
+    arrival_late_prms = int(
+        df_flight_out.loc[
+            arrival_mask,
+            "estimated_late_arrival_prms",
+        ]
+        .fillna(0)
+        .astype(int)
+        .sum()
+    )
+
+    arrival_sla_pct = (
+        100.0
+        if arrival_prms_total == 0
+        else 100.0
+        * (
+            1.0
+            - arrival_late_prms / arrival_prms_total
+        )
+    )
+
+    df_sla = pd.DataFrame(
+        [
+            {
+                "arrival_flights": arrival_flights,
+                "arrival_breaches": arrival_breaches,
+                "arrival_flight_sla_pct": arrival_flight_sla_pct,
+
+                "arrival_prms_total": arrival_prms_total,
+                "arrival_late_prms": arrival_late_prms,
+                "arrival_sla_pct": arrival_sla_pct,
+
+                "arrival_target_pct": (
+                    data["config"].arrival_sla_target_pct * 100
+                ),
+
+                "departure_flights": departure_flights,
+                "departure_breaches": departure_breaches,
+                "departure_sla_pct": departure_sla_pct,
+            }
+        ]
     )
 
     return {
