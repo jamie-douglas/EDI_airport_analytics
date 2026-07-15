@@ -550,6 +550,38 @@ def run_s25_s26_v2(
                 config=config,
             )
 
+            sla_pct = _arrival_sla_pct(outputs_p100)
+            target_pct = float(config.arrival_sla_target_pct) * 100.0
+
+            shortfall_total = _shortfall_total(outputs_p100)
+            gap_total = _fleet_gap_total(outputs_p100)
+
+            current_ok = _current_fleet_is_sufficient(outputs_p100)
+
+            if needs_expansion_p100:
+
+                reasons = []
+
+                if sla_pct < target_pct:
+                    reasons.append(
+                        f"SLA {sla_pct:.2f}% < target {target_pct:.2f}%"
+                    )
+
+                if shortfall_total > 1e-6:
+                    reasons.append(
+                        f"Shortfall={shortfall_total:.2f}"
+                    )
+
+                if gap_total > 0:
+                    reasons.append(
+                        f"Gap={gap_total}"
+                    )
+
+                print(
+                    "\n[P100] Fleet expansion triggered because: "
+                    + "; ".join(reasons)
+                )
+
             p100_base_check = pd.DataFrame(
                 [
                     {
@@ -693,6 +725,38 @@ def run_s25_s26_v2(
                 outputs=outputs_p90,
                 config=config,
             )
+
+            sla_pct = _arrival_sla_pct(outputs_p90)
+            target_pct = float(config.arrival_sla_target_pct) * 100.0
+
+            shortfall_total = _shortfall_total(outputs_p90)
+            gap_total = _fleet_gap_total(outputs_p90)
+
+            current_ok = _current_fleet_is_sufficient(outputs_p90)
+
+            if needs_expansion_p90:
+
+                reasons = []
+
+                if sla_pct < target_pct:
+                    reasons.append(
+                        f"SLA {sla_pct:.2f}% < target {target_pct:.2f}%"
+                    )
+
+                if shortfall_total > 1e-6:
+                    reasons.append(
+                        f"Shortfall={shortfall_total:.2f}"
+                    )
+
+                if gap_total > 0:
+                    reasons.append(
+                        f"Gap={gap_total}"
+                    )
+
+                print(
+                    "\n[P90] Fleet expansion triggered because: "
+                    + "; ".join(reasons)
+                )
 
             p90_base_check = pd.DataFrame(
                 [

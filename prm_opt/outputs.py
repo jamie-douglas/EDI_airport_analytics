@@ -514,15 +514,19 @@ def baseline_s1_vehicle_curves_capacity(
     df["_dur_mini_mins"] = mini_dur
     df["_dur_push_mins"] = push_dur
 
-    
-    df["_need_amb"] = dec.isin(["Ambulift Only"]).astype(int)
-    df["_need_mini"] = dec.isin(["Mini Bus Only"]).astype(int)
 
-    # FIX: split "Both" across vehicles (not double counting)
+    df["_need_amb"] = dec.isin(["Ambulift Only"]).astype(float)
+    df["_need_mini"] = dec.isin(["Mini Bus Only"]).astype(float)
+
+    # "Both" means the passenger consumes both:
+    #   - an ambulift component
+    #   - a minibus component
+    #
+
     both_mask = dec == "Both"
 
-    df["_need_amb"] += 0.5 * both_mask.astype(float)
-    df["_need_mini"] += 0.5 * both_mask.astype(float)
+    df["_need_amb"] += both_mask.astype(float)
+    df["_need_mini"] += both_mask.astype(float)
 
     df["_need_push"] = 0
     if count_no_vehicle_as_push:
