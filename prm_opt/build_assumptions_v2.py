@@ -109,9 +109,10 @@ def build_penetration_and_ssr_mix(
 
 def build_tau_mode_params(
     df_prm: pd.DataFrame,
+    config=None,
 ) -> Dict[str, Any]:
 
-    cols = [
+    old_cols = [
         "tau_amb_mins",
         "tau_mini_mins",
         "tau_push_mins",
@@ -119,39 +120,49 @@ def build_tau_mode_params(
 
     missing = [
         c
-        for c in cols
+        for c in old_cols
         if c not in df_prm.columns
     ]
 
+    # V2 no longer requires passenger-level tau columns.
+    # The optimiser uses OptimiserConfig directly:
+    #   tau_amb_solo_mins
+    #   tau_amb_comb_mins
+    #   tau_mini_mins
+    #   tau_push_mins
+    #
+    # Therefore if old tau columns are not present, fall back to config
+    # instead of failing.
     if missing:
-        raise ValueError(
-            f"Missing tau columns: {missing}"
-        )
+
+        if config is None:
+            return {
+                "by_ssr": pd.DataFrame(),
+                "global": {},
+            }
+
+        return {
+            "by_ssr": pd.DataFrame(),
+            "global": {
+                "tau_amb_solo_mins": float(config.tau_amb_solo_mins),
+                "tau_amb_comb_mins": float(config.tau_amb_comb_mins),
+                "tau_mini_mins": float(config.tau_mini_mins),
+                "tau_push_mins": float(config.tau_push_mins),
+            },
+        }
 
     by_ssr = (
         df_prm.groupby(
             ["SSR Code", "A/D"]
-        )[cols]
+        )[old_cols]
         .median()
         .reset_index()
     )
 
     global_tau = {
-        "tau_amb_mins":
-            float(
-                df_prm["tau_amb_mins"]
-                .median()
-            ),
-        "tau_mini_mins":
-            float(
-                df_prm["tau_mini_mins"]
-                .median()
-            ),
-        "tau_push_mins":
-            float(
-                df_prm["tau_push_mins"]
-                .median()
-            ),
+        "tau_amb_mins": float(df_prm["tau_amb_mins"].median()),
+        "tau_mini_mins": float(df_prm["tau_mini_mins"].median()),
+        "tau_push_mins": float(df_prm["tau_push_mins"].median()),
     }
 
     return {
@@ -347,6 +358,7 @@ def build_assumptions_v2(
     *,
     s25_start: str,
     s25_end: str,
+    config=None,
 ):
 
     df_prm = ingest_s25_v2(
@@ -368,7 +380,8 @@ def build_assumptions_v2(
 
     tau_mode_params = (
         build_tau_mode_params(
-            df_prm
+            df_prm,
+            config=config,
         )
     )
 

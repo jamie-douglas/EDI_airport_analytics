@@ -435,6 +435,7 @@ def run_s25_s26_v2(
             assumptions = build_assumptions_v2(
                 s25_start=s25_start,
                 s25_end=assumption_end,
+                config=config,
             )
 
             penetration_rates = assumptions["penetration_rates"]
