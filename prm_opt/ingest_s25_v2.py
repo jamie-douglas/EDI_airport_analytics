@@ -306,7 +306,7 @@ def build_turn_pairs_from_flight_data(
             cand["Scheduled Flight DT"] - a["Scheduled Flight DT"]
         ).dt.total_seconds() / 60.0
 
-        cand = cand[(cand["gap_mins"] > 0) & (cand["gap_mins"] <= 240)]
+        cand = cand[(cand["gap_mins"] > 0) & (cand["gap_mins"] <= 120)]
         if len(cand) == 0:
             continue
 

@@ -298,6 +298,7 @@ def main(
     print("[1/4] Baseline thresholds from Summer…")
     fl_su = load_flights(summer_start, summer_end)
     sec_su = load_security(summer_start, summer_end)
+
     t1 = step(t0, f"Summer flights/security: {len(fl_su):,} / {len(sec_su):,}")
 
     if a_threshold is not None and b_threshold is not None:
@@ -317,7 +318,17 @@ def main(
         s, e = forward_window(w)
         specs.append(WindowSpec(name=f"{w}w", start=s, end=e, label=f"({w}-week)", include_daily=True))
     if include_summer:
-        specs.append(WindowSpec(name="summer", start=summer_start, end=summer_end, label="(Summer)", include_daily=False))
+        # Keep summer analysis forward-looking by starting no earlier than today.
+        summer_effective_start = max(summer_start, datetime.today().strftime("%Y-%m-%d"))
+        specs.append(
+            WindowSpec(
+                name="summer",
+                start=summer_effective_start,
+                end=summer_end,
+                label="(Summer)",
+                include_daily=False,
+            )
+        )
 
     
     # -----------------------------------------------------------
