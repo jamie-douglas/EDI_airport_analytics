@@ -228,10 +228,10 @@ def _summarise_one_scenario(
         "scenario": scenario_name,
 
         "arrival_prms":
-            sla_row.get("arrival_prms"),
+        sla_row.get("arrival_prms"),
 
         "arrival_prm_breaches":
-            sla_row.get("arrival_prm_breaches"),
+        sla_row.get("arrival_prm_breaches"),
 
         "arrival_sla_pct":
             sla_row.get("arrival_sla_pct"),
@@ -398,11 +398,12 @@ def run_fleet_requirements_report_v2c(
         report = report.sort_values(
             [
                 "arrival_meets_target",
-                "future_minibuses_bought",
                 "shortfall_value",
+                "future_minibuses_bought",
+                "arrival_sla_pct",
                 "objective_value",
             ],
-            ascending=[False, True, True, True],
+            ascending=[False, True, True, False, True],
         ).reset_index(drop=True)
 
     return report, detailed_outputs

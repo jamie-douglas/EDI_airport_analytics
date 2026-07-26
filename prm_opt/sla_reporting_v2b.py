@@ -100,6 +100,14 @@ def add_passenger_sla_reporting(
 
     flight_out = outputs["flight_assignments"].copy()
 
+    if "estimated_late_arrival_prms" not in flight_out.columns:
+        flight_out["estimated_late_arrival_prms"] = 0
+
+    flight_out["estimated_late_arrival_prms"] = pd.to_numeric(
+        flight_out["estimated_late_arrival_prms"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+
     if "shortfalls" in outputs and outputs["shortfalls"] is not None:
         shortfalls = outputs["shortfalls"].copy()
     else:
@@ -221,11 +229,17 @@ def add_passenger_sla_reporting(
         - flight_out.loc[valid_arrival_start, "scheduled_time"]
     ).dt.total_seconds() / 60.0
 
-    # Current V2B breach rule:
-    # Arrival breach if:
-    #   - any shortfall exists, OR
-    #   - first assigned service start is after scheduled + SLA target.
-    flight_out["arrival_breach"] = 0
+    flight_out["arrival_prm_breaches"] = np.where(
+        arrival_mask,
+        flight_out["estimated_late_arrival_prms"],
+        0,
+    ).astype(int)
+    
+    flight_out["arrival_breach"] = np.where(
+        arrival_mask & (flight_out["arrival_prm_breaches"] > 0),
+        1,
+        0,
+    ).astype(int)
 
     flight_out.loc[
         arrival_mask
@@ -246,11 +260,6 @@ def add_passenger_sla_reporting(
     # --------------------------------------------------
     # Passenger-based breach counts
     # --------------------------------------------------
-    flight_out["arrival_prm_breaches"] = np.where(
-        arrival_mask,
-        flight_out["P_total"] * flight_out["arrival_breach"],
-        0,
-    ).astype(int)
 
     flight_out["departure_prm_breaches"] = 0
 

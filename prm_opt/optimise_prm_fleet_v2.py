@@ -128,7 +128,14 @@ def expand_vehicle_models(
                 }
             )
         else:
-            for i in range(1, int(max_future_copies_per_model) + 1):
+            n_copies = int(
+                spec.get(
+                    "max_copies",
+                    max_future_copies_per_model,
+                )
+            )
+
+            for i in range(1, n_copies + 1):
                 rows.append(
                     {
                         "vehicle_id": f"{vehicle_id}__FUT_{i:02d}",
@@ -1003,34 +1010,34 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
 
     model.amb_assignment = pyo.Constraint(model.F, model.VERTICAL_MODES, rule=amb_assignment_rule)
 
-   # ---------------------------------------------------------
-    # Block bad solo-ambulift arrival mode
+    # ---------------------------------------------------------
+    # Solo Ambulift multi-trip exclusion for arrivals
     # ---------------------------------------------------------
     #
-    # This only applies to SA:
-    #   SA = ambulift does vertical + horizontal movement.
+    # SA means the Ambulift performs both:
+    #   1) the aircraft vertical process
+    #   2) the horizontal aircraft-to-terminal movement
     #
-    # It does NOT apply to CM / CP:
-    #   CM = ambulift vertical only + minibus horizontal
-    #   CP = ambulift vertical only + pusher horizontal
+    # Operational rule:
+    #   If no available Ambulift can cover the full SA demand in a single
+    #   SA trip, then SA is not allowed for that arrival.
     #
-    # Reason:
-    # If there are many wheelchair PRMs, multiple vertical cycles may be
-    # unavoidable because only one CAT / ambulift can attach.
-    # We should not make that infeasible.
+    # In that case, the model must choose a combined vertical mode:
+    #   CM = Ambulift vertical-only + Minibus horizontal
+    #   CP = Ambulift vertical-only + Pusher horizontal
     #
-    # But we should stop the model from using SA where the same ambulift
-    # would need repeated full aircraft-to-terminal trips and later PRMs
-    # would only start after the SLA target.
+    # This rule does not block CM/CP, because in those modes the Ambulift
+    # is only responsible for the vertical component and may need multiple
+    # sequential vertical trips if vertical demand requires it.
+    def no_multi_trip_sa_mode_rule(mdl, f):
 
-    def no_late_sa_arrival_mode_rule(mdl, f):
 
-        if data["Arrival"][f] != 1:
+        if data["NeedVertical"][f] != 1:
             return pyo.Constraint.Skip
 
-        late_values = [
+        sa_trip_values = [
             int(
-                data["amb_late_prms"].get(
+                data["amb_trips"].get(
                     (f, r, "SA"),
                     0,
                 )
@@ -1038,22 +1045,22 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
             for r in mdl.R_AMB
         ]
 
-        if len(late_values) == 0:
+        if len(sa_trip_values) == 0:
             return pyo.Constraint.Skip
 
-        # If at least one ambulift can do SA without late PRMs,
+        # If at least one Ambulift can perform SA in one full trip,
         # keep SA available.
-        if min(late_values) <= 0:
+        if min(sa_trip_values) <= 1:
             return pyo.Constraint.Skip
 
-        # Otherwise, SA is not a valid mode for this arrival.
-        # The model should choose CM or CP instead.
+        # Otherwise, do not allow the Ambulift to perform repeated
+        # full aircraft-to-terminal SA trips.
+        # The model must choose CM or CP instead.
         return mdl.x[f, "SA"] == 0
 
-
-    model.no_late_sa_arrival_mode = pyo.Constraint(
+    model.no_multi_trip_sa_mode = pyo.Constraint(
         model.F,
-        rule=no_late_sa_arrival_mode_rule,
+        rule=no_multi_trip_sa_mode_rule,
     )
 
     # ---------------------------------------------------------
@@ -1248,10 +1255,11 @@ def build_pyomo_model(data: Dict[str, Any]) -> pyo.ConcreteModel:
 
         arrival_trip_sla_penalty = cfg.penalty_arrival_trip_sla_prm * (
             sum(
-                data["amb_late_prms"][(f, r, "SA")]
-                * mdl.amb[f, r, "SA"]
+                data["amb_late_prms"][(f, r, mm)]
+                * mdl.amb[f, r, mm]
                 for f in mdl.F
                 for r in mdl.R_AMB
+                for mm in mdl.VERTICAL_MODES
             )
         )
 
@@ -1494,7 +1502,7 @@ def extract_solution(
         late_arrival_map = (
             df_assign[
                 (df_assign["vehicle_type"] == "Amb")
-                & (df_assign["mode"] == "SA")
+                & (df_assign["mode"].isin(["SA", "CM", "CP"]))
             ]
             .groupby("flight_key")["estimated_late_arrival_prms"]
             .sum()

@@ -210,6 +210,96 @@ def _needs_fleet_expansion(
         or not current_ok
     )
 
+def _future_minibus_model_names(
+    vehicle_models: Dict[str, Dict[str, Any]],
+) -> list:
+    """
+    Return future minibus model names from VEHICLE_MODELS.
+    """
+    return [
+        k
+        for k, v in vehicle_models.items()
+        if bool(v.get("is_future", False))
+        and v.get("type") == "Mini"
+    ]
+
+
+def _future_minibus_allocations(
+    future_models: list[str],
+    total_future_candidates: int,
+) -> list[Dict[str, int]]:
+    """
+    Generate all allocations of total_future_candidates across future models.
+
+    Example:
+        future_models = ["MB_EV_10", "MB_EV_18"]
+        total_future_candidates = 2
+
+    Produces:
+        {"MB_EV_10": 0, "MB_EV_18": 2}
+        {"MB_EV_10": 1, "MB_EV_18": 1}
+        {"MB_EV_10": 2, "MB_EV_18": 0}
+    """
+    if len(future_models) == 0:
+        return []
+
+    allocations = []
+
+    def _recurse(idx, remaining, current):
+        if idx == len(future_models) - 1:
+            current[future_models[idx]] = remaining
+            allocations.append(current.copy())
+            return
+
+        model_name = future_models[idx]
+
+        for n in range(remaining + 1):
+            current[model_name] = n
+            _recurse(
+                idx=idx + 1,
+                remaining=remaining - n,
+                current=current,
+            )
+
+    _recurse(
+        idx=0,
+        remaining=int(total_future_candidates),
+        current={},
+    )
+
+    return allocations
+
+
+def _vehicle_models_with_future_allocation(
+    vehicle_models: Dict[str, Dict[str, Any]],
+    allocation: Dict[str, int],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build a scenario vehicle_models dictionary where each future minibus
+    model has a scenario-specific max_copies value.
+
+    Current vehicles are always retained.
+    Future vehicles are retained only if their allocated count is > 0.
+    """
+    out = {}
+
+    for k, v in vehicle_models.items():
+        is_future = bool(v.get("is_future", False))
+
+        if not is_future:
+            out[k] = v.copy()
+            continue
+
+        n_copies = int(allocation.get(k, 0))
+
+        if n_copies <= 0:
+            continue
+
+        spec = v.copy()
+        spec["max_copies"] = n_copies
+        out[k] = spec
+
+    return out
 
 def _run_incremental_fleet_expansion(
     *,
@@ -223,113 +313,247 @@ def _run_incremental_fleet_expansion(
     Incremental future fleet search.
 
     Logic:
-      1. Try +1 future copy per future model.
-      2. Check SLA and current/future sufficiency.
-      3. Stop as soon as the scenario passes.
-      4. If no scenario passes, return all attempted scenarios.
+      1. Start with 1 total future minibus candidate.
+      2. Try all allocations of that total across future minibus models.
+      3. Check SLA and shortfall.
+      4. If no allocation passes, increase total future candidates by 1.
+      5. Stop as soon as a passing scenario is found.
 
-    This avoids brute-forcing every fleet scenario once a passing scenario is found.
+    Important:
+      future_total_candidates is the number of candidate future vehicles made
+      available to the optimiser.
+
+      future_bought is the number of future vehicles the optimiser actually buys.
+
+    The recommendation should use future_bought, not future_total_candidates.
     """
 
     report_rows = []
     detailed_outputs = {}
 
-    for n in range(1, int(max_future_copies) + 1):
+    future_models = _future_minibus_model_names(
+        vehicle_models
+    )
 
-        scenario_name = f"{demand_mode_label}_future_plus_{n}"
+    if len(future_models) == 0:
+        return pd.DataFrame(), {}, pd.DataFrame()
 
-        scenario_config = replace(
-            base_config,
-            max_future_copies_per_model=n,
+    for total_future_candidates in range(
+        1,
+        int(max_future_copies) + 1,
+    ):
+
+        allocations = _future_minibus_allocations(
+            future_models=future_models,
+            total_future_candidates=total_future_candidates,
         )
 
         print(
-            f"\n[{demand_mode_label.upper()}] Running fleet expansion scenario: "
-            f"+{n} future copy per future model"
+            f"\n[{demand_mode_label.upper()}] Testing "
+            f"{total_future_candidates} total future minibus candidate(s)"
         )
 
-        outputs = run_single_demand_mode(
-            flights=flights,
-            vehicle_models=vehicle_models,
-            config=scenario_config,
-        )
+        for allocation in allocations:
 
-        detailed_outputs[scenario_name] = outputs
-
-        sla_pct = _arrival_sla_pct(outputs)
-        shortfall_total = _shortfall_total(outputs)
-        gap_total = _fleet_gap_total(outputs)
-        current_ok = _current_fleet_is_sufficient(outputs)
-
-        fleet = outputs.get("fleet_summary", pd.DataFrame())
-
-        if fleet is not None and len(fleet) > 0 and "bought" in fleet.columns:
-            future_bought = int(
-                fleet.loc[
-                    fleet["is_future"].astype(int) == 1,
-                    "bought",
-                ].sum()
+            allocation_label = "_".join(
+                [
+                    f"{k}_{v}"
+                    for k, v in allocation.items()
+                    if int(v) > 0
+                ]
             )
-        else:
-            future_bought = 0
 
-        target_pct = float(scenario_config.arrival_sla_target_pct) * 100.0
+            if allocation_label == "":
+                allocation_label = "none"
 
-        meets_sla = int(sla_pct >= target_pct)
-        scenario_passes = (
-            meets_sla == 1
-            and shortfall_total <= 1e-6
-        )
+            scenario_name = (
+                f"{demand_mode_label}_future_total_"
+                f"{total_future_candidates}_{allocation_label}"
+            )
 
-        report_rows.append(
-            {
-                "scenario": scenario_name,
-                "future_copies_per_model": n,
-                "arrival_sla_pct": sla_pct,
-                "arrival_target_pct": target_pct,
-                "meets_sla": meets_sla,
-                "shortfall_total": shortfall_total,
-                "gap_vs_current_total": gap_total,
-                "current_fleet_sufficient": int(current_ok),
-                "future_bought": future_bought,
-                "scenario_passes": int(scenario_passes),
-            }
-        )
+            scenario_vehicle_models = (
+                _vehicle_models_with_future_allocation(
+                    vehicle_models=vehicle_models,
+                    allocation=allocation,
+                )
+            )
 
-        if scenario_passes:
+            scenario_config = replace(
+                base_config,
+                max_future_copies_per_model=0,
+            )
+
             print(
-                f"[{demand_mode_label.upper()}] Stopping fleet expansion: "
-                f"scenario +{n} meets SLA and has no shortfall."
+                f"\n[{demand_mode_label.upper()}] Running scenario "
+                f"{scenario_name} with allocation {allocation}"
             )
-            break
+
+            outputs = run_single_demand_mode(
+                flights=flights,
+                vehicle_models=scenario_vehicle_models,
+                config=scenario_config,
+            )
+
+            detailed_outputs[scenario_name] = outputs
+
+            sla_pct = _arrival_sla_pct(outputs)
+            shortfall_total = _shortfall_total(outputs)
+            gap_total = _fleet_gap_total(outputs)
+            current_ok = _current_fleet_is_sufficient(outputs)
+
+            fleet = outputs.get("fleet_summary", pd.DataFrame())
+
+            if (
+                fleet is not None
+                and len(fleet) > 0
+                and "bought" in fleet.columns
+            ):
+                future_bought = int(
+                    fleet.loc[
+                        fleet["is_future"].astype(int) == 1,
+                        "bought",
+                    ].sum()
+                )
+            else:
+                future_bought = 0
+
+            target_pct = (
+                float(scenario_config.arrival_sla_target_pct)
+                * 100.0
+            )
+
+            meets_sla = int(
+                sla_pct >= target_pct
+            )
+
+            scenario_passes = (
+                meets_sla == 1
+                and shortfall_total <= 1e-6
+            )
+
+            failure_reasons = []
+
+            if sla_pct < target_pct:
+                failure_reasons.append(
+                    f"SLA {sla_pct:.2f}% below target {target_pct:.2f}%"
+                )
+
+            if shortfall_total > 1e-6:
+                failure_reasons.append(
+                    f"shortfall {shortfall_total:.2f}"
+                )
+
+            if gap_total > 0:
+                failure_reasons.append(
+                    f"current fleet gap {gap_total}"
+                )
+
+            if scenario_passes:
+                print(
+                    f"[{demand_mode_label.upper()}] Scenario passes: "
+                    f"SLA {sla_pct:.2f}%, shortfall {shortfall_total:.2f}, "
+                    f"future vehicles bought {future_bought}"
+                )
+            else:
+                print(
+                    f"[{demand_mode_label.upper()}] Scenario does not pass: "
+                    + "; ".join(failure_reasons)
+                )
+
+            report_rows.append(
+                {
+                    "scenario": scenario_name,
+                    "future_total_candidates": total_future_candidates,
+                    "future_allocation": str(allocation),
+                    "arrival_sla_pct": sla_pct,
+                    "arrival_target_pct": target_pct,
+                    "meets_sla": meets_sla,
+                    "shortfall_total": shortfall_total,
+                    "gap_vs_current_total": gap_total,
+                    "current_fleet_sufficient": int(current_ok),
+                    "future_bought": future_bought,
+                    "scenario_passes": int(scenario_passes),
+                }
+            )
+
+            if scenario_passes:
+                fleet_report = pd.DataFrame(report_rows)
+
+                recommended = (
+                    fleet_report[
+                        fleet_report["scenario_passes"].astype(int) == 1
+                    ]
+                    .sort_values(
+                        [
+                            "future_bought",
+                            "future_total_candidates",
+                            "shortfall_total",
+                            "arrival_sla_pct",
+                        ],
+                        ascending=[
+                            True,
+                            True,
+                            True,
+                            False,
+                        ],
+                    )
+                    .head(1)
+                    .reset_index(drop=True)
+                )
+
+                if len(recommended) > 0:
+                    recommended[
+                        "recommended_vehicles_bought"
+                    ] = recommended[
+                        "future_bought"
+                    ]
+
+                print(
+                    f"[{demand_mode_label.upper()}] Recommended scenario: "
+                    f"{recommended.iloc[0]['scenario']}"
+                )
+
+                return (
+                    fleet_report,
+                    detailed_outputs,
+                    recommended,
+                )
 
     fleet_report = pd.DataFrame(report_rows)
 
     if len(fleet_report) > 0:
-        passed = fleet_report[
-            fleet_report["scenario_passes"].astype(int) == 1
-        ].copy()
-
-        if len(passed) > 0:
-            recommended = passed.head(1).reset_index(drop=True)
-        else:
-            recommended = (
-                fleet_report
-                .sort_values(
-                    [
-                        "arrival_sla_pct",
-                        "shortfall_total",
-                        "future_bought",
-                    ],
-                    ascending=[False, True, True],
-                )
-                .head(1)
-                .reset_index(drop=True)
+        recommended = (
+            fleet_report
+            .sort_values(
+                [
+                    "arrival_sla_pct",
+                    "shortfall_total",
+                    "future_bought",
+                ],
+                ascending=[
+                    False,
+                    True,
+                    True,
+                ],
             )
+            .head(1)
+            .reset_index(drop=True)
+        )
+
+        recommended[
+            "recommended_vehicles_bought"
+        ] = recommended[
+            "future_bought"
+        ]
+
     else:
         recommended = pd.DataFrame()
 
-    return fleet_report, detailed_outputs, recommended
+    return (
+        fleet_report,
+        detailed_outputs,
+        recommended,
+    )
 
 
 def run_s25_s26_v2(
@@ -536,7 +760,7 @@ def run_s25_s26_v2(
                 "p100_staff_jobs": outputs_p100["staff_jobs"],
                 "p100_shortfalls": outputs_p100["shortfalls"],
                 "p100_sla_summary": outputs_p100["sla_summary"],
-                "p100_arrival_breaches": outputs_p100.get(
+                "p100_arrival_breach_details": outputs_p100.get(
                     "arrival_breach_details",
                     pd.DataFrame(),
                 ),
@@ -561,26 +785,26 @@ def run_s25_s26_v2(
 
             if needs_expansion_p100:
 
-                reasons = []
+                trigger_reason = []
 
                 if sla_pct < target_pct:
-                    reasons.append(
-                        f"SLA {sla_pct:.2f}% < target {target_pct:.2f}%"
+                    trigger_reason.append(
+                        "Arrival SLA below target"
                     )
 
                 if shortfall_total > 1e-6:
-                    reasons.append(
-                        f"Shortfall={shortfall_total:.2f}"
+                    trigger_reason.append(
+                        "Vehicle shortfall exists"
                     )
 
                 if gap_total > 0:
-                    reasons.append(
-                        f"Gap={gap_total}"
+                    trigger_reason.append(
+                        "Current fleet gap"
                     )
 
                 print(
                     "\n[P100] Fleet expansion triggered because: "
-                    + "; ".join(reasons)
+                    + "; ".join(trigger_reason)
                 )
 
             p100_base_check = pd.DataFrame(
@@ -589,12 +813,14 @@ def run_s25_s26_v2(
                         "demand_mode": "P100",
                         "arrival_sla_pct": _arrival_sla_pct(outputs_p100),
                         "arrival_target_pct": config.arrival_sla_target_pct * 100.0,
+                        "late_arrival_prms": outputs_p100["sla_summary"].iloc[0].get("arrival_prm_breaches", 0),
                         "shortfall_total": _shortfall_total(outputs_p100),
                         "gap_vs_current_total": _fleet_gap_total(outputs_p100),
                         "current_fleet_sufficient": int(
                             _current_fleet_is_sufficient(outputs_p100)
                         ),
                         "needs_fleet_expansion": int(needs_expansion_p100),
+                        "fleet_trigger_reason": "; ".join(trigger_reason) if needs_expansion_p100 else "",
                     }
                 ]
             )
@@ -619,6 +845,7 @@ def run_s25_s26_v2(
                     )
                 )
 
+
                 t = step(
                     t,
                     "P100 fleet expansion search complete"
@@ -640,7 +867,8 @@ def run_s25_s26_v2(
                 empty_report = pd.DataFrame(
                     columns=[
                         "scenario",
-                        "future_copies_per_model",
+                        "future_total_candidates",
+                        "future_allocation",
                         "arrival_sla_pct",
                         "arrival_target_pct",
                         "meets_sla",
@@ -648,6 +876,7 @@ def run_s25_s26_v2(
                         "gap_vs_current_total",
                         "current_fleet_sufficient",
                         "future_bought",
+                        "recommended_vehicles_bought",
                         "scenario_passes",
                     ]
                 )
@@ -712,7 +941,7 @@ def run_s25_s26_v2(
                 "p90_staff_jobs": outputs_p90["staff_jobs"],
                 "p90_shortfalls": outputs_p90["shortfalls"],
                 "p90_sla_summary": outputs_p90["sla_summary"],
-                "p90_arrival_breaches": outputs_p90.get(
+                "p90_arrival_breach_details": outputs_p90.get(
                     "arrival_breach_details",
                     pd.DataFrame(),
                 ),
@@ -737,26 +966,26 @@ def run_s25_s26_v2(
 
             if needs_expansion_p90:
 
-                reasons = []
+                trigger_reason = []
 
                 if sla_pct < target_pct:
-                    reasons.append(
-                        f"SLA {sla_pct:.2f}% < target {target_pct:.2f}%"
+                    trigger_reason.append(
+                        "Arrival SLA below target"
                     )
 
                 if shortfall_total > 1e-6:
-                    reasons.append(
-                        f"Shortfall={shortfall_total:.2f}"
+                    trigger_reason.append(
+                        "Vehicle shortfall exists"
                     )
 
                 if gap_total > 0:
-                    reasons.append(
-                        f"Gap={gap_total}"
+                    trigger_reason.append(
+                        "Current fleet gap"
                     )
 
                 print(
                     "\n[P90] Fleet expansion triggered because: "
-                    + "; ".join(reasons)
+                    + "; ".join(trigger_reason)
                 )
 
             p90_base_check = pd.DataFrame(
@@ -765,12 +994,14 @@ def run_s25_s26_v2(
                         "demand_mode": "P90",
                         "arrival_sla_pct": _arrival_sla_pct(outputs_p90),
                         "arrival_target_pct": config.arrival_sla_target_pct * 100.0,
+                        "late_arrival_prms": outputs_p90["sla_summary"].iloc[0].get("arrival_prm_breaches", 0),
                         "shortfall_total": _shortfall_total(outputs_p90),
                         "gap_vs_current_total": _fleet_gap_total(outputs_p90),
                         "current_fleet_sufficient": int(
                             _current_fleet_is_sufficient(outputs_p90)
                         ),
                         "needs_fleet_expansion": int(needs_expansion_p90),
+                        "fleet_trigger_reason": "; ".join(trigger_reason) if needs_expansion_p90 else "",
                     }
                 ]
             )
@@ -816,7 +1047,8 @@ def run_s25_s26_v2(
                 empty_report = pd.DataFrame(
                     columns=[
                         "scenario",
-                        "future_copies_per_model",
+                        "future_total_candidates",
+                        "future_allocation",
                         "arrival_sla_pct",
                         "arrival_target_pct",
                         "meets_sla",
@@ -824,6 +1056,7 @@ def run_s25_s26_v2(
                         "gap_vs_current_total",
                         "current_fleet_sufficient",
                         "future_bought",
+                        "recommended_vehicles_bought",
                         "scenario_passes",
                     ]
                 )
