@@ -256,6 +256,7 @@ def build_stand_inputs(
     *,
     repo_root: Path,
     df_flights_s25: pd.DataFrame,
+    stand_plan_files= None,
 ):
 
     stands_dir = (
@@ -264,21 +265,31 @@ def build_stand_inputs(
         / "stands"
     )
 
-    june = (
-        stands_dir
-        / "stand_allocation-june.csv"
-    )
+    if stand_plan_files is not None:
 
-    july = (
-        stands_dir
-        / "stand_allocation-july.csv"
-    )
+        stand_csvs = [
+            Path(p)
+            for p in stand_plan_files
+            if Path(p).exists()
+        ]
 
-    stand_csvs = [
-        p
-        for p in [june, july]
-        if p.exists()
-    ]
+    else:
+
+        june = (
+            stands_dir
+            / "stand_allocation-june.csv"
+        )
+
+        july = (
+            stands_dir
+            / "stand_allocation-july.csv"
+        )
+
+        stand_csvs = [
+            p
+            for p in [june, july]
+            if p.exists()
+        ]
 
     if stand_csvs:
 
@@ -359,6 +370,7 @@ def build_assumptions_v2(
     s25_start: str,
     s25_end: str,
     config=None,
+    stand_plan_files=None,
 ):
 
     df_prm = ingest_s25_v2(
@@ -389,6 +401,7 @@ def build_assumptions_v2(
         build_stand_inputs(
             repo_root=Path(__file__).resolve().parents[2],
             df_flights_s25=df_flights,
+            stand_plan_files=stand_plan_files,
         )
     )
 

@@ -302,6 +302,7 @@ def build_stand_inputs(
     *,
     repo_root: Path,
     df_flights_s25: pd.DataFrame,
+    stand_plan_files= None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Construct stand inputs for S26.
@@ -314,10 +315,32 @@ def build_stand_inputs(
     """
 
     stands_dir = repo_root / "data" / "stands"
-    june = stands_dir / "stand_allocation-june.csv"
-    july = stands_dir / "stand_allocation-july.csv"
+    
+    if stand_plan_files is not None:
 
-    stand_csvs = [p for p in (june, july) if p.exists()]
+        stand_csvs = [
+            Path(p)
+            for p in stand_plan_files
+            if Path(p).exists()
+        ]
+
+    else:
+
+        june = (
+            stands_dir
+            / "stand_allocation-june.csv"
+        )
+
+        july = (
+            stands_dir
+            / "stand_allocation-july.csv"
+        )
+
+        stand_csvs = [
+            p
+            for p in [june, july]
+            if p.exists()
+        ]
     meta: Dict[str, Any] = {}
 
     if stand_csvs:

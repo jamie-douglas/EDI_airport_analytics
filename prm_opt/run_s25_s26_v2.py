@@ -555,6 +555,35 @@ def _run_incremental_fleet_expansion(
         recommended,
     )
 
+def _get_recommended_outputs(
+    *,
+    recommended: pd.DataFrame,
+    detailed_outputs: Dict[str, Dict[str, pd.DataFrame]],
+) -> Dict[str, pd.DataFrame]:
+    """
+    Return the optimiser outputs for the recommended scenario.
+
+    The base outputs are current-fleet only.
+    The recommended outputs are the scenario outputs where future vehicles
+    may have been added and bought.
+
+    This is the output set that will contain future vehicle rows such as:
+        MB_EV_18__FUT_01
+    in fleet_summary if the optimiser actually bought one.
+    """
+    if recommended is None or len(recommended) == 0:
+        return {}
+
+    if "scenario" not in recommended.columns:
+        return {}
+
+    scenario_name = recommended.iloc[0].get("scenario")
+
+    if scenario_name not in detailed_outputs:
+        return {}
+
+    return detailed_outputs[scenario_name]
+
 
 def run_s25_s26_v2(
     *,
@@ -845,6 +874,10 @@ def run_s25_s26_v2(
                     )
                 )
 
+                recommended_outputs_p100 = _get_recommended_outputs(
+                    recommended=recommended_p100,
+                    detailed_outputs=fleet_details_p100,
+                )
 
                 t = step(
                     t,
@@ -854,9 +887,41 @@ def run_s25_s26_v2(
                 result["fleet_requirements_p100"] = fleet_report_p100
                 result["fleet_details_p100"] = fleet_details_p100
                 result["recommended_p100"] = recommended_p100
+                result["recommended_outputs_p100"] = recommended_outputs_p100
 
                 workbook_sheets["p100_fleet_requirements"] = fleet_report_p100
                 workbook_sheets["p100_recommended"] = recommended_p100
+
+                if len(recommended_outputs_p100) > 0:
+                    workbook_sheets["p100_rec_fleet_summary"] = recommended_outputs_p100.get(
+                        "fleet_summary",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p100_rec_fleet_util"] = recommended_outputs_p100.get(
+                        "fleet_utilisation",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p100_rec_vehicle_sched"] = recommended_outputs_p100.get(
+                        "vehicle_schedule",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p100_rec_flt_assign"] = recommended_outputs_p100.get(
+                        "flight_assignments",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p100_rec_shortfalls"] = recommended_outputs_p100.get(
+                        "shortfalls",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p100_rec_sla_summary"] = recommended_outputs_p100.get(
+                        "sla_summary",
+                        pd.DataFrame(),
+                    )
 
             else:
                 print(
@@ -881,12 +946,54 @@ def run_s25_s26_v2(
                     ]
                 )
 
+                recommended_p100 = p100_base_check.copy()
+
+                recommended_p100["scenario"] = "current_fleet_only"
+                recommended_p100["future_total_candidates"] = 0
+                recommended_p100["future_allocation"] = ""
+                recommended_p100["future_bought"] = 0
+                recommended_p100["recommended_vehicles_bought"] = 0
+                recommended_p100["scenario_passes"] = 1
+
+                recommended_outputs_p100 = outputs_p100
+
                 result["fleet_requirements_p100"] = empty_report
                 result["fleet_details_p100"] = {}
-                result["recommended_p100"] = p100_base_check
+                result["recommended_p100"] = recommended_p100
+                result["recommended_outputs_p100"] = recommended_outputs_p100
 
                 workbook_sheets["p100_fleet_requirements"] = empty_report
-                workbook_sheets["p100_recommended"] = p100_base_check
+                workbook_sheets["p100_recommended"] = recommended_p100
+
+                workbook_sheets["p100_rec_fleet_summary"] = recommended_outputs_p100.get(
+                    "fleet_summary",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p100_rec_fleet_util"] = recommended_outputs_p100.get(
+                    "fleet_utilisation",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p100_rec_vehicle_sched"] = recommended_outputs_p100.get(
+                    "vehicle_schedule",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p100_rec_flt_assign"] = recommended_outputs_p100.get(
+                    "flight_assignments",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p100_rec_shortfalls"] = recommended_outputs_p100.get(
+                    "shortfalls",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p100_rec_sla_summary"] = recommended_outputs_p100.get(
+                    "sla_summary",
+                    pd.DataFrame(),
+                )
 
     # --------------------------------------------------
     # P90
@@ -1026,6 +1133,11 @@ def run_s25_s26_v2(
                     )
                 )
 
+                recommended_outputs_p90 = _get_recommended_outputs(
+                    recommended=recommended_p90,
+                    detailed_outputs=fleet_details_p90,
+                )
+
                 t = step(
                     t,
                     "P90 fleet expansion search complete"
@@ -1034,9 +1146,41 @@ def run_s25_s26_v2(
                 result["fleet_requirements_p90"] = fleet_report_p90
                 result["fleet_details_p90"] = fleet_details_p90
                 result["recommended_p90"] = recommended_p90
+                result["recommended_outputs_p90"] = recommended_outputs_p90
 
                 workbook_sheets["p90_fleet_requirements"] = fleet_report_p90
                 workbook_sheets["p90_recommended"] = recommended_p90
+
+                if len(recommended_outputs_p90) > 0:
+                    workbook_sheets["p90_rec_fleet_summary"] = recommended_outputs_p90.get(
+                        "fleet_summary",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p90_rec_fleet_util"] = recommended_outputs_p90.get(
+                        "fleet_utilisation",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p90_rec_vehicle_sched"] = recommended_outputs_p90.get(
+                        "vehicle_schedule",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p90_rec_flt_assign"] = recommended_outputs_p90.get(
+                        "flight_assignments",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p90_rec_shortfalls"] = recommended_outputs_p90.get(
+                        "shortfalls",
+                        pd.DataFrame(),
+                    )
+
+                    workbook_sheets["p90_rec_sla_summary"] = recommended_outputs_p90.get(
+                        "sla_summary",
+                        pd.DataFrame(),
+                    )
 
             else:
                 print(
@@ -1061,12 +1205,54 @@ def run_s25_s26_v2(
                     ]
                 )
 
+                recommended_p90 = p90_base_check.copy()
+
+                recommended_p90["scenario"] = "current_fleet_only"
+                recommended_p90["future_total_candidates"] = 0
+                recommended_p90["future_allocation"] = ""
+                recommended_p90["future_bought"] = 0
+                recommended_p90["recommended_vehicles_bought"] = 0
+                recommended_p90["scenario_passes"] = 1
+
+                recommended_outputs_p90 = outputs_p90
+
                 result["fleet_requirements_p90"] = empty_report
                 result["fleet_details_p90"] = {}
-                result["recommended_p90"] = p90_base_check
+                result["recommended_p90"] = recommended_p90
+                result["recommended_outputs_p90"] = recommended_outputs_p90
 
                 workbook_sheets["p90_fleet_requirements"] = empty_report
-                workbook_sheets["p90_recommended"] = p90_base_check
+                workbook_sheets["p90_recommended"] = recommended_p90
+
+                workbook_sheets["p90_rec_fleet_summary"] = recommended_outputs_p90.get(
+                    "fleet_summary",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p90_rec_fleet_util"] = recommended_outputs_p90.get(
+                    "fleet_utilisation",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p90_rec_vehicle_sched"] = recommended_outputs_p90.get(
+                    "vehicle_schedule",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p90_rec_flt_assign"] = recommended_outputs_p90.get(
+                    "flight_assignments",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p90_rec_shortfalls"] = recommended_outputs_p90.get(
+                    "shortfalls",
+                    pd.DataFrame(),
+                )
+
+                workbook_sheets["p90_rec_sla_summary"] = recommended_outputs_p90.get(
+                    "sla_summary",
+                    pd.DataFrame(),
+                )
 
     # --------------------------------------------------
     # Export workbook
