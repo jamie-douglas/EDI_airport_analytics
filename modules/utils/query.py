@@ -148,7 +148,7 @@ def query(
         opt = query_option.strip()
         if not opt.upper().startswith("OPTION"):
             raise ValueError("query_option must start with OPTION")
-        sql += f"{opt}"
+        sql += f" {opt}"
 
     
     #Execute
