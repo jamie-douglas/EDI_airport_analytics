@@ -624,6 +624,19 @@ def clean_operations(operations, config):
     df["has_actual_checkin"] = df["actual_entry_ts"].notna()
     df["has_actual_checkout"] = df["actual_exit_ts"].notna()
 
+
+    print("\nDEBUG: OPERATIONS AFTER CLEANING") ##
+
+    print( ##
+        "Rows with ActualCheckedOutDate:", ##
+        df["ActualCheckedOutDate"].notna().sum() ##
+    )
+
+    print( ##
+        "Rows with actual_exit_ts:", ##
+        df["actual_exit_ts"].notna().sum() ##
+    ) ##
+
     return df
 
 
@@ -699,16 +712,50 @@ def reconcile_bookings_to_operations(bookings_clean, operations_clean):
 
     """
 
+    ops = operations_clean.copy()
+
+    ops["has_checkout"] = (
+        ops["ActualCheckedOutDate"]
+        .notna()
+        .astype(int)
+    )
+
     operations_latest = (
-        operations_clean
+        ops
         .sort_values(
-            ["BookingReference", "ActualCheckedOutDate"]
+            [
+                "BookingReference",
+                "has_checkout",
+                "ActualCheckedOutDate"
+            ]
         )
         .drop_duplicates(
             subset=["BookingReference"],
             keep="last"
         )
     )
+
+    print("\nDEBUG: OPERATIONS LATEST") ##
+
+    print( ##
+        "Unique BookingReference:",##
+        operations_latest["BookingReference"].nunique()##
+    )##
+
+    print(##
+        "Rows:",##
+        len(operations_latest)##
+    )##
+
+    print(##
+        "Rows with checkout:",##
+        operations_latest["actual_exit_ts"].notna().sum()##
+    )##
+
+    print(##
+        "Rows without checkout:",##
+        operations_latest["actual_exit_ts"].isna().sum()##
+    )##
     
     master = bookings_clean.merge(
         operations_latest,
@@ -5103,6 +5150,24 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     print("[5/17] Reconciling FastPark Bookings and Actuals…")
 
     master = reconcile_bookings_to_operations(bookings_clean, operations_clean)
+
+
+    print("\nDEBUG: MASTER") ##
+
+    print( ##
+        "Rows in master:", ##
+        len(master) ##
+    )
+
+    print( ##
+        "Check-ins:", ##
+        master["actual_entry_ts"].notna().sum() ##
+    ) ##
+
+    print( ##
+        "Check-outs:", ##
+        master["actual_exit_ts"].notna().sum() ##
+    )##
 
     reconciliation_summary = create_reconciliation_summary(
         bookings_clean,
