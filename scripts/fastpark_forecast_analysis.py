@@ -698,9 +698,20 @@ def reconcile_bookings_to_operations(bookings_clean, operations_clean):
             Master dataframe with one row per booking/operation record where possible.
 
     """
+
+    operations_latest = (
+        operations_clean
+        .sort_values(
+            ["BookingReference", "ActualCheckedOutDate"]
+        )
+        .drop_duplicates(
+            subset=["BookingReference"],
+            keep="last"
+        )
+    )
     
     master = bookings_clean.merge(
-        operations_clean,
+        operations_latest,
         how="left",
         left_on="bookingId",
         right_on="BookingReference",
