@@ -2706,80 +2706,558 @@ def create_booking_curve_dataset(bookings_clean, master, config):
 
     return booking_curve
 
-
-def analyse_booking_curve_segments(booking_curve):
+def create_booking_entry_curve_by_duration_dataset(bookings_clean, master, config):
     """
-    Analyse booking curve completion rates by segment.
+    Create an entry booking curve split by planned duration band.
 
     Purpose:
-        Determine whether one booking uplift/completion factor is enough,
-        or whether separate curves are needed by weekday/month.
+        The standard entry booking curve shows how much final entry demand is
+        visible at each lead time. This duration version tests whether bookings
+        with different planned stay lengths become visible at different points
+        before the entry date.
+
+    Example:
+        Short-stay bookings may be made later than long-stay bookings.
+        If true, the uplift applied to known bookings should differ by planned
+        duration band.
+    """
+
+    valid_bookings = bookings_clean[bookings_clean["is_valid_booking"]].copy()
+
+    valid_bookings["planned_entry_date"] = pd.to_datetime(
+        valid_bookings["planned_entry_date"]
+    )
+
+    valid_bookings["createdAt"] = pd.to_datetime(
+        valid_bookings["createdAt"],
+        errors="coerce",
+    )
+
+    valid_bookings["planned_duration_band"] = (
+        valid_bookings["planned_duration_band"]
+        .astype(str)
+    )
+
+    actual_entries = master.dropna(subset=["actual_entry_ts"]).copy()
+
+    actual_entries["planned_entry_date"] = pd.to_datetime(
+        actual_entries["planned_entry_date"]
+    )
+
+    actual_entries["planned_duration_band"] = (
+        actual_entries["planned_duration_band"]
+        .astype(str)
+    )
+
+    final_valid = (
+        valid_bookings
+        .groupby(["planned_entry_date", "planned_duration_band"])
+        .agg(final_valid_bookings=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_entry_date": "entry_date"})
+    )
+
+    final_actual = (
+        actual_entries
+        .groupby(["planned_entry_date", "planned_duration_band"])
+        .agg(final_actual_entries=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_entry_date": "entry_date"})
+    )
+
+    segments = (
+        valid_bookings[
+            ["planned_entry_date", "planned_duration_band"]
+        ]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["planned_entry_date", "planned_duration_band"])
+    )
+
+    rows = []
+
+    for _, segment in segments.iterrows():
+
+        entry_date = pd.Timestamp(segment["planned_entry_date"])
+        duration_band = segment["planned_duration_band"]
+
+        final_valid_count = final_valid.loc[
+            final_valid["entry_date"].eq(entry_date)
+            & final_valid["planned_duration_band"].eq(duration_band),
+            "final_valid_bookings",
+        ]
+
+        final_actual_count = final_actual.loc[
+            final_actual["entry_date"].eq(entry_date)
+            & final_actual["planned_duration_band"].eq(duration_band),
+            "final_actual_entries",
+        ]
+
+        final_valid_count = (
+            int(final_valid_count.iloc[0])
+            if len(final_valid_count) > 0
+            else 0
+        )
+
+        final_actual_count = (
+            int(final_actual_count.iloc[0])
+            if len(final_actual_count) > 0
+            else 0
+        )
+
+        for lead_time in config["lead_time_checkpoints"]:
+
+            cutoff_ts = entry_date - pd.Timedelta(days=lead_time)
+
+            bookings_known = valid_bookings[
+                valid_bookings["planned_entry_date"].eq(entry_date)
+                & valid_bookings["planned_duration_band"].eq(duration_band)
+                & (valid_bookings["createdAt"] <= cutoff_ts)
+            ]["bookingId"].nunique()
+
+            rows.append(
+                {
+                    "entry_date": entry_date,
+                    "planned_duration_band": duration_band,
+                    "lead_time_checkpoint": lead_time,
+                    "cutoff_timestamp": cutoff_ts,
+                    "bookings_known": bookings_known,
+                    "final_valid_bookings": final_valid_count,
+                    "final_actual_entries": final_actual_count,
+                    "completion_vs_valid_bookings": (
+                        bookings_known / final_valid_count
+                        if final_valid_count > 0
+                        else np.nan
+                    ),
+                    "completion_vs_actual_entries": (
+                        bookings_known / final_actual_count
+                        if final_actual_count > 0
+                        else np.nan
+                    ),
+                    "weekday": entry_date.day_name(),
+                    "weekday_num": entry_date.weekday(),
+                    "month": entry_date.month,
+                    "year": entry_date.year,
+                    "week": entry_date.isocalendar().week,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+def create_booking_exit_curve_dataset(bookings_clean, master, config):
+    """
+    Create an exit booking visibility curve.
+
+    Purpose:
+        The entry booking curve measures how much entry demand is visible before
+        the planned entry date. This function creates the equivalent curve for
+        planned exits.
+
+        This is important for rostering because future exit demand may be known
+        from bookings before the operational exit date occurs.
+
+    Definition:
+        For each planned exit date and lead-time checkpoint, count how many
+        valid bookings were already created by the cutoff date.
+    """
+
+    valid_bookings = bookings_clean[bookings_clean["is_valid_booking"]].copy()
+
+    valid_bookings["createdAt"] = pd.to_datetime(
+        valid_bookings["createdAt"],
+        errors="coerce",
+    )
+
+    valid_bookings["planned_exit_date"] = pd.to_datetime(
+        valid_bookings["planned_exit_date"]
+    )
+
+    actual_exits = master.dropna(subset=["actual_exit_ts"]).copy()
+
+    actual_exits["planned_exit_date"] = pd.to_datetime(
+        actual_exits["planned_exit_date"]
+    )
+
+    final_valid_by_exit_date = (
+        valid_bookings
+        .groupby("planned_exit_date")
+        .agg(final_valid_bookings=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_exit_date": "exit_date"})
+    )
+
+    final_actual_by_exit_date = (
+        actual_exits
+        .groupby("planned_exit_date")
+        .agg(final_actual_exits=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_exit_date": "exit_date"})
+    )
+
+    unique_exit_dates = (
+        valid_bookings["planned_exit_date"]
+        .dropna()
+        .sort_values()
+        .unique()
+    )
+
+    rows = []
+
+    for exit_date in unique_exit_dates:
+
+        exit_date_ts = pd.Timestamp(exit_date)
+
+        final_valid = final_valid_by_exit_date.loc[
+            final_valid_by_exit_date["exit_date"].eq(exit_date_ts),
+            "final_valid_bookings",
+        ]
+
+        final_actual = final_actual_by_exit_date.loc[
+            final_actual_by_exit_date["exit_date"].eq(exit_date_ts),
+            "final_actual_exits",
+        ]
+
+        final_valid_count = int(final_valid.iloc[0]) if len(final_valid) > 0 else 0
+        final_actual_count = int(final_actual.iloc[0]) if len(final_actual) > 0 else 0
+
+        for lead_time in config["lead_time_checkpoints"]:
+
+            cutoff_ts = exit_date_ts - pd.Timedelta(days=lead_time)
+
+            bookings_known = valid_bookings[
+                valid_bookings["planned_exit_date"].eq(exit_date_ts)
+                & (valid_bookings["createdAt"] <= cutoff_ts)
+            ]["bookingId"].nunique()
+
+            rows.append(
+                {
+                    "exit_date": exit_date_ts,
+                    "lead_time_checkpoint": lead_time,
+                    "cutoff_timestamp": cutoff_ts,
+                    "bookings_known": bookings_known,
+                    "final_valid_bookings": final_valid_count,
+                    "final_actual_exits": final_actual_count,
+                    "completion_vs_valid_bookings": (
+                        bookings_known / final_valid_count
+                        if final_valid_count > 0
+                        else np.nan
+                    ),
+                    "completion_vs_actual_exits": (
+                        bookings_known / final_actual_count
+                        if final_actual_count > 0
+                        else np.nan
+                    ),
+                    "weekday": exit_date_ts.day_name(),
+                    "weekday_num": exit_date_ts.weekday(),
+                    "month": exit_date_ts.month,
+                    "year": exit_date_ts.year,
+                    "week": exit_date_ts.isocalendar().week,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+def create_booking_exit_curve_by_duration_dataset(bookings_clean, master, config):
+    """
+    Create an exit booking visibility curve split by planned duration band.
+
+    Purpose:
+        This table measures how much future exit demand is visible at different
+        lead times, separated by planned stay length.
+
+        This is useful because short-duration bookings can create exit demand
+        with limited forward visibility, while long-duration bookings may create
+        exit demand that is visible much earlier.
+    """
+
+    valid_bookings = bookings_clean[bookings_clean["is_valid_booking"]].copy()
+
+    valid_bookings["createdAt"] = pd.to_datetime(
+        valid_bookings["createdAt"],
+        errors="coerce",
+    )
+
+    valid_bookings["planned_exit_date"] = pd.to_datetime(
+        valid_bookings["planned_exit_date"]
+    )
+
+    valid_bookings["planned_duration_band"] = (
+        valid_bookings["planned_duration_band"]
+        .astype(str)
+    )
+
+    actual_exits = master.dropna(subset=["actual_exit_ts"]).copy()
+
+    actual_exits["planned_exit_date"] = pd.to_datetime(
+        actual_exits["planned_exit_date"]
+    )
+
+    actual_exits["planned_duration_band"] = (
+        actual_exits["planned_duration_band"]
+        .astype(str)
+    )
+
+    final_valid = (
+        valid_bookings
+        .groupby(["planned_exit_date", "planned_duration_band"])
+        .agg(final_valid_bookings=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_exit_date": "exit_date"})
+    )
+
+    final_actual = (
+        actual_exits
+        .groupby(["planned_exit_date", "planned_duration_band"])
+        .agg(final_actual_exits=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"planned_exit_date": "exit_date"})
+    )
+
+    segments = (
+        valid_bookings[
+            ["planned_exit_date", "planned_duration_band"]
+        ]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["planned_exit_date", "planned_duration_band"])
+    )
+
+    rows = []
+
+    for _, segment in segments.iterrows():
+
+        exit_date = pd.Timestamp(segment["planned_exit_date"])
+        duration_band = segment["planned_duration_band"]
+
+        final_valid_count = final_valid.loc[
+            final_valid["exit_date"].eq(exit_date)
+            & final_valid["planned_duration_band"].eq(duration_band),
+            "final_valid_bookings",
+        ]
+
+        final_actual_count = final_actual.loc[
+            final_actual["exit_date"].eq(exit_date)
+            & final_actual["planned_duration_band"].eq(duration_band),
+            "final_actual_exits",
+        ]
+
+        final_valid_count = (
+            int(final_valid_count.iloc[0])
+            if len(final_valid_count) > 0
+            else 0
+        )
+
+        final_actual_count = (
+            int(final_actual_count.iloc[0])
+            if len(final_actual_count) > 0
+            else 0
+        )
+
+        for lead_time in config["lead_time_checkpoints"]:
+
+            cutoff_ts = exit_date - pd.Timedelta(days=lead_time)
+
+            bookings_known = valid_bookings[
+                valid_bookings["planned_exit_date"].eq(exit_date)
+                & valid_bookings["planned_duration_band"].eq(duration_band)
+                & (valid_bookings["createdAt"] <= cutoff_ts)
+            ]["bookingId"].nunique()
+
+            rows.append(
+                {
+                    "exit_date": exit_date,
+                    "planned_duration_band": duration_band,
+                    "lead_time_checkpoint": lead_time,
+                    "cutoff_timestamp": cutoff_ts,
+                    "bookings_known": bookings_known,
+                    "final_valid_bookings": final_valid_count,
+                    "final_actual_exits": final_actual_count,
+                    "completion_vs_valid_bookings": (
+                        bookings_known / final_valid_count
+                        if final_valid_count > 0
+                        else np.nan
+                    ),
+                    "completion_vs_actual_exits": (
+                        bookings_known / final_actual_count
+                        if final_actual_count > 0
+                        else np.nan
+                    ),
+                    "weekday": exit_date.day_name(),
+                    "weekday_num": exit_date.weekday(),
+                    "month": exit_date.month,
+                    "year": exit_date.year,
+                    "week": exit_date.isocalendar().week,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+def summarise_booking_curve(
+    curve_df,
+    date_col,
+    actual_col,
+    group_cols=None,
+):
+    """
+    Summarise a booking visibility curve.
+
+    Purpose:
+        Convert detailed entry or exit visibility data into a compact summary
+        by lead time and optional grouping fields.
 
     Parameters
     ----------
-    booking_curve : pandas.DataFrame
-        Output from create_booking_curve_dataset().
+    curve_df : pandas.DataFrame
+        Detailed booking curve dataset.
+
+    date_col : str
+        Date column used to count observations.
+        Examples:
+            - entry_date
+            - exit_date
+
+    actual_col : str
+        Final actual demand column.
+        Examples:
+            - final_actual_entries
+            - final_actual_exits
+
+    group_cols : list, optional
+        Additional grouping columns.
+        Examples:
+            - ["weekday_num", "weekday"]
+            - ["month"]
+            - ["planned_duration_band"]
 
     Returns
     -------
-    dict
-        Segment-level booking curve summaries.
+    pandas.DataFrame
+        Aggregated booking curve summary.
     """
 
-    df = booking_curve.copy()
+    if curve_df is None or curve_df.empty:
+        return pd.DataFrame()
 
-    completion_by_lead_time = (
+    if group_cols is None:
+        group_cols = []
+
+    df = curve_df.copy()
+
+    grouping = group_cols + ["lead_time_checkpoint"]
+
+    completion_actual_col = (
+        "completion_vs_actual_entries"
+        if "completion_vs_actual_entries" in df.columns
+        else "completion_vs_actual_exits"
+    )
+
+    summary = (
         df
-        .groupby("lead_time_checkpoint")
+        .groupby(grouping, dropna=False, observed=False)
         .agg(
             avg_bookings_known=("bookings_known", "mean"),
             avg_final_valid_bookings=("final_valid_bookings", "mean"),
-            avg_final_actual_entries=("final_actual_entries", "mean"),
+            avg_final_actual=(actual_col, "mean"),
             avg_completion_vs_valid=("completion_vs_valid_bookings", "mean"),
-            avg_completion_vs_actual=("completion_vs_actual_entries", "mean"),
-            observations=("entry_date", "nunique"),
+            avg_completion_vs_actual=(completion_actual_col, "mean"),
+            observations=(date_col, "nunique"),
         )
         .reset_index()
-        .sort_values("lead_time_checkpoint", ascending=False)
+        .sort_values(grouping, ascending=[True] * len(grouping))
     )
 
-    completion_by_weekday_and_lead_time = (
-        df
-        .groupby(["weekday", "weekday_num", "lead_time_checkpoint"])
-        .agg(
-            avg_bookings_known=("bookings_known", "mean"),
-            avg_final_valid_bookings=("final_valid_bookings", "mean"),
-            avg_final_actual_entries=("final_actual_entries", "mean"),
-            avg_completion_vs_valid=("completion_vs_valid_bookings", "mean"),
-            avg_completion_vs_actual=("completion_vs_actual_entries", "mean"),
-            observations=("entry_date", "nunique"),
-        )
-        .reset_index()
-        .sort_values(["weekday_num", "lead_time_checkpoint"], ascending=[True, False])
+    return summary
+
+def analyse_booking_curve_segments(booking_curve):
+    """
+    Summarise the entry booking curve by lead time, weekday and month.
+
+    Purpose:
+        Entry booking curves show how much final entry demand is visible at
+        each lead time before the planned entry date.
+    """
+
+    entry_curve_summary = summarise_booking_curve(
+        curve_df=booking_curve,
+        date_col="entry_date",
+        actual_col="final_actual_entries",
+        group_cols=[],
     )
 
-    completion_by_month_and_lead_time = (
-        df
-        .groupby(["month", "lead_time_checkpoint"])
-        .agg(
-            avg_bookings_known=("bookings_known", "mean"),
-            avg_final_valid_bookings=("final_valid_bookings", "mean"),
-            avg_final_actual_entries=("final_actual_entries", "mean"),
-            avg_completion_vs_valid=("completion_vs_valid_bookings", "mean"),
-            avg_completion_vs_actual=("completion_vs_actual_entries", "mean"),
-            observations=("entry_date", "nunique"),
-        )
-        .reset_index()
-        .sort_values(["month", "lead_time_checkpoint"], ascending=[True, False])
+    entry_curve_weekday = summarise_booking_curve(
+        curve_df=booking_curve,
+        date_col="entry_date",
+        actual_col="final_actual_entries",
+        group_cols=["weekday_num", "weekday"],
     )
 
-    results = {
-        "completion_by_lead_time": completion_by_lead_time,
-        "completion_by_weekday_and_lead_time": completion_by_weekday_and_lead_time,
-        "completion_by_month_and_lead_time": completion_by_month_and_lead_time,
+    entry_curve_month = summarise_booking_curve(
+        curve_df=booking_curve,
+        date_col="entry_date",
+        actual_col="final_actual_entries",
+        group_cols=["month"],
+    )
+
+    return {
+        "entry_curve_summary": entry_curve_summary,
+        "entry_curve_weekday": entry_curve_weekday,
+        "entry_curve_month": entry_curve_month,
     }
 
-    return results
+def analyse_booking_visibility_curves(
+    booking_entry_curve,
+    booking_entry_curve_duration,
+    booking_exit_curve,
+    booking_exit_curve_duration,
+):
+    """
+    Summarise entry and exit booking visibility curves.
+
+    Purpose:
+        This creates the core booking visibility outputs used to understand:
+            - how much entry demand is known before entry date
+            - how much entry demand is known by planned duration
+            - how much exit demand is known before exit date
+            - how much exit demand is known by planned duration
+
+        The exit curves are especially important for roster planning because
+        short-duration bookings can create future exits with limited visibility.
+    """
+
+    entry_curve_summary = summarise_booking_curve(
+        curve_df=booking_entry_curve,
+        date_col="entry_date",
+        actual_col="final_actual_entries",
+        group_cols=[],
+    )
+
+    entry_curve_duration = summarise_booking_curve(
+        curve_df=booking_entry_curve_duration,
+        date_col="entry_date",
+        actual_col="final_actual_entries",
+        group_cols=["planned_duration_band"],
+    )
+
+    exit_curve_summary = summarise_booking_curve(
+        curve_df=booking_exit_curve,
+        date_col="exit_date",
+        actual_col="final_actual_exits",
+        group_cols=[],
+    )
+
+    exit_curve_duration = summarise_booking_curve(
+        curve_df=booking_exit_curve_duration,
+        date_col="exit_date",
+        actual_col="final_actual_exits",
+        group_cols=["planned_duration_band"],
+    )
+
+    return {
+        "entry_curve_summary": entry_curve_summary,
+        "entry_curve_duration": entry_curve_duration,
+        "exit_curve_summary": exit_curve_summary,
+        "exit_curve_duration": exit_curve_duration,
+    }
 
 # ============================================================
 # 10. STAY DURATION, RETURN BEHAVIOUR AND EXIT FORECAST BACKTESTING
@@ -2894,140 +3372,7 @@ def create_duration_analysis_dataset(master, config):
     return df
 
 
-def analyse_duration_patterns(duration_df):
-    """
-    Analyse stay duration patterns.
 
-    Purpose:
-        Understand how entries convert into future exits.
-
-    Parameters
-    ----------
-    duration_df : pandas.DataFrame
-        Output from create_duration_analysis_dataset().
-
-    Returns
-    -------
-    dict
-        Duration summary tables.
-    """
-
-    df = duration_df.copy()
-
-    valid_duration = df.dropna(subset=["actual_duration_days"]).copy()
-
-    duration_distribution = (
-        valid_duration
-        .groupby("actual_duration_band", observed=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-    )
-
-    duration_distribution["share"] = (
-        duration_distribution["bookings"]
-        / duration_distribution["bookings"].sum()
-    )
-
-    duration_by_weekday = (
-        valid_duration
-        .groupby("entry_weekday", dropna=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-    )
-
-    duration_by_month = (
-        valid_duration
-        .groupby("entry_month", dropna=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-    )
-
-    duration_by_airline = (
-        valid_duration
-        .groupby("outboundAirline", dropna=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-        .sort_values("bookings", ascending=False)
-    )
-
-    duration_by_route = (
-        valid_duration
-        .groupby("outboundRoute", dropna=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-        .sort_values("bookings", ascending=False)
-    )
-
-    duration_by_lead_time_band = (
-        valid_duration
-        .groupby("planned_duration_band", dropna=False, observed=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_actual_duration_days=("actual_duration_days", "mean"),
-            median_actual_duration_days=("actual_duration_days", "median"),
-            avg_planned_duration_days=("planned_duration_days", "mean"),
-            median_planned_duration_days=("planned_duration_days", "median"),
-        )
-        .reset_index()
-    )
-
-    actual_vs_planned_duration_summary = pd.DataFrame(
-        [
-            {
-                "records": valid_duration["bookingId"].nunique(),
-                "avg_planned_duration_days": valid_duration["planned_duration_days"].mean(),
-                "avg_actual_duration_days": valid_duration["actual_duration_days"].mean(),
-                "avg_actual_minus_planned_days": (
-                    valid_duration["actual_duration_days"]
-                    - valid_duration["planned_duration_days"]
-                ).mean(),
-                "median_actual_minus_planned_days": (
-                    valid_duration["actual_duration_days"]
-                    - valid_duration["planned_duration_days"]
-                ).median(),
-            }
-        ]
-    )
-
-    return {
-        "duration_distribution": duration_distribution,
-        "duration_by_weekday": duration_by_weekday,
-        "duration_by_month": duration_by_month,
-        "duration_by_airline": duration_by_airline,
-        "duration_by_route": duration_by_route,
-        "duration_by_lead_time_band": duration_by_lead_time_band,
-        "actual_vs_planned_duration_summary": actual_vs_planned_duration_summary,
-    }
 
 
 def analyse_return_deviation(duration_df):
@@ -5526,7 +5871,7 @@ def build_output_tables(
         "Daily FastPark Actuals": daily_fastpark_actuals,
         "Hourly FastPark Actuals": hourly_fastpark_actuals,
         "Demand Driver Dataset": daily_driver_dataset,
-        "Booking Curve Summary": booking_curve,
+        "Booking Entry Dataset": booking_curve,
         "Tendency Backtest Results": tendency_backtest_results,
         "forecast_error_summaries": forecast_error_summaries,
     }
@@ -5652,6 +5997,35 @@ def export_outputs_to_excel(outputs, output_path):
 
         "forecast_error_summaries_tendency_summary_performance_by_month":
             "Tendency by Month",
+
+            # Booking visibility curves
+        "forecast_error_summaries_booking_visibility_curves_entry_curve_summary":
+            "Booking Entry Curve",
+
+        "forecast_error_summaries_booking_visibility_curves_entry_curve_duration":
+            "Booking Entry Duration",
+
+        "forecast_error_summaries_booking_visibility_curves_exit_curve_summary":
+            "Booking Exit Curve",
+
+        "forecast_error_summaries_booking_visibility_curves_exit_curve_duration":
+            "Booking Exit Duration",
+
+        # Planned duration analysis
+        "forecast_error_summaries_duration_patterns_planned_duration_distribution":
+            "Planned Duration Dist",
+
+        "forecast_error_summaries_duration_patterns_planned_duration_by_weekday":
+            "Planned Duration Weekday",
+
+        "forecast_error_summaries_duration_patterns_planned_duration_by_month":
+            "Planned Duration Month",
+
+        "forecast_error_summaries_duration_patterns_planned_duration_by_airline":
+            "Planned Duration Airline",
+
+        "forecast_error_summaries_duration_patterns_planned_vs_actual_summary":
+            "Duration Validation",
     }
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -5869,12 +6243,40 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Booking curve
     # ----------------------------
 
-    print("[11/17] Analysing Booking Curve…")
-    
-    booking_curve = create_booking_curve_dataset(bookings_clean, master, config)
-    booking_curve_segments = analyse_booking_curve_segments(booking_curve)
+    print("[11/17] Analysing Booking and Exit Visibility Curves…")
 
-    t11 = step(t10, "Analysed Booking Curve")
+    booking_curve = create_booking_curve_dataset(
+        bookings_clean=bookings_clean,
+        master=master,
+        config=config,
+    )
+
+    booking_entry_curve_duration = create_booking_entry_curve_by_duration_dataset(
+        bookings_clean=bookings_clean,
+        master=master,
+        config=config,
+    )
+
+    booking_exit_curve = create_booking_exit_curve_dataset(
+        bookings_clean=bookings_clean,
+        master=master,
+        config=config,
+    )
+
+    booking_exit_curve_duration = create_booking_exit_curve_by_duration_dataset(
+        bookings_clean=bookings_clean,
+        master=master,
+        config=config,
+    )
+
+    booking_visibility_curves = analyse_booking_visibility_curves(
+        booking_entry_curve=booking_curve,
+        booking_entry_curve_duration=booking_entry_curve_duration,
+        booking_exit_curve=booking_exit_curve,
+        booking_exit_curve_duration=booking_exit_curve_duration,
+    )
+
+    t11 = step(t10, "Analysed Booking and Exit Visibility Curves")
 
     # ----------------------------
     # Duration and return behaviour
@@ -5960,7 +6362,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         "hourly_offset_analysis": hourly_offset_analysis,
         "driver_analysis": driver_analysis,
         "mix_features": mix_features,
-        "booking_curve_segments": booking_curve_segments,
+        "booking_visibility_curves": booking_visibility_curves,
         "duration_patterns": duration_patterns,
         "return_deviation": return_deviation,
         "known_booked_exit_forecast": known_booked_exit_forecast,
