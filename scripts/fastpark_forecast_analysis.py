@@ -95,12 +95,24 @@ def get_analysis_config():
         # These represent days before entry date
         "lead_time_checkpoints": [56, 42, 28, 21, 14, 10, 7, 5, 3, 2, 1, 0],
 
-        # Rolling tendency windows in weeks
+        # General rolling windows across all weekdays.
+        # Keep available, but optionally skip for entry tendency if same-weekday methods perform better.
         "tendency_windows_weeks": [2, 4, 6, 8, 13],
+        "run_general_rolling_entry_tendency": False,
 
-        # Same weekday occurrence windows
-        # Example: last 4 Mondays, last 8 Mondays, etc.
-        "same_weekday_occurrences": [4, 8, 12],
+        # Same weekday ratio-of-sums methods.
+        # Example: to forecast a Friday, use previous n Fridays:
+        # sum(entries) / sum(departing_pax)
+        "same_weekday_occurrences": [2, 4, 6, 8, 10, 12],
+
+        # Same weekday rolling average of daily penetration.
+        # Example: mean(entry_penetration of previous n Fridays)
+        "same_weekday_average_occurrences": [2, 4, 6, 8, 10, 12],
+
+        # Weighted same weekday rolling average.
+        # More recent same weekdays receive more weight.
+        "same_weekday_weighted_occurrences": [2, 4, 6, 8, 10, 12],
+
 
         # Duration bands in days
         "duration_bins_days": [0, 1, 3, 7, 10, 14, 21, 999],
@@ -777,7 +789,27 @@ def create_reconciliation_summary(bookings_clean, operations_clean, master):
     unknown_status_bookings = bookings_clean["is_unknown_status"].sum()
 
     duplicate_booking_ids = bookings_clean["bookingId"].duplicated().sum()
-    duplicate_booking_refs = operations_clean["BookingReference"].duplicated().sum()
+
+    unmatched_valid_bookings = (
+        master.loc[
+            master["BookingReference"].isna()
+            & master["is_valid_booking"],
+        ].shape[0]
+    )
+
+    unmatched_cancelled_bookings = (
+        master.loc[
+            master["BookingReference"].isna()
+            & master["is_cancelled"],
+        ].shape[0]
+    )
+
+    unmatched_unknown_status_bookings = (
+        master.loc[
+            master["BookingReference"].isna()
+            & master["is_unknown_status"],
+        ].shape[0]
+    )
 
     matched_bookings = master["BookingReference"].notna().sum()
     unmatched_bookings = master["BookingReference"].isna().sum()
@@ -832,11 +864,6 @@ def create_reconciliation_summary(bookings_clean, operations_clean, master):
                 "description": "Duplicate bookingId rows in bookings table.",
             },
             {
-                "metric": "duplicate_booking_references",
-                "value": duplicate_booking_refs,
-                "description": "Duplicate BookingReference rows in operational table.",
-            },
-            {
                 "metric": "matched_bookings",
                 "value": matched_bookings,
                 "description": "Booking rows matched to operational records.",
@@ -845,6 +872,21 @@ def create_reconciliation_summary(bookings_clean, operations_clean, master):
                 "metric": "unmatched_bookings",
                 "value": unmatched_bookings,
                 "description": "Booking rows with no matching operational record.",
+            },
+            {
+                "metric": "unmatched_valid_bookings_B",
+                "value": unmatched_valid_bookings,
+                "description": "Valid bookings with no matching operational record.",
+            },
+            {
+                "metric": "unmatched_cancelled_bookings_CX",
+                "value": unmatched_cancelled_bookings,
+                "description": "Cancelled bookings with no matching operational record.",
+            },
+            {
+                "metric": "unmatched_unknown_status_bookings_F",
+                "value": unmatched_unknown_status_bookings,
+                "description": "Unknown status bookings with no matching operational record.",
             },
             {
                 "metric": "operations_without_booking",
@@ -1693,35 +1735,66 @@ def create_daily_driver_dataset(daily_fastpark_actuals, daily_passenger_summary)
             Daily driver dataset with penetration measures.
     """
 
-    daily_fastpark_actuals["date"] = pd.to_datetime(
-    daily_fastpark_actuals["date"]
-)
+    fastpark = daily_fastpark_actuals.copy()
+    pax = daily_passenger_summary.copy()
 
-    daily_passenger_summary["date"] = pd.to_datetime(
-        daily_passenger_summary["date"]
-    )
+    fastpark["date"] = pd.to_datetime(fastpark["date"])
+    pax["date"] = pd.to_datetime(pax["date"])
 
-    daily = daily_fastpark_actuals.merge(
-        daily_passenger_summary,
+    daily = fastpark.merge(
+        pax,
         on="date",
         how="left"
     )
 
-    #Calculate entry penetration using departing passengers
-    daily["entry_penetration"] = daily["entries"] / daily["departing_pax"].replace(0, np.nan)
+    # --------------------------------------------------------
+    # Penetration metrics
+    # --------------------------------------------------------
+    daily["entry_penetration"] = (
+        daily["entries"] / daily["departing_pax"].replace(0, np.nan)
+    )
 
-    #Calculate exit penetration using arriving passengers
-    #This is only a benchmark, not necessarily the final exit forecasting logic.
-    daily["exit_penetration"] = daily["exits"] / daily["arriving_pax"].replace(0, np.nan)
+    daily["exit_penetration"] = (
+        daily["exits"] / daily["arriving_pax"].replace(0, np.nan)
+    )
 
-    #Calendar features
+    # --------------------------------------------------------
+    # Calendar features
+    # --------------------------------------------------------
     daily["date"] = pd.to_datetime(daily["date"])
     daily["weekday"] = daily["date"].dt.day_name()
     daily["weekday_num"] = daily["date"].dt.weekday
+
     daily["month"] = daily["date"].dt.month
+    daily["month_name"] = daily["date"].dt.month_name()
+
     daily["year"] = daily["date"].dt.year
+    daily["year_month"] = daily["date"].dt.to_period("M").astype(str)
+
     daily["week"] = daily["date"].dt.isocalendar().week
 
+    # --------------------------------------------------------
+    # Passenger mix shares
+    # --------------------------------------------------------
+    daily["domestic_departing_share"] = (
+        daily["domestic_departing_pax"]
+        / daily["departing_pax"].replace(0, np.nan)
+    )
+
+    daily["international_departing_share"] = (
+        daily["international_departing_pax"]
+        / daily["departing_pax"].replace(0, np.nan)
+    )
+
+    daily["domestic_arriving_share"] = (
+        daily["domestic_arriving_pax"]
+        / daily["arriving_pax"].replace(0, np.nan)
+    )
+
+    daily["international_arriving_share"] = (
+        daily["international_arriving_pax"]
+        / daily["arriving_pax"].replace(0, np.nan)
+    )
 
     return daily
 
@@ -1941,98 +2014,557 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
     Purpose:
         Identify what genuinely affects actual entries and exits.
 
-    Parameters:
-        daily_driver_dataset: pandas.DataFrame
-            Daily FastPark demand joined to passenger features.
-
     Returns:
         dict:
             Driver analysis outputs:
+                - demand_driver_summary
                 - correlation_summary
                 - weekday_summary
                 - monthly_summary
+                - month_by_year_summary
                 - passenger_volume_band_summary
-                - domestic_international_summary
+                - passenger_band_forecast_evaluation
+                - passenger_band_performance_summary
     """
+
     df = daily_driver_dataset.copy()
 
-    correlation_summary = daily_driver_dataset[
-        [
-          "entries",
-          "exits",
-          "movements",
-          "departing_pax",
-          "arriving_pax",
-          "total_pax",
-          "departing_flights",
-          "arriving_flights"
-        ]
-    ].corr()
-    
-    weekday_summary = df.groupby("weekday").agg(
-        avg_entries=("entries", "mean"),
-        avg_exits=("exits", "mean"),
-        avg_entry_penetration=("entry_penetration", "mean"),
-        avg_exit_penetration=("exit_penetration", "mean"),
+    df["date"] = pd.to_datetime(df["date"])
+
+    if "month_name" not in df.columns:
+        df["month_name"] = df["date"].dt.month_name()
+
+    if "year_month" not in df.columns:
+        df["year_month"] = df["date"].dt.to_period("M").astype(str)
+
+    # --------------------------------------------------------
+    # Correlation summary
+    # --------------------------------------------------------
+    corr_cols = [
+        "entries",
+        "exits",
+        "movements",
+        "departing_pax",
+        "arriving_pax",
+        "total_pax",
+        "departing_flights",
+        "arriving_flights",
+        "domestic_departing_pax",
+        "international_departing_pax",
+        "domestic_arriving_pax",
+        "international_arriving_pax",
+        "domestic_departing_share",
+        "international_departing_share",
+        "domestic_arriving_share",
+        "international_arriving_share",
+    ]
+
+    corr_cols = [col for col in corr_cols if col in df.columns]
+
+    correlation_summary = df[corr_cols].corr()
+
+    # --------------------------------------------------------
+    # Weekly / weekday summary
+    # --------------------------------------------------------
+    weekday_summary = (
+        df
+        .groupby(["weekday_num", "weekday"], dropna=False)
+        .agg(
+            observations=("date", "count"),
+            avg_entries=("entries", "mean"),
+            avg_exits=("exits", "mean"),
+            avg_movements=("movements", "mean"),
+            avg_net_flow=("net_flow", "mean"),
+            avg_departing_pax=("departing_pax", "mean"),
+            avg_arriving_pax=("arriving_pax", "mean"),
+            avg_total_pax=("total_pax", "mean"),
+            avg_entry_penetration=("entry_penetration", "mean"),
+            avg_exit_penetration=("exit_penetration", "mean"),
+        )
+        .reset_index()
+        .sort_values("weekday_num")
     )
 
-    monthly_summary = df.groupby("month").agg(
-        avg_entries=("entries", "mean"),
-        avg_exits=("exits", "mean"),
-        avg_entry_penetration=("entry_penetration", "mean"),
-        avg_exit_penetration=("exit_penetration", "mean"),
+    # --------------------------------------------------------
+    # Monthly summary across all years
+    # --------------------------------------------------------
+    monthly_summary = (
+        df
+        .groupby(["month", "month_name"], dropna=False)
+        .agg(
+            observations=("date", "count"),
+            avg_entries=("entries", "mean"),
+            avg_exits=("exits", "mean"),
+            avg_movements=("movements", "mean"),
+            avg_net_flow=("net_flow", "mean"),
+            avg_departing_pax=("departing_pax", "mean"),
+            avg_arriving_pax=("arriving_pax", "mean"),
+            avg_total_pax=("total_pax", "mean"),
+            avg_entry_penetration=("entry_penetration", "mean"),
+            avg_exit_penetration=("exit_penetration", "mean"),
+        )
+        .reset_index()
+        .sort_values("month")
     )
 
-    df["passenger_volume_band"] = pd.qcut(
+    # --------------------------------------------------------
+    # Month by year summary
+    # --------------------------------------------------------
+    month_by_year_summary = (
+        df
+        .groupby(["year", "month", "month_name", "year_month"], dropna=False)
+        .agg(
+            observations=("date", "count"),
+            total_entries=("entries", "sum"),
+            total_exits=("exits", "sum"),
+            avg_entries=("entries", "mean"),
+            avg_exits=("exits", "mean"),
+            avg_movements=("movements", "mean"),
+            avg_net_flow=("net_flow", "mean"),
+            avg_departing_pax=("departing_pax", "mean"),
+            avg_arriving_pax=("arriving_pax", "mean"),
+            avg_total_pax=("total_pax", "mean"),
+            avg_entry_penetration=("entry_penetration", "mean"),
+            avg_exit_penetration=("exit_penetration", "mean"),
+        )
+        .reset_index()
+        .sort_values(["year", "month"])
+    )
+
+    # --------------------------------------------------------
+    # Passenger volume bands
+    # --------------------------------------------------------
+    df["departing_pax_band"] = pd.qcut(
         df["departing_pax"],
         q=5,
         duplicates="drop"
     )
 
-    passenger_volume_band_summary = (
+    df["arriving_pax_band"] = pd.qcut(
+        df["arriving_pax"],
+        q=5,
+        duplicates="drop"
+    )
+
+    departing_band_summary = (
         df
-        .groupby(
-            "passenger_volume_band",
-            observed=False
-        )
+        .groupby("departing_pax_band", observed=False)
         .agg(
+            observations=("date", "count"),
+            avg_pax=("departing_pax", "mean"),
+            min_pax=("departing_pax", "min"),
+            max_pax=("departing_pax", "max"),
             avg_entries=("entries", "mean"),
+            avg_exits=("exits", "mean"),
             avg_entry_penetration=("entry_penetration", "mean"),
-            observations=("entries", "count")
+            avg_exit_penetration=("exit_penetration", "mean"),
         )
         .reset_index()
-    )   
-
-    df["domestic_share"] = (
-        df["domestic_departing_pax"]
-        / df["departing_pax"]
+        .rename(columns={"departing_pax_band": "passenger_volume_band"})
     )
 
-    df["domestic_share_band"] = pd.cut(
-        df["domestic_share"],
-        bins=[0,0.2,0.4,0.6,0.8,1]
-    )
+    departing_band_summary["band_type"] = "departing_pax_band"
 
-    domestic_international_summary = (
+    arriving_band_summary = (
         df
-        .groupby(
-            "domestic_share_band",
-            observed=False
-        )
+        .groupby("arriving_pax_band", observed=False)
         .agg(
-            avg_entry_penetration=("entry_penetration","mean"),
-            avg_exit_penetration=("exit_penetration","mean")
+            observations=("date", "count"),
+            avg_pax=("arriving_pax", "mean"),
+            min_pax=("arriving_pax", "min"),
+            max_pax=("arriving_pax", "max"),
+            avg_entries=("entries", "mean"),
+            avg_exits=("exits", "mean"),
+            avg_entry_penetration=("entry_penetration", "mean"),
+            avg_exit_penetration=("exit_penetration", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"arriving_pax_band": "passenger_volume_band"})
+    )
+
+    arriving_band_summary["band_type"] = "arriving_pax_band"
+
+    passenger_volume_band_summary = pd.concat(
+        [
+            departing_band_summary,
+            arriving_band_summary,
+        ],
+        ignore_index=True,
+    )
+
+    passenger_volume_band_summary = passenger_volume_band_summary[
+        [
+            "band_type",
+            "passenger_volume_band",
+            "observations",
+            "avg_pax",
+            "min_pax",
+            "max_pax",
+            "avg_entries",
+            "avg_exits",
+            "avg_entry_penetration",
+            "avg_exit_penetration",
+        ]
+    ]
+
+    # --------------------------------------------------------
+    # Passenger-band adjusted penetration forecast evaluation
+    # Exploratory only: this indicates whether banded penetration is useful.
+    # It should not be treated as a final leakage-safe backtest yet.
+    # --------------------------------------------------------
+    entry_band_rates = (
+        df
+        .groupby("departing_pax_band", observed=False)
+        .agg(
+            band_avg_entry_penetration=("entry_penetration", "mean")
         )
         .reset_index()
     )
+
+    exit_band_rates = (
+        df
+        .groupby("arriving_pax_band", observed=False)
+        .agg(
+            band_avg_exit_penetration=("exit_penetration", "mean")
+        )
+        .reset_index()
+    )
+
+    passenger_band_eval = df[
+        [
+            "date",
+            "weekday",
+            "month",
+            "month_name",
+            "year",
+            "year_month",
+            "departing_pax",
+            "arriving_pax",
+            "entries",
+            "exits",
+            "departing_pax_band",
+            "arriving_pax_band",
+        ]
+    ].copy()
+
+    passenger_band_eval = passenger_band_eval.merge(
+        entry_band_rates,
+        on="departing_pax_band",
+        how="left",
+    )
+
+    passenger_band_eval = passenger_band_eval.merge(
+        exit_band_rates,
+        on="arriving_pax_band",
+        how="left",
+    )
+
+    passenger_band_eval["forecast_entries_pax_band"] = (
+        passenger_band_eval["departing_pax"]
+        * passenger_band_eval["band_avg_entry_penetration"]
+    )
+
+    passenger_band_eval["forecast_exits_pax_band"] = (
+        passenger_band_eval["arriving_pax"]
+        * passenger_band_eval["band_avg_exit_penetration"]
+    )
+
+    passenger_band_eval["entry_error"] = (
+        passenger_band_eval["forecast_entries_pax_band"]
+        - passenger_band_eval["entries"]
+    )
+
+    passenger_band_eval["exit_error"] = (
+        passenger_band_eval["forecast_exits_pax_band"]
+        - passenger_band_eval["exits"]
+    )
+
+    passenger_band_eval["entry_absolute_error"] = (
+        passenger_band_eval["entry_error"].abs()
+    )
+
+    passenger_band_eval["exit_absolute_error"] = (
+        passenger_band_eval["exit_error"].abs()
+    )
+
+    passenger_band_eval["entry_percentage_error"] = (
+        passenger_band_eval["entry_error"]
+        / passenger_band_eval["entries"].replace(0, np.nan)
+    )
+
+    passenger_band_eval["exit_percentage_error"] = (
+        passenger_band_eval["exit_error"]
+        / passenger_band_eval["exits"].replace(0, np.nan)
+    )
+
+    passenger_band_eval["entry_absolute_percentage_error"] = (
+        passenger_band_eval["entry_percentage_error"].abs()
+    )
+
+    passenger_band_eval["exit_absolute_percentage_error"] = (
+        passenger_band_eval["exit_percentage_error"].abs()
+    )
+
+    passenger_band_eval["entry_squared_error"] = (
+        passenger_band_eval["entry_error"] ** 2
+    )
+
+    passenger_band_eval["exit_squared_error"] = (
+        passenger_band_eval["exit_error"] ** 2
+    )
+
+    passenger_band_performance_summary = pd.DataFrame(
+        [
+            {
+                "method": "departing_pax_band_adjusted_entry_penetration",
+                "target": "entries",
+                "mae": passenger_band_eval["entry_absolute_error"].mean(),
+                "bias": passenger_band_eval["entry_error"].mean(),
+                "mape": passenger_band_eval["entry_absolute_percentage_error"].mean(),
+                "rmse": passenger_band_eval["entry_squared_error"].mean() ** 0.5,
+                "records": passenger_band_eval["entries"].count(),
+            },
+            {
+                "method": "arriving_pax_band_adjusted_exit_penetration",
+                "target": "exits",
+                "mae": passenger_band_eval["exit_absolute_error"].mean(),
+                "bias": passenger_band_eval["exit_error"].mean(),
+                "mape": passenger_band_eval["exit_absolute_percentage_error"].mean(),
+                "rmse": passenger_band_eval["exit_squared_error"].mean() ** 0.5,
+                "records": passenger_band_eval["exits"].count(),
+            },
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Domestic / international mix, summarised only
+    # --------------------------------------------------------
+    domestic_mix_summary = {}
+
+    for share_col in [
+        "domestic_departing_share",
+        "international_departing_share",
+        "domestic_arriving_share",
+        "international_arriving_share",
+    ]:
+        if share_col in df.columns:
+            domestic_mix_summary[share_col] = {
+                "avg": df[share_col].mean(),
+                "min": df[share_col].min(),
+                "max": df[share_col].max(),
+                "corr_with_entries": df[share_col].corr(df["entries"]),
+                "corr_with_exits": df[share_col].corr(df["exits"]),
+            }
+
+    # --------------------------------------------------------
+    # Demand driver summary
+    # --------------------------------------------------------
+    summary_rows = []
+
+    # Entry correlations using external drivers only
+    external_entry_drivers = [
+        "departing_pax",
+        "arriving_pax",
+        "total_pax",
+        "departing_flights",
+        "arriving_flights",
+        "domestic_departing_pax",
+        "international_departing_pax",
+        "domestic_departing_share",
+        "international_departing_share",
+    ]
+
+    external_entry_drivers = [
+        col for col in external_entry_drivers
+        if col in correlation_summary.index
+    ]
+
+    if "entries" in correlation_summary.columns and external_entry_drivers:
+
+        entry_corr = (
+            correlation_summary.loc[external_entry_drivers, "entries"]
+            .dropna()
+            .sort_values(key=lambda x: x.abs(), ascending=False)
+        )
+
+        if not entry_corr.empty:
+            summary_rows.append(
+                {
+                    "section": "Correlation",
+                    "metric": "Strongest external entry driver",
+                    "value": entry_corr.index[0],
+                    "supporting_value": entry_corr.iloc[0],
+                    "interpretation": "Highest absolute correlation with FastPark entries using external passenger or flight drivers only.",
+                }
+            )
+
+    # Exit correlations using external drivers only
+    external_exit_drivers = [
+        "departing_pax",
+        "arriving_pax",
+        "total_pax",
+        "departing_flights",
+        "arriving_flights",
+        "domestic_arriving_pax",
+        "international_arriving_pax",
+        "domestic_arriving_share",
+        "international_arriving_share",
+    ]
+
+    external_exit_drivers = [
+        col for col in external_exit_drivers
+        if col in correlation_summary.index
+    ]
+
+    if "exits" in correlation_summary.columns and external_exit_drivers:
+
+        exit_corr = (
+            correlation_summary.loc[external_exit_drivers, "exits"]
+            .dropna()
+            .sort_values(key=lambda x: x.abs(), ascending=False)
+        )
+
+        if not exit_corr.empty:
+            summary_rows.append(
+                {
+                    "section": "Correlation",
+                    "metric": "Strongest external exit driver",
+                    "value": exit_corr.index[0],
+                    "supporting_value": exit_corr.iloc[0],
+                    "interpretation": "Highest absolute correlation with FastPark exits using external passenger or flight drivers only.",
+                }
+            )
+
+    # Weekday effects
+    if not weekday_summary.empty:
+        max_entry_day = weekday_summary.sort_values(
+            "avg_entries",
+            ascending=False
+        ).iloc[0]
+
+        min_entry_day = weekday_summary.sort_values(
+            "avg_entries",
+            ascending=True
+        ).iloc[0]
+
+        summary_rows.append(
+            {
+                "section": "Weekday",
+                "metric": "Highest average entry weekday",
+                "value": max_entry_day["weekday"],
+                "supporting_value": max_entry_day["avg_entries"],
+                "interpretation": "Weekday with the highest average daily entries.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Weekday",
+                "metric": "Lowest average entry weekday",
+                "value": min_entry_day["weekday"],
+                "supporting_value": min_entry_day["avg_entries"],
+                "interpretation": "Weekday with the lowest average daily entries.",
+            }
+        )
+
+    # Monthly effects
+    if not monthly_summary.empty:
+        max_month = monthly_summary.sort_values(
+            "avg_entries",
+            ascending=False
+        ).iloc[0]
+
+        min_month = monthly_summary.sort_values(
+            "avg_entries",
+            ascending=True
+        ).iloc[0]
+
+        summary_rows.append(
+            {
+                "section": "Month",
+                "metric": "Highest average entry month",
+                "value": max_month["month_name"],
+                "supporting_value": max_month["avg_entries"],
+                "interpretation": "Month with the highest average daily entries.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Month",
+                "metric": "Lowest average entry month",
+                "value": min_month["month_name"],
+                "supporting_value": min_month["avg_entries"],
+                "interpretation": "Month with the lowest average daily entries.",
+            }
+        )
+
+    # Passenger volume band effect
+    departing_bands = passenger_volume_band_summary[
+        passenger_volume_band_summary["band_type"].eq("departing_pax_band")
+    ].copy()
+
+    if not departing_bands.empty:
+        low_band = departing_bands.sort_values("avg_pax").head(1).iloc[0]
+        high_band = departing_bands.sort_values("avg_pax").tail(1).iloc[0]
+
+        summary_rows.append(
+            {
+                "section": "Passenger Bands",
+                "metric": "Low pax band entry penetration",
+                "value": str(low_band["passenger_volume_band"]),
+                "supporting_value": low_band["avg_entry_penetration"],
+                "interpretation": "Average entry penetration in the lowest departing passenger volume band.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Passenger Bands",
+                "metric": "High pax band entry penetration",
+                "value": str(high_band["passenger_volume_band"]),
+                "supporting_value": high_band["avg_entry_penetration"],
+                "interpretation": "Average entry penetration in the highest departing passenger volume band.",
+            }
+        )
+
+    # Passenger band forecast performance
+    for _, row in passenger_band_performance_summary.iterrows():
+        summary_rows.append(
+            {
+                "section": "Passenger Band Forecast",
+                "metric": row["method"],
+                "value": row["target"],
+                "supporting_value": row["mae"],
+                "interpretation": "Exploratory MAE using passenger-volume-band adjusted penetration.",
+            }
+        )
+
+    # Domestic / international mix
+    for share_col, values in domestic_mix_summary.items():
+        summary_rows.append(
+            {
+                "section": "Passenger Mix",
+                "metric": f"{share_col} corr with entries",
+                "value": share_col,
+                "supporting_value": values["corr_with_entries"],
+                "interpretation": "Correlation between passenger mix share and FastPark entries.",
+            }
+        )
+
+    demand_driver_summary = pd.DataFrame(summary_rows)
 
     results = {
+        "demand_driver_summary": demand_driver_summary,
         "correlation_summary": correlation_summary,
         "weekday_summary": weekday_summary,
         "monthly_summary": monthly_summary,
+        "month_by_year_summary": month_by_year_summary,
         "passenger_volume_band_summary": passenger_volume_band_summary,
-        "domestic_international_summary": domestic_international_summary,
     }
+
+    return results
+
 
     return results
 
@@ -3758,38 +4290,108 @@ def calculate_same_weekday_entry_penetration(daily_driver_dataset, n_occurrences
 
     return df
 
+def calculate_same_weekday_average_entry_penetration(
+    daily_driver_dataset,
+    n_occurrences,
+):
+    """
+    Calculate same-weekday rolling average of daily entry penetration.
 
+    Difference from calculate_same_weekday_entry_penetration:
+        Existing method:
+            sum(entries) / sum(departing_pax)
 
+        This method:
+            average(entry_penetration)
+
+    Example:
+        To forecast a Friday, use the average entry penetration
+        of the previous n Fridays.
+    """
+
+    df = daily_driver_dataset.sort_values("date").copy()
+
+    pen_col = f"same_weekday_avg_last_{n_occurrences}_entry_penetration"
+
+    df[pen_col] = np.nan
+
+    for weekday in df["weekday"].dropna().unique():
+
+        mask = df["weekday"].eq(weekday)
+
+        sub = df.loc[mask].copy().sort_values("date")
+
+        rolling_avg_pen = (
+            sub["entry_penetration"]
+            .shift(1)
+            .rolling(n_occurrences)
+            .mean()
+        )
+
+        df.loc[mask, pen_col] = rolling_avg_pen
+
+    return df
+
+def calculate_weighted_same_weekday_entry_penetration(
+    daily_driver_dataset,
+    n_occurrences,
+):
+    """
+    Calculate weighted same-weekday rolling entry penetration.
+
+    Purpose:
+        Test whether recent same weekdays should matter more than older ones.
+
+    Example for n=4:
+        Previous 4 Fridays are weighted:
+            oldest Friday      = 1
+            second oldest      = 2
+            second most recent = 3
+            most recent Friday = 4
+
+    This makes the method more responsive to recent changes.
+    """
+
+    df = daily_driver_dataset.sort_values("date").copy()
+
+    pen_col = f"same_weekday_weighted_last_{n_occurrences}_entry_penetration"
+
+    df[pen_col] = np.nan
+
+    weights = np.arange(1, n_occurrences + 1)
+    weights = weights / weights.sum()
+
+    def weighted_average(values):
+        if np.isnan(values).any():
+            return np.nan
+        return np.dot(values, weights)
+
+    for weekday in df["weekday"].dropna().unique():
+
+        mask = df["weekday"].eq(weekday)
+
+        sub = df.loc[mask].copy().sort_values("date")
+
+        weighted_pen = (
+            sub["entry_penetration"]
+            .shift(1)
+            .rolling(n_occurrences)
+            .apply(weighted_average, raw=True)
+        )
+
+        df.loc[mask, pen_col] = weighted_pen
+
+    return df
 
 def run_tendency_window_backtest(daily_driver_dataset, config):
     """
-    Back-test multiple tendency windows.
+    Back-test multiple entry tendency methods.
 
-    Purpose:
-        Decide whether 2, 4, 6, 8, 13 weeks, same-weekday rolling,
-        or another method gives the best forecast.
-
-    Parameters:
-        daily_driver_dataset: pandas.DataFrame
-            Daily fastpark and passenger context.
-
-        config: dict
-            Configuration dictionary.
-
-    Returns:
-        pandas.DataFrame:
-            Back-test results with:
-                - forecast_date
-                - target_date
-                - method
-                - forecast_entries
-                - actual_entries
-                - error
-                - absolute_error
-                - percentage_error
-                - weekday
-                - month
-                - period_type if available
+    Methods tested:
+        1. Optional general rolling penetration across all weekdays
+        2. Same weekday ratio-of-sums penetration
+        3. Same weekday average daily penetration
+        4. Weighted same weekday average daily penetration
     """
 
     results = []
@@ -3797,22 +4399,25 @@ def run_tendency_window_backtest(daily_driver_dataset, config):
     base = daily_driver_dataset.copy()
     base["date"] = pd.to_datetime(base["date"])
 
-    for window in config["tendency_windows_weeks"]:
-        df_window = calculate_rolling_entry_penetration(base, window)
+    def append_entry_forecast_results(temp, pen_col, method_name):
 
-        pen_col = f"rolling_{window}wk_entry_penetration"
+        temp = temp.copy()
 
-        temp = df_window.copy()
-        temp["method"] = f"rolling_{window}wk_entry_penetration"
+        temp["method"] = method_name
         temp["forecast_entries"] = temp["departing_pax"] * temp[pen_col]
         temp["actual_entries"] = temp["entries"]
 
         temp["error"] = temp["forecast_entries"] - temp["actual_entries"]
         temp["absolute_error"] = temp["error"].abs()
+
         temp["percentage_error"] = (
             temp["error"] / temp["actual_entries"].replace(0, np.nan)
         )
-        temp["absolute_percentage_error"] = temp["percentage_error"].abs()
+
+        temp["absolute_percentage_error"] = (
+            temp["percentage_error"].abs()
+        )
+
         temp["squared_error"] = temp["error"] ** 2
 
         results.append(
@@ -3833,40 +4438,78 @@ def run_tendency_window_backtest(daily_driver_dataset, config):
             ]
         )
 
+    # --------------------------------------------------------
+    # 1. Optional general rolling methods
+    # --------------------------------------------------------
+    if config.get("run_general_rolling_entry_tendency", True):
+
+        for window in config["tendency_windows_weeks"]:
+
+            df_window = calculate_rolling_entry_penetration(
+                base,
+                window,
+            )
+
+            pen_col = f"rolling_{window}wk_entry_penetration"
+
+            append_entry_forecast_results(
+                temp=df_window,
+                pen_col=pen_col,
+                method_name=f"rolling_{window}wk_entry_penetration",
+            )
+
+    # --------------------------------------------------------
+    # 2. Same weekday ratio-of-sums methods
+    # --------------------------------------------------------
     for n in config["same_weekday_occurrences"]:
-        df_same = calculate_same_weekday_entry_penetration(base, n)
+
+        df_same = calculate_same_weekday_entry_penetration(
+            base,
+            n,
+        )
 
         pen_col = f"same_weekday_last_{n}_entry_penetration"
 
-        temp = df_same.copy()
-        temp["method"] = f"same_weekday_last_{n}_entry_penetration"
-        temp["forecast_entries"] = temp["departing_pax"] * temp[pen_col]
-        temp["actual_entries"] = temp["entries"]
-
-        temp["error"] = temp["forecast_entries"] - temp["actual_entries"]
-        temp["absolute_error"] = temp["error"].abs()
-        temp["percentage_error"] = (
-            temp["error"] / temp["actual_entries"].replace(0, np.nan)
+        append_entry_forecast_results(
+            temp=df_same,
+            pen_col=pen_col,
+            method_name=f"same_weekday_last_{n}_entry_penetration",
         )
-        temp["absolute_percentage_error"] = temp["percentage_error"].abs()
-        temp["squared_error"] = temp["error"] ** 2
 
-        results.append(
-            temp[
-                [
-                    "date",
-                    "weekday",
-                    "month",
-                    "method",
-                    "forecast_entries",
-                    "actual_entries",
-                    "error",
-                    "absolute_error",
-                    "percentage_error",
-                    "absolute_percentage_error",
-                    "squared_error",
-                ]
-            ]
+    # --------------------------------------------------------
+    # 3. Same weekday rolling average methods
+    # --------------------------------------------------------
+    for n in config.get("same_weekday_average_occurrences", []):
+
+        df_avg = calculate_same_weekday_average_entry_penetration(
+            base,
+            n,
+        )
+
+        pen_col = f"same_weekday_avg_last_{n}_entry_penetration"
+
+        append_entry_forecast_results(
+            temp=df_avg,
+            pen_col=pen_col,
+            method_name=f"same_weekday_avg_last_{n}_entry_penetration",
+        )
+
+    # --------------------------------------------------------
+    # 4. Weighted same weekday methods
+    # --------------------------------------------------------
+    for n in config.get("same_weekday_weighted_occurrences", []):
+
+        df_weighted = calculate_weighted_same_weekday_entry_penetration(
+            base,
+            n,
+        )
+
+        pen_col = f"same_weekday_weighted_last_{n}_entry_penetration"
+
+        append_entry_forecast_results(
+            temp=df_weighted,
+            pen_col=pen_col,
+            method_name=f"same_weekday_weighted_last_{n}_entry_penetration",
         )
 
     if results:
@@ -4878,13 +5521,13 @@ def build_output_tables(
     """
 
     outputs = {
-        "executive_summary": executive_summary,
-        "booking_operation_match_summary": reconciliation_summary,
-        "daily_fastpark_actuals": daily_fastpark_actuals,
-        "hourly_fastpark_actuals": hourly_fastpark_actuals,
-        "daily_driver_dataset": daily_driver_dataset,
-        "booking_curve_summary": booking_curve,
-        "tendency_backtest_results": tendency_backtest_results,
+        "Executive Summary": executive_summary,
+        "Data Validation Summary": reconciliation_summary,
+        "Daily FastPark Actuals": daily_fastpark_actuals,
+        "Hourly FastPark Actuals": hourly_fastpark_actuals,
+        "Demand Driver Dataset": daily_driver_dataset,
+        "Booking Curve Summary": booking_curve,
+        "Tendency Backtest Results": tendency_backtest_results,
         "forecast_error_summaries": forecast_error_summaries,
     }
 
@@ -4981,6 +5624,36 @@ def export_outputs_to_excel(outputs, output_path):
 
     flat_outputs = flatten_outputs(outputs)
 
+    SHEET_NAME_MAP = {
+        "forecast_error_summaries_driver_analysis_demand_driver_summary":
+            "Demand Driver Summary",
+
+        "forecast_error_summaries_driver_analysis_correlation_summary":
+            "Driver Correlations",
+
+        "forecast_error_summaries_driver_analysis_weekday_summary":
+            "Weekly Demand Drivers",
+
+        "forecast_error_summaries_driver_analysis_monthly_summary":
+            "Monthly Demand Drivers",
+
+        "forecast_error_summaries_driver_analysis_month_by_year_summary":
+            "Month Year Drivers",
+
+        "forecast_error_summaries_driver_analysis_passenger_volume_band_summary":
+            "Demand by Pax Band",
+
+
+        "forecast_error_summaries_tendency_summary_overall_method_performance":
+            "Tendency Performance",
+
+        "forecast_error_summaries_tendency_summary_performance_by_weekday":
+            "Tendency by Weekday",
+
+        "forecast_error_summaries_tendency_summary_performance_by_month":
+            "Tendency by Month",
+    }
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
 
         used_sheet_names = set()
@@ -4991,7 +5664,8 @@ def export_outputs_to_excel(outputs, output_path):
             if df is None or not isinstance(df, pd.DataFrame):
                 continue
 
-            safe_sheet_name = clean_sheet_name(raw_sheet_name)
+            export_sheet_name = SHEET_NAME_MAP.get(raw_sheet_name, raw_sheet_name)
+            safe_sheet_name = clean_sheet_name(export_sheet_name)
 
             counter = 1
             base_sheet_name = safe_sheet_name
@@ -5310,15 +5984,20 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     t17 = step(t16, "Built Outputs")
 
     
+    final_time = t17
+
     if output_path is not None:
         print(f"Exporting Outputs to {output_path}…")
         export_outputs_to_excel(
             outputs=outputs,
             output_path=output_path,
         )
-        t18 = step(t17, f"Exported Outputs to {output_path}")
+        final_time = step(t17, f"Exported Outputs to {output_path}")
 
-    print(f"Completed FastPark Historical Analysis in {t18 - t0:.2f} seconds.")
+    print(
+        f"Completed FastPark Historical Analysis "
+        f"in {final_time - t0:.2f} seconds."
+    )
 
     return outputs
 
@@ -5334,5 +6013,5 @@ if __name__ == "__main__":
 
     outputs = run_fastpark_historical_analysis(
         sql_connection=sql_connection,
-        output_path=r"output\fastpark\reports\fastpark_historical_analysis.xlsx",
+        output_path=r"output\fastpark\reports\fastpark_historical_analysis_v2.xlsx",
     )
