@@ -2,7 +2,6 @@ import sys
 import pathlib
 from pathlib import Path
 import time
-from tracemalloc import start
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -4737,7 +4736,7 @@ def summarise_backtest_results(backtest_results):
             rmse=("squared_error", lambda x: (x.mean()) ** 0.5),
             total_forecast=("forecast_value", "sum"),
             total_actual=("actual_value", "sum"),
-            records=("actual_value", "count"),
+            records=("forecast_value", "count"),
         )
         .reset_index()
     )
@@ -4749,7 +4748,7 @@ def summarise_backtest_results(backtest_results):
             mae=("absolute_error", "mean"),
             bias=("error", "mean"),
             mape=("absolute_percentage_error", "mean"),
-            records=("actual_value", "count"),
+            records=("forecast_value", "count"),
         )
         .reset_index()
     )
@@ -4761,7 +4760,7 @@ def summarise_backtest_results(backtest_results):
             mae=("absolute_error", "mean"),
             bias=("error", "mean"),
             mape=("absolute_percentage_error", "mean"),
-            records=("actual_value", "count"),
+            records=("forecast_value", "count"),
         )
         .reset_index()
     )
