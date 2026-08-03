@@ -605,6 +605,70 @@ def clean_bookings(bookings, config):
 
     return df
 
+def create_daily_price_summary(bookings_clean):
+    """
+    Create daily pricing metrics by planned entry date.
+
+    Purpose:
+        Allow price to be analysed as a daily demand driver alongside
+        passenger volumes, booking volumes, entries, exits and penetration.
+
+    Notes:
+        This uses valid bookings only because the purpose is to understand
+        the price environment associated with realised booking demand.
+    """
+
+    valid = bookings_clean[
+        bookings_clean["is_valid_booking"]
+    ].copy()
+
+    daily_price_summary = (
+        valid
+        .groupby("planned_entry_date", dropna=False)
+        .agg(
+            valid_bookings=("bookingId", "nunique"),
+
+            avg_booking_total=("bookingTotal", "mean"),
+            median_booking_total=("bookingTotal", "median"),
+
+            avg_product_price=("productPrice", "mean"),
+            median_product_price=("productPrice", "median"),
+
+            avg_price_per_day=("booking_total_per_planned_day", "mean"),
+            median_price_per_day=("booking_total_per_planned_day", "median"),
+
+            avg_price_per_quantity=("booking_total_per_quantity", "mean"),
+            median_price_per_quantity=("booking_total_per_quantity", "median"),
+
+            avg_price_per_quantity_per_day=(
+                "booking_total_per_quantity_per_day",
+                "mean",
+            ),
+            median_price_per_quantity_per_day=(
+                "booking_total_per_quantity_per_day",
+                "median",
+            ),
+
+            avg_product_price_per_day=("product_price_per_planned_day", "mean"),
+            median_product_price_per_day=("product_price_per_planned_day", "median"),
+
+            avg_lead_time_days=("lead_time_days_calc", "mean"),
+            median_lead_time_days=("lead_time_days_calc", "median"),
+
+            avg_duration_days=("planned_duration_days_calc", "mean"),
+            median_duration_days=("planned_duration_days_calc", "median"),
+        )
+        .reset_index()
+        .rename(columns={"planned_entry_date": "date"})
+    )
+
+    daily_price_summary["date"] = pd.to_datetime(
+        daily_price_summary["date"],
+        errors="coerce",
+    )
+
+    return daily_price_summary
+
 
 def clean_operations(operations, config):
     """
@@ -1787,7 +1851,11 @@ def create_airline_country_mix_features(flights_clean):
 # 7. COMBINE FASTPARK ACTUALS WITH PASSENGER CONTEXT
 # ============================================================
 
-def create_daily_driver_dataset(daily_fastpark_actuals, daily_passenger_summary):
+def create_daily_driver_dataset(
+    daily_fastpark_actuals,
+    daily_passenger_summary,
+    daily_price_summary=None,
+):
     """
     Create a daily modelling / analysis dataset by joining fastpark actuals
     to airport passenger context.
@@ -1818,6 +1886,20 @@ def create_daily_driver_dataset(daily_fastpark_actuals, daily_passenger_summary)
         on="date",
         how="left"
     )
+
+    # --------------------------------------------------------
+    # Optional daily price context
+    # --------------------------------------------------------
+    if daily_price_summary is not None:
+
+        price = daily_price_summary.copy()
+        price["date"] = pd.to_datetime(price["date"], errors="coerce")
+
+        daily = daily.merge(
+            price,
+            on="date",
+            how="left",
+        )
 
     # --------------------------------------------------------
     # Penetration metrics
@@ -2229,11 +2311,15 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
         "entries",
         "exits",
         "movements",
+        "net_flow",
+        "relative_occupancy",
+
         "departing_pax",
         "arriving_pax",
         "total_pax",
         "departing_flights",
         "arriving_flights",
+
         "domestic_departing_pax",
         "international_departing_pax",
         "domestic_arriving_pax",
@@ -2242,11 +2328,106 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
         "international_departing_share",
         "domestic_arriving_share",
         "international_arriving_share",
+
+        "entry_penetration",
+        "exit_penetration",
+
+        # Daily booking / price drivers
+        "valid_bookings",
+
+        "avg_booking_total",
+        "median_booking_total",
+
+        "avg_product_price",
+        "median_product_price",
+
+        "avg_price_per_day",
+        "median_price_per_day",
+
+        "avg_price_per_quantity",
+        "median_price_per_quantity",
+
+        "avg_price_per_quantity_per_day",
+        "median_price_per_quantity_per_day",
+
+        "avg_product_price_per_day",
+        "median_product_price_per_day",
+
+        "avg_lead_time_days",
+        "median_lead_time_days",
+
+        "avg_duration_days",
+        "median_duration_days",
     ]
 
     corr_cols = [col for col in corr_cols if col in df.columns]
 
     correlation_summary = df[corr_cols].corr()
+
+    # --------------------------------------------------------
+    # Focused price correlation summary
+    # --------------------------------------------------------
+    price_driver_cols = [
+        "valid_bookings",
+
+        "avg_booking_total",
+        "median_booking_total",
+
+        "avg_product_price",
+        "median_product_price",
+
+        "avg_price_per_day",
+        "median_price_per_day",
+
+        "avg_price_per_quantity",
+        "median_price_per_quantity",
+
+        "avg_price_per_quantity_per_day",
+        "median_price_per_quantity_per_day",
+
+        "avg_product_price_per_day",
+        "median_product_price_per_day",
+
+        "avg_lead_time_days",
+        "median_lead_time_days",
+
+        "avg_duration_days",
+        "median_duration_days",
+    ]
+
+    demand_outcome_cols = [
+        "valid_bookings",
+        "entries",
+        "exits",
+        "movements",
+        "net_flow",
+        "relative_occupancy",
+        "entry_penetration",
+        "exit_penetration",
+        "departing_pax",
+        "arriving_pax",
+        "total_pax",
+    ]
+
+    price_driver_cols = [
+        col for col in price_driver_cols
+        if col in correlation_summary.index
+    ]
+
+    demand_outcome_cols = [
+        col for col in demand_outcome_cols
+        if col in correlation_summary.columns
+    ]
+
+    if price_driver_cols and demand_outcome_cols:
+        price_correlation_summary = (
+            correlation_summary
+            .loc[price_driver_cols, demand_outcome_cols]
+            .reset_index()
+            .rename(columns={"index": "price_or_booking_metric"})
+        )
+    else:
+        price_correlation_summary = pd.DataFrame()
 
     # --------------------------------------------------------
     # Weekly / weekday summary
@@ -2265,7 +2446,15 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             avg_total_pax=("total_pax", "mean"),
             avg_entry_penetration=("entry_penetration", "mean"),
             avg_exit_penetration=("exit_penetration", "mean"),
+            avg_valid_bookings=("valid_bookings", "mean"),
+            avg_booking_total=("avg_booking_total", "mean"),
+            avg_price_per_day=("avg_price_per_day", "mean"),
+            median_price_per_day=("median_price_per_day", "mean"),
+            avg_product_price_per_day=("avg_product_price_per_day", "mean"),
+            avg_lead_time_days=("avg_lead_time_days", "mean"),
+            avg_duration_days=("avg_duration_days", "mean"),
         )
+
         .reset_index()
         .sort_values("weekday_num")
     )
@@ -2287,6 +2476,13 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             avg_total_pax=("total_pax", "mean"),
             avg_entry_penetration=("entry_penetration", "mean"),
             avg_exit_penetration=("exit_penetration", "mean"),
+            avg_valid_bookings=("valid_bookings", "mean"),
+            avg_booking_total=("avg_booking_total", "mean"),
+            avg_price_per_day=("avg_price_per_day", "mean"),
+            median_price_per_day=("median_price_per_day", "mean"),
+            avg_product_price_per_day=("avg_product_price_per_day", "mean"),
+            avg_lead_time_days=("avg_lead_time_days", "mean"),
+            avg_duration_days=("avg_duration_days", "mean"),
         )
         .reset_index()
         .sort_values("month")
@@ -2311,6 +2507,13 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             avg_total_pax=("total_pax", "mean"),
             avg_entry_penetration=("entry_penetration", "mean"),
             avg_exit_penetration=("exit_penetration", "mean"),
+            avg_valid_bookings=("valid_bookings", "mean"),
+            avg_booking_total=("avg_booking_total", "mean"),
+            avg_price_per_day=("avg_price_per_day", "mean"),
+            median_price_per_day=("median_price_per_day", "mean"),
+            avg_product_price_per_day=("avg_product_price_per_day", "mean"),
+            avg_lead_time_days=("avg_lead_time_days", "mean"),
+            avg_duration_days=("avg_duration_days", "mean"),
         )
         .reset_index()
         .sort_values(["year", "month"])
@@ -2620,6 +2823,72 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
                 }
             )
 
+    # --------------------------------------------------------
+    # Price correlations with demand outcomes
+    # --------------------------------------------------------
+    price_metrics = [
+        "avg_booking_total",
+        "median_booking_total",
+        "avg_product_price",
+        "median_product_price",
+        "avg_price_per_day",
+        "median_price_per_day",
+        "avg_price_per_quantity",
+        "median_price_per_quantity",
+        "avg_price_per_quantity_per_day",
+        "median_price_per_quantity_per_day",
+        "avg_product_price_per_day",
+        "median_product_price_per_day",
+    ]
+
+    price_metrics = [
+        col for col in price_metrics
+        if col in correlation_summary.index
+    ]
+
+    price_targets = [
+        ("valid_bookings", "bookings"),
+        ("entries", "entries"),
+        ("exits", "exits"),
+        ("movements", "movements"),
+        ("entry_penetration", "entry penetration"),
+        ("exit_penetration", "exit penetration"),
+    ]
+
+    for target_col, target_label in price_targets:
+
+        if target_col not in correlation_summary.columns:
+            continue
+
+        if not price_metrics:
+            continue
+
+        target_price_corr = (
+            correlation_summary
+            .loc[price_metrics, target_col]
+            .dropna()
+            .sort_values(
+                key=lambda x: x.abs(),
+                ascending=False,
+            )
+        )
+
+        if target_price_corr.empty:
+            continue
+
+        summary_rows.append(
+            {
+                "section": "Pricing",
+                "metric": f"Strongest price relationship with {target_label}",
+                "value": target_price_corr.index[0],
+                "supporting_value": target_price_corr.iloc[0],
+                "interpretation": (
+                    f"Price metric with the strongest absolute correlation "
+                    f"to {target_label}."
+                ),
+            }
+        )
+
     # Weekday effects
     if not weekday_summary.empty:
         max_entry_day = weekday_summary.sort_values(
@@ -2874,6 +3143,7 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
     results = {
         "demand_driver_summary": demand_driver_summary,
         "correlation_summary": correlation_summary,
+        "price_correlation_summary": price_correlation_summary,
         "weekday_summary": weekday_summary,
         "monthly_summary": monthly_summary,
         "month_by_year_summary": month_by_year_summary,
@@ -2881,247 +3151,6 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
     }
 
     return results
-
-def analyse_price_behaviour(master):
-    """
-    Analyse how FastPark price relates to booking behaviour and operational outcomes.
-
-    Purpose:
-        Understand whether pricing is associated with:
-            - booking lead time
-            - planned duration
-            - cancellations
-            - no-shows
-            - actual entries
-            - actual exits
-
-    Notes:
-        Total price is expected to increase with planned duration, so price-per-day
-        measures are also included to separate stay length from pricing level.
-    """
-
-    df = master.copy()
-
-    # Ensure datetime fields are safe.
-    df["entryDate"] = pd.to_datetime(df["entryDate"], errors="coerce")
-    df["exitDate"] = pd.to_datetime(df["exitDate"], errors="coerce")
-    df["createdAt"] = pd.to_datetime(df["createdAt"], errors="coerce")
-
-    # Recalculate price metrics in case this function is called on master
-    # where some derived fields are missing.
-    if "planned_duration_days_calc" not in df.columns:
-        df["planned_duration_days_calc"] = (
-            df["exitDate"] - df["entryDate"]
-        ).dt.total_seconds() / 86400
-
-    if "booking_total_per_quantity" not in df.columns:
-        df["booking_total_per_quantity"] = (
-            df["bookingTotal"]
-            / df["productQuantity"].replace(0, np.nan)
-        )
-
-    df["booking_total_per_planned_day"] = (
-        df["bookingTotal"]
-        / df["planned_duration_days_calc"].replace(0, np.nan)
-    )
-
-    df["booking_total_per_quantity_per_day"] = (
-        df["booking_total_per_quantity"]
-        / df["planned_duration_days_calc"].replace(0, np.nan)
-    )
-
-    df["product_price_per_planned_day"] = (
-        df["productPrice"]
-        / df["planned_duration_days_calc"].replace(0, np.nan)
-    )
-
-    # No-show flag. This mirrors the existing no-show definition but avoids
-    # requiring the no-show function output.
-    analysis_cutoff_date = pd.Timestamp.today().normalize()
-
-    df["is_no_show_for_price_analysis"] = (
-        df["is_valid_booking"]
-        & df["actual_entry_ts"].isna()
-        & (df["entryDate"] < analysis_cutoff_date)
-    )
-
-    price_cols = [
-        "bookingTotal",
-        "productPrice",
-        "booking_total_per_quantity",
-        "booking_total_per_planned_day",
-        "booking_total_per_quantity_per_day",
-        "product_price_per_planned_day",
-    ]
-
-    price_cols = [col for col in price_cols if col in df.columns]
-
-    behaviour_cols = [
-        "lead_time_days_calc",
-        "planned_duration_days_calc",
-        "is_cancelled",
-        "is_no_show_for_price_analysis",
-        "has_actual_checkin",
-        "has_actual_checkout",
-    ]
-
-    behaviour_cols = [col for col in behaviour_cols if col in df.columns]
-
-    # --------------------------------------------------------
-    # Price correlation summary
-    # --------------------------------------------------------
-    corr_cols = price_cols + behaviour_cols
-
-    price_correlation_summary = (
-        df[corr_cols]
-        .replace([np.inf, -np.inf], np.nan)
-        .corr()
-    )
-
-    # --------------------------------------------------------
-    # Price by duration band
-    # --------------------------------------------------------
-    price_by_duration_band = (
-        df
-        .groupby("planned_duration_band", dropna=False, observed=False)
-        .agg(
-            bookings=("bookingId", "count"),
-            unique_bookings=("bookingId", "nunique"),
-            avg_booking_total=("bookingTotal", "mean"),
-            median_booking_total=("bookingTotal", "median"),
-            avg_price_per_day=("booking_total_per_planned_day", "mean"),
-            median_price_per_day=("booking_total_per_planned_day", "median"),
-            avg_lead_time_days=("lead_time_days_calc", "mean"),
-            cancellation_rate=("is_cancelled", "mean"),
-            no_show_rate=("is_no_show_for_price_analysis", "mean"),
-        )
-        .reset_index()
-    )
-
-    # --------------------------------------------------------
-    # Price by lead-time band
-    # --------------------------------------------------------
-    df["lead_time_band"] = pd.cut(
-        df["lead_time_days_calc"],
-        bins=[-np.inf, 0, 1, 3, 7, 14, 28, 56, np.inf],
-        labels=[
-            "same day or negative",
-            "1 day",
-            "2-3 days",
-            "4-7 days",
-            "8-14 days",
-            "15-28 days",
-            "29-56 days",
-            "57+ days",
-        ],
-    )
-
-    price_by_lead_time = (
-        df
-        .groupby("lead_time_band", dropna=False, observed=False)
-        .agg(
-            bookings=("bookingId", "count"),
-            unique_bookings=("bookingId", "nunique"),
-            avg_booking_total=("bookingTotal", "mean"),
-            median_booking_total=("bookingTotal", "median"),
-            avg_price_per_day=("booking_total_per_planned_day", "mean"),
-            median_price_per_day=("booking_total_per_planned_day", "median"),
-            avg_planned_duration_days=("planned_duration_days_calc", "mean"),
-            cancellation_rate=("is_cancelled", "mean"),
-            no_show_rate=("is_no_show_for_price_analysis", "mean"),
-        )
-        .reset_index()
-    )
-
-    # --------------------------------------------------------
-    # Daily price and demand summary
-    # --------------------------------------------------------
-    valid_bookings = df[df["is_valid_booking"]].copy()
-
-    daily_price_demand = (
-        valid_bookings
-        .groupby("planned_entry_date", dropna=False)
-        .agg(
-            valid_bookings=("bookingId", "nunique"),
-            avg_booking_total=("bookingTotal", "mean"),
-            median_booking_total=("bookingTotal", "median"),
-            avg_price_per_day=("booking_total_per_planned_day", "mean"),
-            median_price_per_day=("booking_total_per_planned_day", "median"),
-            avg_lead_time_days=("lead_time_days_calc", "mean"),
-            avg_planned_duration_days=("planned_duration_days_calc", "mean"),
-        )
-        .reset_index()
-        .rename(columns={"planned_entry_date": "date"})
-    )
-
-    daily_price_demand["date"] = pd.to_datetime(daily_price_demand["date"])
-
-    daily_price_demand["weekday"] = daily_price_demand["date"].dt.day_name()
-    daily_price_demand["month"] = daily_price_demand["date"].dt.month
-
-    # --------------------------------------------------------
-    # Price summary
-    # --------------------------------------------------------
-    price_summary = pd.DataFrame(
-        [
-            {
-                "metric": "Average booking total",
-                "value": df["bookingTotal"].mean(),
-                "interpretation": "Average total value of FastPark bookings.",
-            },
-            {
-                "metric": "Median booking total",
-                "value": df["bookingTotal"].median(),
-                "interpretation": "Median total value of FastPark bookings.",
-            },
-            {
-                "metric": "Average price per planned day",
-                "value": df["booking_total_per_planned_day"].mean(),
-                "interpretation": "Average booking value divided by planned duration.",
-            },
-            {
-                "metric": "Median price per planned day",
-                "value": df["booking_total_per_planned_day"].median(),
-                "interpretation": "Median booking value divided by planned duration.",
-            },
-            {
-                "metric": "Correlation price per day with lead time",
-                "value": df["booking_total_per_planned_day"].corr(
-                    df["lead_time_days_calc"]
-                ),
-                "interpretation": "Relationship between price per day and how far in advance bookings are made.",
-            },
-            {
-                "metric": "Correlation price per day with planned duration",
-                "value": df["booking_total_per_planned_day"].corr(
-                    df["planned_duration_days_calc"]
-                ),
-                "interpretation": "Relationship between price per day and planned stay length.",
-            },
-            {
-                "metric": "Correlation price per day with cancellation flag",
-                "value": df["booking_total_per_planned_day"].corr(
-                    df["is_cancelled"]
-                ),
-                "interpretation": "Relationship between price per day and cancellation behaviour.",
-            },
-            {
-                "metric": "Correlation price per day with no-show flag",
-                "value": df["booking_total_per_planned_day"].corr(
-                    df["is_no_show_for_price_analysis"]
-                ),
-                "interpretation": "Relationship between price per day and no-show behaviour.",
-            },
-        ]
-    )
-
-    return {
-        "price_summary": price_summary,
-        "price_correlation_summary": price_correlation_summary,
-        "price_by_duration_band": price_by_duration_band,
-        "price_by_lead_time": price_by_lead_time,
-        "daily_price_demand": daily_price_demand,
-    }
 
 
 # ============================================================
@@ -4886,6 +4915,9 @@ def export_outputs_to_excel(outputs, output_path):
         "forecast_error_summaries_driver_analysis_correlation_summary":
             "Driver Correlations",
 
+        "forecast_error_summaries_driver_analysis_price_correlation_summary":
+            "Price Driver Corr",
+
         "forecast_error_summaries_driver_analysis_weekday_summary":
             "Weekly Demand Drivers",
 
@@ -4984,24 +5016,6 @@ def export_outputs_to_excel(outputs, output_path):
 
         "forecast_error_summaries_no_show_results_no_show_by_duration_and_lead_time":
             "No Show Duration/Lead Time",
-
-
-        # Price Analysis
-
-        "forecast_error_summaries_price_analysis_price_summary":
-            "Price Summary",
-
-        "forecast_error_summaries_price_analysis_price_correlation_summary":
-            "Price Correlations",
-
-        "forecast_error_summaries_price_analysis_price_by_duration_band":
-            "Price by Duration",
-
-        "forecast_error_summaries_price_analysis_price_by_lead_time":
-            "Price by Lead Time",
-
-        "forecast_error_summaries_price_analysis_daily_price_demand":
-            "Daily Price Demand",
 
 
         # Hourly Profiles
@@ -5191,6 +5205,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     bookings_clean = clean_bookings(bookings_raw, config)
     operations_clean = clean_operations(operations_raw, config)
     flights_clean = clean_flights(flights_raw, config)
+    daily_price_summary = create_daily_price_summary(bookings_clean)
 
     t4 = step(t3, "Cleaned FastPark Bookings, Actuals and Flights")
 
@@ -5215,14 +5230,13 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Status, cancellations and no-shows
     # ----------------------------
 
-    print("[6/14] Analysing Booking Statuses, Cancellations, No-Shows and Price…")
+    print("[6/14] Analysing Booking Statuses, Cancellations and No-Shows…")
 
     status_summary = analyse_booking_statuses(bookings_clean)
     cancellation_results = analyse_cancellations(bookings_clean)
     no_show_results = analyse_no_shows(master)
-    price_analysis = analyse_price_behaviour(master)
 
-    t6 = step(t5, "Analysed Booking Statuses, Cancellations, No-Shows and Price")
+    t6 = step(t5, "Analysed Booking Statuses, Cancellations and No-Shows ")
 
     # ----------------------------
     # Actual FastPark demand
@@ -5274,6 +5288,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     daily_driver_dataset = create_daily_driver_dataset(
         daily_fastpark_actuals,
         daily_passenger_summary,
+        daily_price_summary=daily_price_summary,
     )
 
     driver_analysis = analyse_actual_demand_drivers(daily_driver_dataset)
@@ -5358,7 +5373,6 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         "status_summary": status_summary,
         "cancellation_results": cancellation_results,
         "no_show_results": no_show_results,
-        "price_analysis": price_analysis,
         "hourly_profiles": hourly_profiles,
         "hourly_offset_analysis": hourly_offset_analysis,
         "driver_analysis": driver_analysis,
