@@ -575,8 +575,33 @@ def clean_bookings(bookings, config):
         include_lowest=True
     )
 
-    #Price metrics
-    df["booking_total_per_quantity"] = df["bookingTotal"] / df["productQuantity"].replace(0, np.nan)
+    # --------------------------------------------------------
+    # Price metrics
+    # --------------------------------------------------------
+    # bookingTotal is the total value of the booking.
+    # Because longer stays naturally cost more, price-per-day metrics are
+    # needed to understand whether pricing affects demand behaviour rather
+    # than just reflecting duration.
+
+    df["booking_total_per_quantity"] = (
+        df["bookingTotal"]
+        / df["productQuantity"].replace(0, np.nan)
+    )
+
+    df["booking_total_per_planned_day"] = (
+        df["bookingTotal"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    df["booking_total_per_quantity_per_day"] = (
+        df["booking_total_per_quantity"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    df["product_price_per_planned_day"] = (
+        df["productPrice"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
 
     return df
 
@@ -2857,6 +2882,248 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
 
     return results
 
+def analyse_price_behaviour(master):
+    """
+    Analyse how FastPark price relates to booking behaviour and operational outcomes.
+
+    Purpose:
+        Understand whether pricing is associated with:
+            - booking lead time
+            - planned duration
+            - cancellations
+            - no-shows
+            - actual entries
+            - actual exits
+
+    Notes:
+        Total price is expected to increase with planned duration, so price-per-day
+        measures are also included to separate stay length from pricing level.
+    """
+
+    df = master.copy()
+
+    # Ensure datetime fields are safe.
+    df["entryDate"] = pd.to_datetime(df["entryDate"], errors="coerce")
+    df["exitDate"] = pd.to_datetime(df["exitDate"], errors="coerce")
+    df["createdAt"] = pd.to_datetime(df["createdAt"], errors="coerce")
+
+    # Recalculate price metrics in case this function is called on master
+    # where some derived fields are missing.
+    if "planned_duration_days_calc" not in df.columns:
+        df["planned_duration_days_calc"] = (
+            df["exitDate"] - df["entryDate"]
+        ).dt.total_seconds() / 86400
+
+    if "booking_total_per_quantity" not in df.columns:
+        df["booking_total_per_quantity"] = (
+            df["bookingTotal"]
+            / df["productQuantity"].replace(0, np.nan)
+        )
+
+    df["booking_total_per_planned_day"] = (
+        df["bookingTotal"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    df["booking_total_per_quantity_per_day"] = (
+        df["booking_total_per_quantity"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    df["product_price_per_planned_day"] = (
+        df["productPrice"]
+        / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    # No-show flag. This mirrors the existing no-show definition but avoids
+    # requiring the no-show function output.
+    analysis_cutoff_date = pd.Timestamp.today().normalize()
+
+    df["is_no_show_for_price_analysis"] = (
+        df["is_valid_booking"]
+        & df["actual_entry_ts"].isna()
+        & (df["entryDate"] < analysis_cutoff_date)
+    )
+
+    price_cols = [
+        "bookingTotal",
+        "productPrice",
+        "booking_total_per_quantity",
+        "booking_total_per_planned_day",
+        "booking_total_per_quantity_per_day",
+        "product_price_per_planned_day",
+    ]
+
+    price_cols = [col for col in price_cols if col in df.columns]
+
+    behaviour_cols = [
+        "lead_time_days_calc",
+        "planned_duration_days_calc",
+        "is_cancelled",
+        "is_no_show_for_price_analysis",
+        "has_actual_checkin",
+        "has_actual_checkout",
+    ]
+
+    behaviour_cols = [col for col in behaviour_cols if col in df.columns]
+
+    # --------------------------------------------------------
+    # Price correlation summary
+    # --------------------------------------------------------
+    corr_cols = price_cols + behaviour_cols
+
+    price_correlation_summary = (
+        df[corr_cols]
+        .replace([np.inf, -np.inf], np.nan)
+        .corr()
+    )
+
+    # --------------------------------------------------------
+    # Price by duration band
+    # --------------------------------------------------------
+    price_by_duration_band = (
+        df
+        .groupby("planned_duration_band", dropna=False, observed=False)
+        .agg(
+            bookings=("bookingId", "count"),
+            unique_bookings=("bookingId", "nunique"),
+            avg_booking_total=("bookingTotal", "mean"),
+            median_booking_total=("bookingTotal", "median"),
+            avg_price_per_day=("booking_total_per_planned_day", "mean"),
+            median_price_per_day=("booking_total_per_planned_day", "median"),
+            avg_lead_time_days=("lead_time_days_calc", "mean"),
+            cancellation_rate=("is_cancelled", "mean"),
+            no_show_rate=("is_no_show_for_price_analysis", "mean"),
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------
+    # Price by lead-time band
+    # --------------------------------------------------------
+    df["lead_time_band"] = pd.cut(
+        df["lead_time_days_calc"],
+        bins=[-np.inf, 0, 1, 3, 7, 14, 28, 56, np.inf],
+        labels=[
+            "same day or negative",
+            "1 day",
+            "2-3 days",
+            "4-7 days",
+            "8-14 days",
+            "15-28 days",
+            "29-56 days",
+            "57+ days",
+        ],
+    )
+
+    price_by_lead_time = (
+        df
+        .groupby("lead_time_band", dropna=False, observed=False)
+        .agg(
+            bookings=("bookingId", "count"),
+            unique_bookings=("bookingId", "nunique"),
+            avg_booking_total=("bookingTotal", "mean"),
+            median_booking_total=("bookingTotal", "median"),
+            avg_price_per_day=("booking_total_per_planned_day", "mean"),
+            median_price_per_day=("booking_total_per_planned_day", "median"),
+            avg_planned_duration_days=("planned_duration_days_calc", "mean"),
+            cancellation_rate=("is_cancelled", "mean"),
+            no_show_rate=("is_no_show_for_price_analysis", "mean"),
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------
+    # Daily price and demand summary
+    # --------------------------------------------------------
+    valid_bookings = df[df["is_valid_booking"]].copy()
+
+    daily_price_demand = (
+        valid_bookings
+        .groupby("planned_entry_date", dropna=False)
+        .agg(
+            valid_bookings=("bookingId", "nunique"),
+            avg_booking_total=("bookingTotal", "mean"),
+            median_booking_total=("bookingTotal", "median"),
+            avg_price_per_day=("booking_total_per_planned_day", "mean"),
+            median_price_per_day=("booking_total_per_planned_day", "median"),
+            avg_lead_time_days=("lead_time_days_calc", "mean"),
+            avg_planned_duration_days=("planned_duration_days_calc", "mean"),
+        )
+        .reset_index()
+        .rename(columns={"planned_entry_date": "date"})
+    )
+
+    daily_price_demand["date"] = pd.to_datetime(daily_price_demand["date"])
+
+    daily_price_demand["weekday"] = daily_price_demand["date"].dt.day_name()
+    daily_price_demand["month"] = daily_price_demand["date"].dt.month
+
+    # --------------------------------------------------------
+    # Price summary
+    # --------------------------------------------------------
+    price_summary = pd.DataFrame(
+        [
+            {
+                "metric": "Average booking total",
+                "value": df["bookingTotal"].mean(),
+                "interpretation": "Average total value of FastPark bookings.",
+            },
+            {
+                "metric": "Median booking total",
+                "value": df["bookingTotal"].median(),
+                "interpretation": "Median total value of FastPark bookings.",
+            },
+            {
+                "metric": "Average price per planned day",
+                "value": df["booking_total_per_planned_day"].mean(),
+                "interpretation": "Average booking value divided by planned duration.",
+            },
+            {
+                "metric": "Median price per planned day",
+                "value": df["booking_total_per_planned_day"].median(),
+                "interpretation": "Median booking value divided by planned duration.",
+            },
+            {
+                "metric": "Correlation price per day with lead time",
+                "value": df["booking_total_per_planned_day"].corr(
+                    df["lead_time_days_calc"]
+                ),
+                "interpretation": "Relationship between price per day and how far in advance bookings are made.",
+            },
+            {
+                "metric": "Correlation price per day with planned duration",
+                "value": df["booking_total_per_planned_day"].corr(
+                    df["planned_duration_days_calc"]
+                ),
+                "interpretation": "Relationship between price per day and planned stay length.",
+            },
+            {
+                "metric": "Correlation price per day with cancellation flag",
+                "value": df["booking_total_per_planned_day"].corr(
+                    df["is_cancelled"]
+                ),
+                "interpretation": "Relationship between price per day and cancellation behaviour.",
+            },
+            {
+                "metric": "Correlation price per day with no-show flag",
+                "value": df["booking_total_per_planned_day"].corr(
+                    df["is_no_show_for_price_analysis"]
+                ),
+                "interpretation": "Relationship between price per day and no-show behaviour.",
+            },
+        ]
+    )
+
+    return {
+        "price_summary": price_summary,
+        "price_correlation_summary": price_correlation_summary,
+        "price_by_duration_band": price_by_duration_band,
+        "price_by_lead_time": price_by_lead_time,
+        "daily_price_demand": daily_price_demand,
+    }
+
+
 # ============================================================
 # 9. BOOKING CURVE ANALYSIS
 # ============================================================
@@ -4719,6 +4986,24 @@ def export_outputs_to_excel(outputs, output_path):
             "No Show Duration/Lead Time",
 
 
+        # Price Analysis
+
+        "forecast_error_summaries_price_analysis_price_summary":
+            "Price Summary",
+
+        "forecast_error_summaries_price_analysis_price_correlation_summary":
+            "Price Correlations",
+
+        "forecast_error_summaries_price_analysis_price_by_duration_band":
+            "Price by Duration",
+
+        "forecast_error_summaries_price_analysis_price_by_lead_time":
+            "Price by Lead Time",
+
+        "forecast_error_summaries_price_analysis_daily_price_demand":
+            "Daily Price Demand",
+
+
         # Hourly Profiles
 
         "forecast_error_summaries_hourly_profiles_entry_profile_overall":
@@ -4865,7 +5150,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Load raw data
     # ----------------------------
 
-    print("[1/17] Loading FastPark Bookings…")
+    print("[1/14] Loading FastPark Bookings…")
     bookings_raw = get_fastpark_bookings(
         start=config["analysis_start_date"],
         end=config["analysis_end_date"],
@@ -4876,7 +5161,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
 
     t1 = step(t0, f"Loaded FastPark Bookings ({len(bookings_raw):,} rows)")
 
-    print("[2/17] Loading FastPark Actuals…")
+    print("[2/14] Loading FastPark Actuals…")
 
     operations_raw = get_fastpark_entry_exits(
         start=config["analysis_start_date"],
@@ -4886,7 +5171,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
 
     t2 = step(t1, f"Loaded FastPark Actuals ({len(operations_raw):,} rows)")
 
-    print("[3/17] Loading Historical Flights…")
+    print("[3/14] Loading Historical Flights…")
 
     flights_raw = get_historical_flight_performance(
         start=config["analysis_start_date"],
@@ -4901,7 +5186,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Clean raw data
     # ----------------------------
 
-    print("[4/17] Cleaning FastPark Bookings, Actuals and Flights…")
+    print("[4/14] Cleaning FastPark Bookings, Actuals and Flights…")
 
     bookings_clean = clean_bookings(bookings_raw, config)
     operations_clean = clean_operations(operations_raw, config)
@@ -4913,7 +5198,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Reconcile bookings and operations
     # ----------------------------
 
-    print("[5/17] Reconciling FastPark Bookings and Actuals…")
+    print("[5/14] Reconciling FastPark Bookings and Actuals…")
 
     master = reconcile_bookings_to_operations(bookings_clean, operations_clean)
 
@@ -4930,20 +5215,20 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Status, cancellations and no-shows
     # ----------------------------
 
-    print("[6/17] Analysing Booking Statuses, Cancellations and No-Shows…")
+    print("[6/14] Analysing Booking Statuses, Cancellations, No-Shows and Price…")
 
     status_summary = analyse_booking_statuses(bookings_clean)
     cancellation_results = analyse_cancellations(bookings_clean)
     no_show_results = analyse_no_shows(master)
+    price_analysis = analyse_price_behaviour(master)
 
-    t6 = step(t5, "Analysed Booking Statuses, Cancellations and No-Shows")
-
+    t6 = step(t5, "Analysed Booking Statuses, Cancellations, No-Shows and Price")
 
     # ----------------------------
     # Actual FastPark demand
     # ----------------------------
 
-    print("[7/17] Creating Daily and Hourly FastPark Actuals…")
+    print("[7/14] Creating Daily and Hourly FastPark Actuals…")
 
     daily_fastpark_actuals = create_daily_fastpark_actuals(master)
     hourly_fastpark_actuals = create_hourly_fastpark_actuals(master)
@@ -4956,7 +5241,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Passenger / flight context
     # ----------------------------
 
-    print("[8/17] Creating Passenger Context Features…")
+    print("[8/14] Creating Passenger Context Features…")
     daily_passenger_summary = create_daily_passenger_summary(flights_clean, config)
     hourly_passenger_summary = create_hourly_passenger_summary(flights_clean, config)
 
@@ -4970,7 +5255,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Hourly FastPark vs passenger offset analysis
     # ----------------------------
 
-    print("[9/17] Analysing Hourly FastPark vs Passenger Offsets…")
+    print("[9/14] Analysing Hourly FastPark vs Passenger Offsets…")
 
     hourly_offset_analysis = analyse_hourly_passenger_offsets(
         hourly_fastpark_actuals=hourly_fastpark_actuals,
@@ -4985,7 +5270,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Daily driver dataset
     # ----------------------------
 
-    print("[10/17] Analysing Daily FastPark Drivers…")
+    print("[10/14] Analysing Daily FastPark Drivers…")
     daily_driver_dataset = create_daily_driver_dataset(
         daily_fastpark_actuals,
         daily_passenger_summary,
@@ -5000,7 +5285,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Booking curve
     # ----------------------------
 
-    print("[11/17] Analysing Booking and Exit Visibility Curves…")
+    print("[11/14] Analysing Booking and Exit Visibility Curves…")
 
     booking_curve = create_booking_curve_dataset(
         bookings_clean=bookings_clean,
@@ -5039,7 +5324,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Duration and return behaviour
     # ----------------------------
 
-    print("[12/17] Analysing Duration and Return Behaviour…")
+    print("[12/14] Analysing Duration and Return Behaviour…")
 
     duration_df = create_duration_analysis_dataset(master, config)
     duration_patterns = analyse_duration_patterns(duration_df)
@@ -5053,7 +5338,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # Tendency back-testing
     # ----------------------------
 
-    print("[14/17] Back-testing Tendency Forecast Methods…")
+    print("[13/14] Back-testing Tendency Forecast Methods…")
 
     tendency_backtest_results = run_tendency_window_backtest(
         daily_driver_dataset,
@@ -5062,17 +5347,18 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
 
     tendency_summary = summarise_backtest_results(tendency_backtest_results)
 
-    t14 = step(t12, "Back-tested Tendency Forecast Methods")
+    t13 = step(t12, "Back-tested Tendency Forecast Methods")
 
     # ----------------------------
     # Package outputs
     # ----------------------------
 
-    print("[17/17] Building Outputs…")
+    print("[14/14] Building Outputs…")
     forecast_error_summaries = {
         "status_summary": status_summary,
         "cancellation_results": cancellation_results,
         "no_show_results": no_show_results,
+        "price_analysis": price_analysis,
         "hourly_profiles": hourly_profiles,
         "hourly_offset_analysis": hourly_offset_analysis,
         "driver_analysis": driver_analysis,
@@ -5095,10 +5381,10 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         forecast_error_summaries=forecast_error_summaries,
     )
 
-    t17 = step(t14, "Built Outputs")
+    t14 = step(t13, "Built Outputs")
 
     
-    final_time = t17
+    final_time = t14
 
     if output_path is not None:
         print(f"Exporting Outputs to {output_path}…")
@@ -5106,7 +5392,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
             outputs=outputs,
             output_path=output_path,
         )
-        final_time = step(t17, f"Exported Outputs to {output_path}")
+        final_time = step(t14, f"Exported Outputs to {output_path}")
 
     print(
         f"Completed FastPark Historical Analysis "
