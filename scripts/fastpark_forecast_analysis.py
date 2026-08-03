@@ -31,7 +31,6 @@ Purpose:
     4. Stay duration and exit forecasting logic
     5. Tendency / rolling penetration windows
     6. Passenger, airline, country and seasonality drivers
-    7. Operational workload and FTE translation
 
 Core tables:
   AirportX.v_Bookings
@@ -99,6 +98,7 @@ def get_analysis_config():
         # Keep available, but optionally skip for entry tendency if same-weekday methods perform better.
         "tendency_windows_weeks": [2, 4, 6, 8, 13],
         "run_general_rolling_entry_tendency": False,
+        "run_general_rolling_exit_tendency": False,
 
         # Same weekday ratio-of-sums methods.
         # Example: to forecast a Friday, use previous n Fridays:
@@ -1055,11 +1055,13 @@ def analyse_cancellations(bookings_clean):
     results = {
         "cancellation_summary": cancellation_summary,
         "cancellation_by_lead_time": cancellation_rate_by(["lead_time_band"]),
-        "cancellation_by_weekday": cancellation_rate_by(["entry_weekday"]),
-        "cancellation_by_month": cancellation_rate_by(["entry_month"]),
-        "cancellation_by_channel": cancellation_rate_by(["channel"]),
         "cancellation_by_duration_band": cancellation_rate_by(["planned_duration_band"]),
+        "cancellation_by_duration_and_lead_time": cancellation_rate_by(["planned_duration_band", "lead_time_band"]),
         "cancellation_by_airline": cancellation_rate_by(["outboundAirline"]),
+
+        # prove to be not useful in initial testing, uncomment if a forecasting use is identified
+        #"cancellation_by_weekday": cancellation_rate_by(["entry_weekday"]),
+        #"cancellation_by_month": cancellation_rate_by(["entry_month"]),
     }
 
     return results
@@ -1163,14 +1165,56 @@ def analyse_no_shows(master, analysis_cutoff_date=None):
         ]
     )
 
+    # --------------------------------------------------------
+    # Temporary validation check for short-duration no-shows
+    # --------------------------------------------------------
+    # This diagnostic helps confirm whether high no-show rates in
+    # short-duration bookings are caused by genuine no-shows or by
+    # missing operational matches.
+
+    duration_match_check = (
+        eligible
+        .groupby("planned_duration_band", observed=False)
+        .agg(
+            bookings=("bookingId", "count"),
+            no_shows=("is_no_show", "sum"),
+            operation_matches=("BookingReference", lambda x: x.notna().sum()),
+            actual_checkins=("actual_entry_ts", lambda x: x.notna().sum()),
+        )
+        .reset_index()
+    )
+
+    duration_match_check["no_show_rate"] = (
+        duration_match_check["no_shows"]
+        / duration_match_check["bookings"].replace(0, np.nan)
+    )
+
+    duration_match_check["operation_match_rate"] = (
+        duration_match_check["operation_matches"]
+        / duration_match_check["bookings"].replace(0, np.nan)
+    )
+
+    duration_match_check["actual_checkin_rate"] = (
+        duration_match_check["actual_checkins"]
+        / duration_match_check["bookings"].replace(0, np.nan)
+    )
+
+    print("Duration match check:")
+    print(duration_match_check)
+
     results = {
         "no_show_summary": no_show_summary,
         "no_show_by_lead_time": no_show_rate_by(["lead_time_band"]),
-        "no_show_by_weekday": no_show_rate_by(["entry_weekday"]),
-        "no_show_by_month": no_show_rate_by(["entry_month"]),
-        "no_show_by_channel": no_show_rate_by(["channel"]),
         "no_show_by_duration_band": no_show_rate_by(["planned_duration_band"]),
-        "no_show_by_airline": no_show_rate_by(["outboundAirline"]),
+        "no_show_by_duration_and_lead_time": no_show_rate_by(["planned_duration_band", "lead_time_band"]),
+
+        #Temporary validation table for investigating high no-show rates in short-duration bookings.
+        "duration_match_check": duration_match_check,
+
+        #supporting analysis. uncomment if required for future modelling work. 
+        #"no_show_by_airline": no_show_rate_by(["outboundAirline"]),
+        #"no_show_by_weekday": no_show_rate_by(["entry_weekday"]),
+        #"no_show_by_month": no_show_rate_by(["entry_month"]),
     }
 
     return results
@@ -1418,9 +1462,12 @@ def create_hourly_profiles(hourly_actuals):
         "entry_profile_by_weekday": entry_profile_weekday,
         "exit_profile_by_weekday": exit_profile_weekday,
         "movement_profile_by_weekday": movement_profile_weekday,
-        "entry_profile_by_month": entry_profile_by_month,
-        "exit_profile_by_month": exit_profile_by_month,
-        "movement_profile_by_month": movement_profile_by_month,
+
+
+        #Supporting analysis. Uncomment if required for future modelling work.
+        # "entry_profile_by_month": entry_profile_by_month,
+        # "exit_profile_by_month": exit_profile_by_month,
+        # "movement_profile_by_month": movement_profile_by_month,
     }
 
     return results
@@ -1798,6 +1845,62 @@ def create_daily_driver_dataset(daily_fastpark_actuals, daily_passenger_summary)
 
     return daily
 
+def analyse_mix_features(daily_driver_dataset):
+    """
+    Summarise domestic/international passenger mix and its relationship
+    with FastPark entries, exits and penetration rates.
+
+    Departure mix is most relevant to entries.
+    Arrival mix is most relevant to exits.
+    """
+
+    df = daily_driver_dataset.copy()
+
+    mix_rows = []
+
+    mix_cols = [
+        "domestic_departing_share",
+        "international_departing_share",
+        "domestic_arriving_share",
+        "international_arriving_share",
+    ]
+
+    for col in mix_cols:
+
+        if col not in df.columns:
+            continue
+
+        valid = df[
+            [
+                col,
+                "entries",
+                "exits",
+                "entry_penetration",
+                "exit_penetration",
+            ]
+        ].replace([np.inf, -np.inf], np.nan)
+
+        mix_rows.append(
+            {
+                "mix_variable": col,
+                "average_share": valid[col].mean(),
+                "minimum_share": valid[col].min(),
+                "maximum_share": valid[col].max(),
+
+                "corr_entries": valid[col].corr(valid["entries"]),
+                "corr_exits": valid[col].corr(valid["exits"]),
+
+                "corr_entry_penetration": valid[col].corr(
+                    valid["entry_penetration"]
+                ),
+                "corr_exit_penetration": valid[col].corr(
+                    valid["exit_penetration"]
+                ),
+            }
+        )
+
+    return pd.DataFrame(mix_rows)
+
 # ============================================================
 # 7B. HOURLY FASTPARK VS PASSENGER OFFSET ANALYSIS
 # ============================================================
@@ -1845,29 +1948,87 @@ def create_hourly_alignment_dataset(hourly_fastpark_actuals, hourly_passenger_su
     fastpark = hourly_fastpark_actuals.copy()
     pax = hourly_passenger_summary.copy()
 
-    fastpark["datetime_hour"] = pd.to_datetime(fastpark["datetime_hour"])
+    fastpark["datetime_hour"] = pd.to_datetime(
+        fastpark["datetime_hour"]
+    )
 
-    pax["date"] = pd.to_datetime(pax["date"])
-    pax["datetime_hour"] = pax["date"] + pd.to_timedelta(pax["hour"], unit="h")
+    pax["date"] = pd.to_datetime(
+        pax["date"]
+    )
 
-    cols = [
-        "datetime_hour",
+    pax["datetime_hour"] = (
+        pax["date"]
+        + pd.to_timedelta(pax["hour"], unit="h")
+    )
+
+    start_hour = min(
+        fastpark["datetime_hour"].min(),
+        pax["datetime_hour"].min(),
+    )
+
+    end_hour = max(
+        fastpark["datetime_hour"].max(),
+        pax["datetime_hour"].max(),
+    )
+
+    full_hours = pd.DataFrame(
+        {
+            "datetime_hour": pd.date_range(
+                start=start_hour,
+                end=end_hour,
+                freq="h",
+            )
+        }
+    )
+
+    alignment = (
+        full_hours
+        .merge(
+            fastpark,
+            on="datetime_hour",
+            how="left",
+        )
+    )
+
+    alignment = (
+        alignment
+        .merge(
+            pax[
+                [
+                    "datetime_hour",
+                    "departing_pax",
+                    "arriving_pax",
+                    "departing_flights",
+                    "arriving_flights",
+                ]
+            ],
+            on="datetime_hour",
+            how="left",
+        )
+    )
+
+    fill_cols = [
+        "entries",
+        "exits",
+        "movements",
+        "net_flow",
         "departing_pax",
         "arriving_pax",
         "departing_flights",
         "arriving_flights",
     ]
 
-    alignment = fastpark.merge(
-        pax[cols],
-        on="datetime_hour",
-        how="left",
-    )
-
-    for col in ["departing_pax", "arriving_pax", "departing_flights", "arriving_flights"]:
+    for col in fill_cols:
         alignment[col] = alignment[col].fillna(0)
 
-    alignment = alignment.sort_values("datetime_hour")
+    alignment = alignment.sort_values(
+        "datetime_hour"
+    )
+
+    alignment["date"] = alignment["datetime_hour"].dt.date
+    alignment["hour"] = alignment["datetime_hour"].dt.hour
+    alignment["weekday"] = alignment["datetime_hour"].dt.day_name()
+    alignment["month"] = alignment["datetime_hour"].dt.month
 
     return alignment
 
@@ -2023,8 +2184,7 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
                 - monthly_summary
                 - month_by_year_summary
                 - passenger_volume_band_summary
-                - passenger_band_forecast_evaluation
-                - passenger_band_performance_summary
+                - exploratory passenger-band penetration evaluation
     """
 
     df = daily_driver_dataset.copy()
@@ -2447,6 +2607,21 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             ascending=True
         ).iloc[0]
 
+        max_exit_day = weekday_summary.sort_values(
+            "avg_exits",
+            ascending=False
+        ).iloc[0]
+
+        min_exit_day = weekday_summary.sort_values(
+            "avg_exits",
+            ascending=True
+        ).iloc[0]
+
+        max_movement_day = weekday_summary.sort_values(
+            "avg_movements",
+            ascending=False
+        ).iloc[0]
+
         summary_rows.append(
             {
                 "section": "Weekday",
@@ -2467,24 +2642,70 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             }
         )
 
+        summary_rows.append(
+            {
+                "section": "Weekday",
+                "metric": "Highest average exit weekday",
+                "value": max_exit_day["weekday"],
+                "supporting_value": max_exit_day["avg_exits"],
+                "interpretation": "Weekday with the highest average daily exits.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Weekday",
+                "metric": "Lowest average exit weekday",
+                "value": min_exit_day["weekday"],
+                "supporting_value": min_exit_day["avg_exits"],
+                "interpretation": "Weekday with the lowest average daily exits.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Weekday",
+                "metric": "Highest average movement weekday",
+                "value": max_movement_day["weekday"],
+                "supporting_value": max_movement_day["avg_movements"],
+                "interpretation": "Weekday with the highest average combined entries and exits.",
+            }
+        )
+
+
     # Monthly effects
     if not monthly_summary.empty:
-        max_month = monthly_summary.sort_values(
+        max_entry_month = monthly_summary.sort_values(
             "avg_entries",
             ascending=False
         ).iloc[0]
 
-        min_month = monthly_summary.sort_values(
+        min_entry_month = monthly_summary.sort_values(
             "avg_entries",
             ascending=True
+        ).iloc[0]
+
+        max_exit_month = monthly_summary.sort_values(
+            "avg_exits",
+            ascending=False
+        ).iloc[0]
+
+        min_exit_month = monthly_summary.sort_values(
+            "avg_exits",
+            ascending=True
+        ).iloc[0]
+
+        max_movement_month = monthly_summary.sort_values(
+            "avg_movements",
+            ascending=False
         ).iloc[0]
 
         summary_rows.append(
             {
                 "section": "Month",
                 "metric": "Highest average entry month",
-                "value": max_month["month_name"],
-                "supporting_value": max_month["avg_entries"],
+                "value": max_entry_month["month_name"],
+                "supporting_value": max_entry_month["avg_entries"],
                 "interpretation": "Month with the highest average daily entries.",
             }
         )
@@ -2493,9 +2714,39 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             {
                 "section": "Month",
                 "metric": "Lowest average entry month",
-                "value": min_month["month_name"],
-                "supporting_value": min_month["avg_entries"],
+                "value": min_entry_month["month_name"],
+                "supporting_value": min_entry_month["avg_entries"],
                 "interpretation": "Month with the lowest average daily entries.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Month",
+                "metric": "Highest average exit month",
+                "value": max_exit_month["month_name"],
+                "supporting_value": max_exit_month["avg_exits"],
+                "interpretation": "Month with the highest average daily exits.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Month",
+                "metric": "Lowest average exit month",
+                "value": min_exit_month["month_name"],
+                "supporting_value": min_exit_month["avg_exits"],
+                "interpretation": "Month with the lowest average daily exits.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Month",
+                "metric": "Highest average movement month",
+                "value": max_movement_month["month_name"],
+                "supporting_value": max_movement_month["avg_movements"],
+                "interpretation": "Month with the highest average combined entries and exits.",
             }
         )
 
@@ -2528,6 +2779,34 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
             }
         )
 
+    arriving_bands = passenger_volume_band_summary[
+        passenger_volume_band_summary["band_type"].eq("arriving_pax_band")
+    ].copy()
+
+    if not arriving_bands.empty:
+        low_arrival_band = arriving_bands.sort_values("avg_pax").head(1).iloc[0]
+        high_arrival_band = arriving_bands.sort_values("avg_pax").tail(1).iloc[0]
+
+        summary_rows.append(
+            {
+                "section": "Passenger Bands",
+                "metric": "Low pax band exit penetration",
+                "value": str(low_arrival_band["passenger_volume_band"]),
+                "supporting_value": low_arrival_band["avg_exit_penetration"],
+                "interpretation": "Average exit penetration in the lowest arriving passenger volume band.",
+            }
+        )
+
+        summary_rows.append(
+            {
+                "section": "Passenger Bands",
+                "metric": "High pax band exit penetration",
+                "value": str(high_arrival_band["passenger_volume_band"]),
+                "supporting_value": high_arrival_band["avg_exit_penetration"],
+                "interpretation": "Average exit penetration in the highest arriving passenger volume band.",
+            }
+        )
+
     # Passenger band forecast performance
     for _, row in passenger_band_performance_summary.iterrows():
         summary_rows.append(
@@ -2542,15 +2821,28 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
 
     # Domestic / international mix
     for share_col, values in domestic_mix_summary.items():
-        summary_rows.append(
-            {
-                "section": "Passenger Mix",
-                "metric": f"{share_col} corr with entries",
-                "value": share_col,
-                "supporting_value": values["corr_with_entries"],
-                "interpretation": "Correlation between passenger mix share and FastPark entries.",
-            }
-        )
+
+        if "departing" in share_col:
+            summary_rows.append(
+                {
+                    "section": "Passenger Mix",
+                    "metric": f"{share_col} corr with entries",
+                    "value": share_col,
+                    "supporting_value": values["corr_with_entries"],
+                    "interpretation": "Correlation between departure passenger mix share and FastPark entries.",
+                }
+            )
+
+        if "arriving" in share_col:
+            summary_rows.append(
+                {
+                    "section": "Passenger Mix",
+                    "metric": f"{share_col} corr with exits",
+                    "value": share_col,
+                    "supporting_value": values["corr_with_exits"],
+                    "interpretation": "Correlation between arrival passenger mix share and FastPark exits.",
+                }
+            )
 
     demand_driver_summary = pd.DataFrame(summary_rows)
 
@@ -2562,9 +2854,6 @@ def analyse_actual_demand_drivers(daily_driver_dataset):
         "month_by_year_summary": month_by_year_summary,
         "passenger_volume_band_summary": passenger_volume_band_summary,
     }
-
-    return results
-
 
     return results
 
@@ -3372,7 +3661,141 @@ def create_duration_analysis_dataset(master, config):
     return df
 
 
+def analyse_duration_patterns(duration_df):
+    """
+    Analyse planned stay-duration patterns.
 
+    Purpose:
+        Planned booking duration is available for future bookings, so it is
+        the most useful duration field for forecasting future occupancy and
+        exit demand.
+
+        Actual duration is used only as a validation check to confirm whether
+        planned duration is a reliable forecasting input.
+
+    Returns
+    -------
+    dict
+        Duration summary tables:
+            - planned_duration_distribution
+            - planned_duration_by_weekday
+            - planned_duration_by_month
+            - planned_duration_by_airline
+            - planned_vs_actual_summary
+    """
+
+    df = duration_df.copy()
+
+    valid_planned = df.dropna(subset=["planned_duration_days"]).copy()
+
+    # --------------------------------------------------------
+    # Planned duration distribution
+    # --------------------------------------------------------
+    # This shows the share of bookings by planned stay-length band.
+    # This is the main duration table for forecasting because planned
+    # duration is known for future bookings.
+    planned_duration_distribution = (
+        valid_planned
+        .groupby("planned_duration_band_recalc", observed=False)
+        .agg(
+            bookings=("bookingId", "nunique"),
+            avg_planned_duration_days=("planned_duration_days", "mean"),
+            median_planned_duration_days=("planned_duration_days", "median"),
+        )
+        .reset_index()
+        .rename(columns={"planned_duration_band_recalc": "planned_duration_band"})
+    )
+
+    planned_duration_distribution["share"] = (
+        planned_duration_distribution["bookings"]
+        / planned_duration_distribution["bookings"].sum()
+    )
+
+    # --------------------------------------------------------
+    # Planned duration by entry weekday
+    # --------------------------------------------------------
+    # This is kept as a supporting view. It can be commented out later if
+    # weekday duration differences are not material enough for the forecast.
+    planned_duration_by_weekday = (
+        valid_planned
+        .groupby("entry_weekday", dropna=False)
+        .agg(
+            bookings=("bookingId", "nunique"),
+            avg_planned_duration_days=("planned_duration_days", "mean"),
+            median_planned_duration_days=("planned_duration_days", "median"),
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------
+    # Planned duration by entry month
+    # --------------------------------------------------------
+    # This shows seasonal differences in planned stay length.
+    # It is useful for occupancy and future exit forecasting.
+    planned_duration_by_month = (
+        valid_planned
+        .groupby("entry_month", dropna=False)
+        .agg(
+            bookings=("bookingId", "nunique"),
+            avg_planned_duration_days=("planned_duration_days", "mean"),
+            median_planned_duration_days=("planned_duration_days", "median"),
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------
+    # Planned duration by outbound airline
+    # --------------------------------------------------------
+    # Airline mix can affect duration because different carriers and markets
+    # may represent different trip types. This is kept as an exploratory
+    # forecasting feature.
+    planned_duration_by_airline = (
+        valid_planned
+        .groupby("outboundAirline", dropna=False)
+        .agg(
+            bookings=("bookingId", "nunique"),
+            avg_planned_duration_days=("planned_duration_days", "mean"),
+            median_planned_duration_days=("planned_duration_days", "median"),
+        )
+        .reset_index()
+        .sort_values("bookings", ascending=False)
+    )
+
+    # --------------------------------------------------------
+    # Planned vs actual validation
+    # --------------------------------------------------------
+    # This validates whether planned duration is a reliable proxy for actual
+    # duration. It should not be treated as a future forecasting input because
+    # actual duration is not known in advance.
+    valid_actual = df.dropna(
+        subset=["planned_duration_days", "actual_duration_days"]
+    ).copy()
+
+    planned_vs_actual_summary = pd.DataFrame(
+        [
+            {
+                "records": valid_actual["bookingId"].nunique(),
+                "avg_planned_duration_days": valid_actual["planned_duration_days"].mean(),
+                "avg_actual_duration_days": valid_actual["actual_duration_days"].mean(),
+                "avg_actual_minus_planned_days": (
+                    valid_actual["actual_duration_days"]
+                    - valid_actual["planned_duration_days"]
+                ).mean(),
+                "median_actual_minus_planned_days": (
+                    valid_actual["actual_duration_days"]
+                    - valid_actual["planned_duration_days"]
+                ).median(),
+            }
+        ]
+    )
+
+    return {
+        "planned_duration_distribution": planned_duration_distribution,
+        "planned_duration_by_weekday": planned_duration_by_weekday,
+        "planned_duration_by_month": planned_duration_by_month,
+        "planned_duration_by_airline": planned_duration_by_airline,
+        "planned_vs_actual_summary": planned_vs_actual_summary,
+    }
 
 
 def analyse_return_deviation(duration_df):
@@ -3451,6 +3874,22 @@ def analyse_return_deviation(duration_df):
         .reset_index()
     )
 
+    deviation_by_duration_band = (
+        valid
+        .groupby("planned_duration_band_recalc", dropna=False, observed=False)
+        .agg(
+            bookings=("bookingId", "nunique"),
+            avg_deviation_minutes=("exit_deviation_vs_expected_return_minutes", "mean"),
+            median_deviation_minutes=("exit_deviation_vs_expected_return_minutes", "median"),
+            early_returns=("returned_early_flag", "sum"),
+            late_returns=("returned_late_flag", "sum"),
+            major_deviations=("major_return_deviation_flag", "sum"),
+            different_day_returns=("returned_on_different_date_flag", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"planned_duration_band_recalc": "planned_duration_band"})
+    )
+
     early_return_summary = (
         valid
         .groupby("returned_early_flag", dropna=False)
@@ -3490,17 +3929,20 @@ def analyse_return_deviation(duration_df):
     return {
         "overall_deviation_summary": overall_deviation_summary,
         "deviation_by_expected_return_hour": deviation_by_expected_return_hour,
-        "deviation_by_weekday": deviation_by_weekday,
         "deviation_by_month": deviation_by_month,
+        "deviation_by_duration_band": deviation_by_duration_band,
         "early_return_summary": early_return_summary,
         "late_return_summary": late_return_summary,
         "different_day_return_summary": different_day_return_summary,
+
+        #Supporting analysis. uncomment if required for future modelling
+        #"deviation_by_weekday": deviation_by_weekday,
     }
 
 
-def create_known_booked_exit_forecast(master):
+def create_known_booked_exit_profile(master):
     """
-    Create known booked exit forecast using expected / advised return datetime.
+    Create known booked exit profile using expected / advised return datetime.
 
     Logic:
         Known booked exits for hour t are valid bookings whose ExpectedReturnDate
@@ -3514,7 +3956,7 @@ def create_known_booked_exit_forecast(master):
     Returns
     -------
     pandas.DataFrame
-        Known booked exit forecast by expected return hour.
+        Known booked exit profile by expected return hour.
     """
 
     df = master.copy()
@@ -3546,1128 +3988,154 @@ def create_known_booked_exit_forecast(master):
     return known_exits
 
 
-def calculate_exit_penetration_baselines(daily_driver_dataset, config):
-    """
-    Create historical exit penetration baselines.
-
-    Purpose:
-        Build current-style exit forecast assumptions using arriving passengers.
-
-    Formula:
-        ForecastExits[d] = ArrivingPassengers[d] * HistoricalExitPenetration[d]
-
-    Returns
-    -------
-    pandas.DataFrame
-        Dataset with multiple exit penetration baseline columns.
-    """
-
-    df = daily_driver_dataset.copy()
-
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date")
-
-    df["exit_penetration"] = (
-        df["exits"] / df["arriving_pax"].replace(0, np.nan)
-    )
-
-    overall_exit_pen = (
-        df["exits"].sum()
-        / df["arriving_pax"].sum()
-        if df["arriving_pax"].sum() != 0
-        else np.nan
-    )
-
-    df["overall_avg_exit_penetration"] = overall_exit_pen
-
-    weekday_exit_pen = (
-        df
-        .groupby("weekday", dropna=False)
-        .agg(
-            exits=("exits", "sum"),
-            arriving_pax=("arriving_pax", "sum")
-        )
-        .reset_index()
-    )
-
-    weekday_exit_pen["weekday_avg_exit_penetration"] = (
-        weekday_exit_pen["exits"]
-        / weekday_exit_pen["arriving_pax"].replace(0, np.nan)
-    )
-
-    weekday_exit_pen = weekday_exit_pen[
-        ["weekday", "weekday_avg_exit_penetration"]
-    ]
-
-
-    df = df.merge(weekday_exit_pen, on="weekday", how="left")
-
-    month_exit_pen = (
-        df
-        .groupby("month", dropna=False, observed=False)
-        .agg(
-            exits=("exits", "sum"),
-            arriving_pax=("arriving_pax", "sum")
-        )
-        .reset_index()
-    )
-
-    month_exit_pen["monthly_avg_exit_penetration"] = (
-        month_exit_pen["exits"]
-        / month_exit_pen["arriving_pax"].replace(0, np.nan)
-    )
-
-    month_exit_pen = month_exit_pen[
-        ["month", "monthly_avg_exit_penetration"]
-    ]
-
-    df = df.merge(month_exit_pen, on="month", how="left")
-
-    for window_weeks in config["tendency_windows_weeks"]:
-        window_days = window_weeks * 7
-
-        exits_col = f"rolling_{window_weeks}wk_exits"
-        arr_pax_col = f"rolling_{window_weeks}wk_arriving_pax"
-        pen_col = f"rolling_{window_weeks}wk_exit_penetration"
-
-        df[exits_col] = df["exits"].shift(1).rolling(window_days).sum()
-        df[arr_pax_col] = df["arriving_pax"].shift(1).rolling(window_days).sum()
-
-        df[pen_col] = (
-            df[exits_col] / df[arr_pax_col].replace(0, np.nan)
-        )
-
-    for n_occurrences in config["same_weekday_occurrences"]:
-        pen_col = f"same_weekday_last_{n_occurrences}_exit_penetration"
-        df[pen_col] = np.nan
-
-        for weekday in df["weekday"].dropna().unique():
-            mask = df["weekday"].eq(weekday)
-            sub = df.loc[mask].copy().sort_values("date")
-
-            rolling_exits = sub["exits"].shift(1).rolling(n_occurrences).sum()
-            rolling_arr_pax = sub["arriving_pax"].shift(1).rolling(n_occurrences).sum()
-
-            df.loc[mask, pen_col] = (
-                rolling_exits / rolling_arr_pax.replace(0, np.nan)
-            )
-
-    return df
-
-
-def backtest_exits_arriving_passenger_penetration(exit_penetration_dataset, config):
-    """
-    Backtest exit forecasts using arriving passenger penetration methods.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Daily backtest results for each penetration method.
-    """
-
-    df = exit_penetration_dataset.copy()
-
-    penetration_cols = [
-        "overall_avg_exit_penetration",
-        "weekday_avg_exit_penetration",
-        "monthly_avg_exit_penetration",
-    ]
-
-    for window_weeks in config["tendency_windows_weeks"]:
-        penetration_cols.append(f"rolling_{window_weeks}wk_exit_penetration")
-
-    for n_occurrences in config["same_weekday_occurrences"]:
-        penetration_cols.append(f"same_weekday_last_{n_occurrences}_exit_penetration")
-
-    results = []
-
-    for pen_col in penetration_cols:
-        if pen_col not in df.columns:
-            continue
-
-        temp = df[
-            [
-                "date",
-                "weekday",
-                "month",
-                "arriving_pax",
-                "exits",
-                pen_col,
-            ]
-        ].copy()
-
-        temp["method"] = f"arriving_pax_x_{pen_col}"
-        temp["forecast_exits"] = temp["arriving_pax"] * temp[pen_col]
-        temp["actual_exits"] = temp["exits"]
-
-        temp["error"] = temp["forecast_exits"] - temp["actual_exits"]
-        temp["absolute_error"] = temp["error"].abs()
-        temp["percentage_error"] = (
-            temp["error"] / temp["actual_exits"].replace(0, np.nan)
-        )
-        temp["absolute_percentage_error"] = temp["percentage_error"].abs()
-        temp["squared_error"] = temp["error"] ** 2
-
-        results.append(
-            temp[
-                [
-                    "date",
-                    "weekday",
-                    "month",
-                    "method",
-                    "forecast_exits",
-                    "actual_exits",
-                    "error",
-                    "absolute_error",
-                    "percentage_error",
-                    "absolute_percentage_error",
-                    "squared_error",
-                ]
-            ]
-        )
-
-    if results:
-        return pd.concat(results, ignore_index=True)
-
-    return pd.DataFrame()
-
-
-def create_expected_return_forecast_daily(master):
-    """
-    Create daily exit forecast using expected / advised return date only.
-
-    Logic:
-        ForecastExits[d] = count of valid bookings with ExpectedReturnDate on d.
-        If ExpectedReturnDate is missing, fall back to booking exitDate.
-    """
-
-    df = master.copy()
-    valid = df[df["is_valid_booking"]].copy()
-
-    valid["ExpectedReturnDate"] = pd.to_datetime(
-        valid["ExpectedReturnDate"],
-        errors="coerce",
-    )
-
-    valid["exitDate"] = pd.to_datetime(
-        valid["exitDate"],
-        errors="coerce",
-    )
-
-    valid["expected_return_ts_final"] = valid["ExpectedReturnDate"].fillna(
-        valid["exitDate"]
-    )
-
-    valid["date"] = valid["expected_return_ts_final"].dt.normalize()
-
-    daily_forecast = (
-        valid
-        .dropna(subset=["expected_return_ts_final"])
-        .groupby("date")
-        .agg(forecast_exits=("bookingId", "nunique"))
-        .reset_index()
-    )
-
-    daily_forecast["date"] = pd.to_datetime(daily_forecast["date"])
-    daily_forecast["method"] = "expected_return_date_only"
-
-    return daily_forecast
-
-
-def create_expected_return_forecast_hourly(master):
-    """
-    Create hourly exit forecast using expected / advised return datetime only.
-    """
-
-    df = master.copy()
-    valid = df[df["is_valid_booking"]].copy()
-
-    valid["ExpectedReturnDate"] = pd.to_datetime(
-        valid["ExpectedReturnDate"],
-        errors="coerce",
-    )
-
-    valid["exitDate"] = pd.to_datetime(
-        valid["exitDate"],
-        errors="coerce",
-    )
-
-    valid["expected_return_ts_final"] = valid["ExpectedReturnDate"].fillna(
-        valid["exitDate"]
-    )
-
-    valid["datetime_hour"] = valid["expected_return_ts_final"].dt.floor("h")
-
-    hourly_forecast = (
-        valid
-        .dropna(subset=["expected_return_ts_final"])
-        .groupby("datetime_hour")
-        .agg(forecast_exits=("bookingId", "nunique"))
-        .reset_index()
-    )
-
-    hourly_forecast["method"] = "expected_return_datetime_only"
-
-    return hourly_forecast
-
-
-def create_return_deviation_profile(duration_df):
-    """
-    Create a return deviation profile.
-
-    Purpose:
-        Estimate how actual checkout hour differs from expected return hour.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Profile with:
-            - expected_return_hour
-            - actual_exit_hour_offset
-            - probability
-    """
-
-    df = duration_df.copy()
-
-    df = df.dropna(subset=["ExpectedReturnDate", "actual_exit_ts"]).copy()
-
-    df["ExpectedReturnDate"] = pd.to_datetime(
-        df["ExpectedReturnDate"],
-        errors="coerce",
-    )
-
-    df["actual_exit_ts"] = pd.to_datetime(
-        df["actual_exit_ts"],
-        errors="coerce",
-    )
-
-    df["expected_return_hour_ts"] = df["ExpectedReturnDate"].dt.floor("h")
-    df["actual_exit_hour_ts"] = df["actual_exit_ts"].dt.floor("h")
-
-    df["actual_exit_hour_offset"] = (
-        df["actual_exit_hour_ts"] - df["expected_return_hour_ts"]
-    ).dt.total_seconds() / 3600
-
-    df["expected_return_hour"] = df["ExpectedReturnDate"].dt.hour
-
-    profile = (
-        df
-        .groupby(["expected_return_hour", "actual_exit_hour_offset"])
-        .agg(records=("bookingId", "nunique"))
-        .reset_index()
-    )
-
-    profile["total_records_for_expected_hour"] = (
-        profile
-        .groupby("expected_return_hour")["records"]
-        .transform("sum")
-    )
-
-    profile["probability"] = (
-        profile["records"]
-        / profile["total_records_for_expected_hour"].replace(0, np.nan)
-    )
-
-    return profile
-
-
-def apply_return_deviation_profile_to_hourly_forecast(
-    hourly_expected_return_forecast,
-    return_deviation_profile,
-):
-    """
-    Apply historical early/late return adjustment to expected return forecast.
-
-    Purpose:
-        Convert expected/advised return hour into predicted actual checkout hour.
-    """
-
-    forecast = hourly_expected_return_forecast.copy()
-    profile = return_deviation_profile.copy()
-
-    if forecast.empty or profile.empty:
-        return pd.DataFrame(
-            columns=["datetime_hour", "forecast_exits", "method"]
-        )
-
-    forecast["datetime_hour"] = pd.to_datetime(
-        forecast["datetime_hour"],
-        errors="coerce",
-    )
-
-    forecast["expected_return_hour"] = forecast["datetime_hour"].dt.hour
-
-    expanded = forecast.merge(
-        profile,
-        on="expected_return_hour",
-        how="left",
-    )
-
-    # If there is no deviation profile for a given hour, keep the exits in the same hour.
-    expanded["actual_exit_hour_offset"] = expanded["actual_exit_hour_offset"].fillna(0)
-    expanded["probability"] = expanded["probability"].fillna(1)
-
-    expanded["adjusted_datetime_hour"] = (
-        expanded["datetime_hour"]
-        + pd.to_timedelta(expanded["actual_exit_hour_offset"], unit="h")
-    )
-
-    expanded["adjusted_forecast_exits"] = (
-        expanded["forecast_exits"] * expanded["probability"]
-    )
-
-    adjusted = (
-        expanded
-        .groupby("adjusted_datetime_hour")
-        .agg(forecast_exits=("adjusted_forecast_exits", "sum"))
-        .reset_index()
-        .rename(columns={"adjusted_datetime_hour": "datetime_hour"})
-    )
-
-    adjusted["method"] = "expected_return_datetime_plus_deviation_adjustment"
-
-    return adjusted
-
-
-def create_duration_distribution(duration_df, duration_granularity="days"):
-    """
-    Create historical stay-duration probability distribution.
-
-    Purpose:
-        Use historical durations to convert entries into future exits.
-    """
-
-    df = duration_df.copy()
-    df = df.dropna(subset=["actual_entry_ts", "actual_exit_ts"]).copy()
-
-    df["actual_entry_ts"] = pd.to_datetime(
-        df["actual_entry_ts"],
-        errors="coerce",
-    )
-
-    df["actual_exit_ts"] = pd.to_datetime(
-        df["actual_exit_ts"],
-        errors="coerce",
-    )
-
-    if duration_granularity == "days":
-        df["duration_offset"] = (
-            df["actual_exit_ts"].dt.floor("D")
-            - df["actual_entry_ts"].dt.floor("D")
-        ).dt.days
-
-    elif duration_granularity == "hours":
-        df["duration_offset"] = (
-            df["actual_exit_ts"].dt.floor("h")
-            - df["actual_entry_ts"].dt.floor("h")
-        ).dt.total_seconds() / 3600
-
-    else:
-        raise ValueError("duration_granularity must be either 'days' or 'hours'")
-
-    df = df[df["duration_offset"].notna()].copy()
-    df = df[df["duration_offset"] >= 0].copy()
-
-    distribution = (
-        df
-        .groupby("duration_offset")
-        .agg(records=("bookingId", "nunique"))
-        .reset_index()
-    )
-
-    distribution["probability"] = (
-        distribution["records"]
-        / distribution["records"].sum()
-    )
-
-    return distribution
-
-
-def create_duration_based_exit_forecast_daily(daily_entries, duration_distribution):
-    """
-    Create daily exit forecast from entry cohorts and duration distribution.
-
-    Formula:
-        ForecastExits[d + k] += Entries[d] * P(Duration = k)
-    """
-
-    entries = daily_entries.copy()
-    dist = duration_distribution.copy()
-
-    entries["date"] = pd.to_datetime(entries["date"])
-
-    rows = []
-
-    for _, entry_row in entries.iterrows():
-        entry_date = pd.Timestamp(entry_row["date"])
-        entry_count = entry_row["entries"]
-
-        for _, dur_row in dist.iterrows():
-            duration_days = int(dur_row["duration_offset"])
-            probability = dur_row["probability"]
-
-            rows.append(
-                {
-                    "date": entry_date + pd.Timedelta(days=duration_days),
-                    "forecast_exits": entry_count * probability,
-                }
-            )
-
-    forecast = pd.DataFrame(rows)
-
-    if forecast.empty:
-        return pd.DataFrame(columns=["date", "forecast_exits", "method"])
-
-    forecast = (
-        forecast
-        .groupby("date")
-        .agg(forecast_exits=("forecast_exits", "sum"))
-        .reset_index()
-    )
-
-    forecast["method"] = "entry_cohort_duration_distribution_daily"
-
-    return forecast
-
-
-def create_duration_based_exit_forecast_hourly(hourly_entries, duration_distribution):
-    """
-    Create hourly exit forecast from hourly entry cohorts and duration distribution.
-
-    Formula:
-        ForecastExits[t + k] += Entries[t] * P(DurationHours = k)
-    """
-
-    entries = hourly_entries.copy()
-    dist = duration_distribution.copy()
-
-    entries["datetime_hour"] = pd.to_datetime(entries["datetime_hour"])
-
-    rows = []
-
-    for _, entry_row in entries.iterrows():
-        entry_hour = pd.Timestamp(entry_row["datetime_hour"])
-        entry_count = entry_row["entries"]
-
-        for _, dur_row in dist.iterrows():
-            duration_hours = int(dur_row["duration_offset"])
-            probability = dur_row["probability"]
-
-            rows.append(
-                {
-                    "datetime_hour": entry_hour + pd.Timedelta(hours=duration_hours),
-                    "forecast_exits": entry_count * probability,
-                }
-            )
-
-    forecast = pd.DataFrame(rows)
-
-    if forecast.empty:
-        return pd.DataFrame(columns=["datetime_hour", "forecast_exits", "method"])
-
-    forecast = (
-        forecast
-        .groupby("datetime_hour")
-        .agg(forecast_exits=("forecast_exits", "sum"))
-        .reset_index()
-    )
-
-    forecast["method"] = "entry_cohort_duration_distribution_hourly"
-
-    return forecast
-
-
-def create_hybrid_exit_forecast_daily(
-    expected_return_forecast,
-    duration_based_forecast,
-    known_return_weight=0.75,
-):
-    """
-    Create a simple hybrid daily exit forecast.
-
-    Purpose:
-        Combine:
-            - expected/advised returns
-            - duration-based implied exits
-    """
-
-    expected = expected_return_forecast.copy()
-    duration = duration_based_forecast.copy()
-
-    expected = expected.rename(
-        columns={"forecast_exits": "expected_return_forecast_exits"}
-    )
-
-    duration = duration.rename(
-        columns={"forecast_exits": "duration_forecast_exits"}
-    )
-
-    hybrid = expected[["date", "expected_return_forecast_exits"]].merge(
-        duration[["date", "duration_forecast_exits"]],
-        on="date",
-        how="outer",
-    ).fillna(0)
-
-    hybrid["forecast_exits"] = (
-        known_return_weight * hybrid["expected_return_forecast_exits"]
-        + (1 - known_return_weight) * hybrid["duration_forecast_exits"]
-    )
-
-    hybrid["method"] = (
-        f"hybrid_expected_return_{known_return_weight}"
-        f"_duration_{1 - known_return_weight}"
-    )
-
-    return hybrid
-
-
-def create_hybrid_exit_forecast_hourly(
-    expected_return_forecast,
-    duration_based_forecast,
-    known_return_weight=0.75,
-):
-    """
-    Create a simple hybrid hourly exit forecast.
-    """
-
-    expected = expected_return_forecast.copy()
-    duration = duration_based_forecast.copy()
-
-    expected = expected.rename(
-        columns={"forecast_exits": "expected_return_forecast_exits"}
-    )
-
-    duration = duration.rename(
-        columns={"forecast_exits": "duration_forecast_exits"}
-    )
-
-    hybrid = expected[["datetime_hour", "expected_return_forecast_exits"]].merge(
-        duration[["datetime_hour", "duration_forecast_exits"]],
-        on="datetime_hour",
-        how="outer",
-    ).fillna(0)
-
-    hybrid["forecast_exits"] = (
-        known_return_weight * hybrid["expected_return_forecast_exits"]
-        + (1 - known_return_weight) * hybrid["duration_forecast_exits"]
-    )
-
-    hybrid["method"] = (
-        f"hybrid_expected_return_{known_return_weight}"
-        f"_duration_{1 - known_return_weight}"
-    )
-
-    return hybrid
-
-
-def evaluate_daily_exit_forecast(forecast_df, daily_fastpark_actuals):
-    """
-    Evaluate a daily exit forecast against actual daily exits.
-    """
-
-    if forecast_df is None or forecast_df.empty:
-        return pd.DataFrame()
-
-    forecast = forecast_df.copy()
-    actuals = daily_fastpark_actuals[["date", "exits"]].copy()
-
-    forecast["date"] = pd.to_datetime(forecast["date"])
-    actuals["date"] = pd.to_datetime(actuals["date"])
-
-    eval_df = forecast.merge(actuals, on="date", how="left")
-
-    eval_df["actual_exits"] = eval_df["exits"].fillna(0)
-
-    eval_df["error"] = eval_df["forecast_exits"] - eval_df["actual_exits"]
-    eval_df["absolute_error"] = eval_df["error"].abs()
-    eval_df["percentage_error"] = (
-        eval_df["error"] / eval_df["actual_exits"].replace(0, np.nan)
-    )
-    eval_df["absolute_percentage_error"] = eval_df["percentage_error"].abs()
-    eval_df["squared_error"] = eval_df["error"] ** 2
-
-    eval_df["weekday"] = eval_df["date"].dt.day_name()
-    eval_df["month"] = eval_df["date"].dt.month
-
-    return eval_df
-
-
-def evaluate_hourly_exit_forecast(forecast_df, hourly_fastpark_actuals):
-    """
-    Evaluate an hourly exit forecast against actual hourly exits.
-    """
-
-    if forecast_df is None or forecast_df.empty:
-        return pd.DataFrame()
-
-    forecast = forecast_df.copy()
-    actuals = hourly_fastpark_actuals[["datetime_hour", "exits"]].copy()
-
-    forecast["datetime_hour"] = pd.to_datetime(forecast["datetime_hour"])
-    actuals["datetime_hour"] = pd.to_datetime(actuals["datetime_hour"])
-
-    eval_df = forecast.merge(actuals, on="datetime_hour", how="left")
-
-    eval_df["actual_exits"] = eval_df["exits"].fillna(0)
-
-    eval_df["error"] = eval_df["forecast_exits"] - eval_df["actual_exits"]
-    eval_df["absolute_error"] = eval_df["error"].abs()
-    eval_df["percentage_error"] = (
-        eval_df["error"] / eval_df["actual_exits"].replace(0, np.nan)
-    )
-    eval_df["absolute_percentage_error"] = eval_df["percentage_error"].abs()
-    eval_df["squared_error"] = eval_df["error"] ** 2
-
-    eval_df["date"] = eval_df["datetime_hour"].dt.date
-    eval_df["hour"] = eval_df["datetime_hour"].dt.hour
-    eval_df["weekday"] = eval_df["datetime_hour"].dt.day_name()
-    eval_df["month"] = eval_df["datetime_hour"].dt.month
-
-    return eval_df
-
-
-def summarise_exit_forecast_performance(exit_forecast_evaluation):
-    """
-    Summarise exit forecast performance by method.
-    """
-
-    if exit_forecast_evaluation is None or exit_forecast_evaluation.empty:
-        return {
-            "overall_performance": pd.DataFrame(),
-            "performance_by_weekday": pd.DataFrame(),
-            "performance_by_month": pd.DataFrame(),
-            "performance_by_hour": pd.DataFrame(),
-        }
-
-    df = exit_forecast_evaluation.copy()
-
-    overall = (
-        df
-        .groupby("method")
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            rmse=("squared_error", lambda x: (x.mean()) ** 0.5),
-            total_forecast_exits=("forecast_exits", "sum"),
-            total_actual_exits=("actual_exits", "sum"),
-            records=("actual_exits", "count"),
-        )
-        .reset_index()
-    )
-
-    by_weekday = (
-        df
-        .groupby(["method", "weekday"])
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            records=("actual_exits", "count"),
-        )
-        .reset_index()
-    )
-
-    by_month = (
-        df
-        .groupby(["method", "month"])
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            records=("actual_exits", "count"),
-        )
-        .reset_index()
-    )
-
-    if "hour" in df.columns:
-        by_hour = (
-            df
-            .groupby(["method", "hour"])
-            .agg(
-                mae=("absolute_error", "mean"),
-                bias=("error", "mean"),
-                mape=("absolute_percentage_error", "mean"),
-                records=("actual_exits", "count"),
-            )
-            .reset_index()
-        )
-    else:
-        by_hour = pd.DataFrame()
-
-    return {
-        "overall_performance": overall,
-        "performance_by_weekday": by_weekday,
-        "performance_by_month": by_month,
-        "performance_by_hour": by_hour,
-    }
-
-
-def run_exit_forecast_method_comparison(
-    master,
-    daily_driver_dataset,
-    daily_fastpark_actuals,
-    hourly_fastpark_actuals,
-    duration_df,
-    config,
-):
-    """
-    Run the full exit forecast method comparison.
-
-    Compares:
-        A. arriving passenger penetration
-        B. expected/advised return date only
-        C. expected return date + early/late adjustment
-        D. entry cohort + duration distribution
-        E. hybrid expected return + duration distribution
-
-    Returns
-    -------
-    dict
-        Exit forecast comparison outputs.
-    """
-
-    # --------------------------------------------------------
-    # Method A: Arriving passenger penetration
-    # --------------------------------------------------------
-    exit_penetration_dataset = calculate_exit_penetration_baselines(
-        daily_driver_dataset=daily_driver_dataset,
-        config=config,
-    )
-
-    arriving_pax_eval_daily = backtest_exits_arriving_passenger_penetration(
-        exit_penetration_dataset=exit_penetration_dataset,
-        config=config,
-    )
-
-    # --------------------------------------------------------
-    # Method B: Expected/advised return date only
-    # --------------------------------------------------------
-    expected_return_forecast_daily = create_expected_return_forecast_daily(master)
-    expected_return_forecast_hourly = create_expected_return_forecast_hourly(master)
-
-    expected_return_eval_daily = evaluate_daily_exit_forecast(
-        forecast_df=expected_return_forecast_daily,
-        daily_fastpark_actuals=daily_fastpark_actuals,
-    )
-
-    expected_return_eval_hourly = evaluate_hourly_exit_forecast(
-        forecast_df=expected_return_forecast_hourly,
-        hourly_fastpark_actuals=hourly_fastpark_actuals,
-    )
-
-    # --------------------------------------------------------
-    # Method C: Expected return + return deviation adjustment
-    # --------------------------------------------------------
-    return_deviation_profile = create_return_deviation_profile(duration_df)
-
-    adjusted_expected_return_forecast_hourly = (
-        apply_return_deviation_profile_to_hourly_forecast(
-            hourly_expected_return_forecast=expected_return_forecast_hourly,
-            return_deviation_profile=return_deviation_profile,
-        )
-    )
-
-    adjusted_expected_return_eval_hourly = evaluate_hourly_exit_forecast(
-        forecast_df=adjusted_expected_return_forecast_hourly,
-        hourly_fastpark_actuals=hourly_fastpark_actuals,
-    )
-
-    if not adjusted_expected_return_forecast_hourly.empty:
-        adjusted_expected_return_forecast_daily = (
-            adjusted_expected_return_forecast_hourly
-            .assign(date=lambda x: pd.to_datetime(x["datetime_hour"]).dt.date)
-            .groupby("date")
-            .agg(forecast_exits=("forecast_exits", "sum"))
-            .reset_index()
-        )
-
-        adjusted_expected_return_forecast_daily["date"] = pd.to_datetime(
-            adjusted_expected_return_forecast_daily["date"]
-        )
-
-        adjusted_expected_return_forecast_daily["method"] = (
-            "expected_return_plus_deviation_adjustment_daily"
-        )
-    else:
-        adjusted_expected_return_forecast_daily = pd.DataFrame(
-            columns=["date", "forecast_exits", "method"]
-        )
-
-    adjusted_expected_return_eval_daily = evaluate_daily_exit_forecast(
-        forecast_df=adjusted_expected_return_forecast_daily,
-        daily_fastpark_actuals=daily_fastpark_actuals,
-    )
-
-    # --------------------------------------------------------
-    # Method D: Entry cohort + duration distribution
-    # --------------------------------------------------------
-    duration_distribution_daily = create_duration_distribution(
-        duration_df=duration_df,
-        duration_granularity="days",
-    )
-
-    duration_distribution_hourly = create_duration_distribution(
-        duration_df=duration_df,
-        duration_granularity="hours",
-    )
-
-    daily_entries = daily_fastpark_actuals[["date", "entries"]].copy()
-    hourly_entries = hourly_fastpark_actuals[["datetime_hour", "entries"]].copy()
-
-    duration_based_forecast_daily = create_duration_based_exit_forecast_daily(
-        daily_entries=daily_entries,
-        duration_distribution=duration_distribution_daily,
-    )
-
-    duration_based_forecast_hourly = create_duration_based_exit_forecast_hourly(
-        hourly_entries=hourly_entries,
-        duration_distribution=duration_distribution_hourly,
-    )
-
-    duration_based_eval_daily = evaluate_daily_exit_forecast(
-        forecast_df=duration_based_forecast_daily,
-        daily_fastpark_actuals=daily_fastpark_actuals,
-    )
-
-    duration_based_eval_hourly = evaluate_hourly_exit_forecast(
-        forecast_df=duration_based_forecast_hourly,
-        hourly_fastpark_actuals=hourly_fastpark_actuals,
-    )
-
-    # --------------------------------------------------------
-    # Method E: Hybrid expected return + duration distribution
-    # --------------------------------------------------------
-    hybrid_forecast_daily = create_hybrid_exit_forecast_daily(
-        expected_return_forecast=expected_return_forecast_daily,
-        duration_based_forecast=duration_based_forecast_daily,
-        known_return_weight=0.75,
-    )
-
-    hybrid_forecast_hourly = create_hybrid_exit_forecast_hourly(
-        expected_return_forecast=expected_return_forecast_hourly,
-        duration_based_forecast=duration_based_forecast_hourly,
-        known_return_weight=0.75,
-    )
-
-    hybrid_eval_daily = evaluate_daily_exit_forecast(
-        forecast_df=hybrid_forecast_daily,
-        daily_fastpark_actuals=daily_fastpark_actuals,
-    )
-
-    hybrid_eval_hourly = evaluate_hourly_exit_forecast(
-        forecast_df=hybrid_forecast_hourly,
-        hourly_fastpark_actuals=hourly_fastpark_actuals,
-    )
-
-    # --------------------------------------------------------
-    # Combine evaluations
-    # --------------------------------------------------------
-    daily_parts = [
-        arriving_pax_eval_daily,
-        expected_return_eval_daily,
-        adjusted_expected_return_eval_daily,
-        duration_based_eval_daily,
-        hybrid_eval_daily,
-    ]
-
-    daily_parts = [x for x in daily_parts if x is not None and not x.empty]
-
-    if daily_parts:
-        daily_evaluations = pd.concat(daily_parts, ignore_index=True)
-    else:
-        daily_evaluations = pd.DataFrame()
-
-    hourly_parts = [
-        expected_return_eval_hourly,
-        adjusted_expected_return_eval_hourly,
-        duration_based_eval_hourly,
-        hybrid_eval_hourly,
-    ]
-
-    hourly_parts = [x for x in hourly_parts if x is not None and not x.empty]
-
-    if hourly_parts:
-        hourly_evaluations = pd.concat(hourly_parts, ignore_index=True)
-    else:
-        hourly_evaluations = pd.DataFrame()
-
-    # --------------------------------------------------------
-    # Summarise performance
-    # --------------------------------------------------------
-    daily_performance_summary = summarise_exit_forecast_performance(
-        daily_evaluations
-    )
-
-    hourly_performance_summary = summarise_exit_forecast_performance(
-        hourly_evaluations
-    )
-
-    # --------------------------------------------------------
-    # Package outputs
-    # --------------------------------------------------------
-    outputs = {
-        "exit_penetration_dataset": exit_penetration_dataset,
-
-        "arriving_pax_eval_daily": arriving_pax_eval_daily,
-
-        "expected_return_forecast_daily": expected_return_forecast_daily,
-        "expected_return_forecast_hourly": expected_return_forecast_hourly,
-        "expected_return_eval_daily": expected_return_eval_daily,
-        "expected_return_eval_hourly": expected_return_eval_hourly,
-
-        "return_deviation_profile": return_deviation_profile,
-        "adjusted_expected_return_forecast_daily": adjusted_expected_return_forecast_daily,
-        "adjusted_expected_return_forecast_hourly": adjusted_expected_return_forecast_hourly,
-        "adjusted_expected_return_eval_daily": adjusted_expected_return_eval_daily,
-        "adjusted_expected_return_eval_hourly": adjusted_expected_return_eval_hourly,
-
-        "duration_distribution_daily": duration_distribution_daily,
-        "duration_distribution_hourly": duration_distribution_hourly,
-        "duration_based_forecast_daily": duration_based_forecast_daily,
-        "duration_based_forecast_hourly": duration_based_forecast_hourly,
-        "duration_based_eval_daily": duration_based_eval_daily,
-        "duration_based_eval_hourly": duration_based_eval_hourly,
-
-        "hybrid_forecast_daily": hybrid_forecast_daily,
-        "hybrid_forecast_hourly": hybrid_forecast_hourly,
-        "hybrid_eval_daily": hybrid_eval_daily,
-        "hybrid_eval_hourly": hybrid_eval_hourly,
-
-        "daily_exit_forecast_evaluations": daily_evaluations,
-        "hourly_exit_forecast_evaluations": hourly_evaluations,
-
-        "daily_exit_performance_summary": daily_performance_summary,
-        "hourly_exit_performance_summary": hourly_performance_summary,
-    }
-
-    return outputs
-
 # ============================================================
 # 11. TENDENCY / ROLLING PENETRATION ANALYSIS
 # ============================================================
 
-def calculate_rolling_entry_penetration(daily_driver_dataset, window_weeks):
+def calculate_rolling_penetration(
+    daily_driver_dataset,
+    window_weeks,
+    target_col,
+    pax_col,
+    target_name,
+):
     """
-    Calculate rolling entry penetration over a chosen number of weeks.
+    Calculate rolling penetration over a selected number of weeks.
 
-    Entry penetration:
-        entries / departing passengers
+    Purpose:
+        Create historical tendency measures for either entries or exits.
+
+    Examples:
+        Entry tendency:
+            entries / departing_pax
+
+        Exit tendency:
+            exits / arriving_pax
 
     Important:
-        Use only historical data available before the forecast date.
-        Do not leak future actuals into the rolling calculation.
-
-    Parameters:
-        daily_driver_dataset: pandas.DataFrame
-            Daily fastpark and passenger dataset.
-
-        window_weeks: int
-            Number of weeks to include in rolling tendency window.
-
-    Returns:
-        pandas.DataFrame:
-            Dataset with rolling entry penetration.
+        Uses shifted rolling sums so the current day is not included in
+        its own tendency estimate.
     """
 
     df = daily_driver_dataset.sort_values("date").copy()
     window_days = window_weeks * 7
-    
-    # Use shifted rolling sums to prevent leakage:
-    df[f"rolling_{window_weeks}wk_entries"] = (
-        df["entries"].shift(1).rolling(window_days).sum()
-    )
-    df[f"rolling_{window_weeks}wk_departing_pax"] = (
-        df["departing_pax"].shift(1).rolling(window_days).sum()
-    )
-    df[f"rolling_{window_weeks}wk_entry_penetration"] = (
-        df[f"rolling_{window_weeks}wk_entries"]
-        / df[f"rolling_{window_weeks}wk_departing_pax"].replace(0, np.nan)
+
+    target_sum_col = f"rolling_{window_weeks}wk_{target_col}"
+    pax_sum_col = f"rolling_{window_weeks}wk_{pax_col}"
+    pen_col = f"rolling_{window_weeks}wk_{target_name}_penetration"
+
+    df[target_sum_col] = (
+        df[target_col]
+        .shift(1)
+        .rolling(window_days)
+        .sum()
     )
 
+    df[pax_sum_col] = (
+        df[pax_col]
+        .shift(1)
+        .rolling(window_days)
+        .sum()
+    )
+
+    df[pen_col] = (
+        df[target_sum_col]
+        / df[pax_sum_col].replace(0, np.nan)
+    )
 
     return df
 
 
-def calculate_same_weekday_entry_penetration(daily_driver_dataset, n_occurrences):
+def calculate_same_weekday_penetration(
+    daily_driver_dataset,
+    n_occurrences,
+    target_col,
+    pax_col,
+    target_name,
+):
     """
-    Calculate same-weekday rolling entry penetration.
+    Calculate same-weekday ratio-of-sums penetration.
 
     Example:
-        To forecast a Friday, use the last 4 Fridays or last 8 Fridays.
+        To forecast a Friday, use the previous n Fridays:
 
-    Purpose:
-        Avoid Monday behaviour contaminating Friday behaviour.
+            sum(previous n Friday target_col)
+            /
+            sum(previous n Friday pax_col)
 
-    Parameters:
-        daily_driver_dataset: pandas.DataFrame
-            Daily fastpark and passenger dataset.
-
-        n_occurrences: int
-            Number of previous same-weekday observations to use.
-
-    Returns:
-        pandas.DataFrame:
-            Dataset with same-weekday rolling penetration.
+    This avoids mixing weekday behaviour.
     """
-
 
     df = daily_driver_dataset.sort_values("date").copy()
 
-    pen_col = f"same_weekday_last_{n_occurrences}_entry_penetration"
-    entries_col = f"same_weekday_last_{n_occurrences}_entries"
-    pax_col = f"same_weekday_last_{n_occurrences}_departing_pax"
+    pen_col = f"same_weekday_last_{n_occurrences}_{target_name}_penetration"
+    target_sum_col = f"same_weekday_last_{n_occurrences}_{target_col}"
+    pax_sum_col = f"same_weekday_last_{n_occurrences}_{pax_col}"
 
     df[pen_col] = np.nan
-    df[entries_col] = np.nan
-    df[pax_col] = np.nan
+    df[target_sum_col] = np.nan
+    df[pax_sum_col] = np.nan
 
     for weekday in df["weekday"].dropna().unique():
+
         mask = df["weekday"].eq(weekday)
         sub = df.loc[mask].copy().sort_values("date")
 
-        rolling_entries = sub["entries"].shift(1).rolling(n_occurrences).sum()
-        rolling_pax = sub["departing_pax"].shift(1).rolling(n_occurrences).sum()
+        rolling_target = (
+            sub[target_col]
+            .shift(1)
+            .rolling(n_occurrences)
+            .sum()
+        )
 
-        df.loc[mask, entries_col] = rolling_entries
-        df.loc[mask, pax_col] = rolling_pax
-        df.loc[mask, pen_col] = rolling_entries / rolling_pax.replace(0, np.nan)
+        rolling_pax = (
+            sub[pax_col]
+            .shift(1)
+            .rolling(n_occurrences)
+            .sum()
+        )
+
+        df.loc[mask, target_sum_col] = rolling_target
+        df.loc[mask, pax_sum_col] = rolling_pax
+
+        df.loc[mask, pen_col] = (
+            rolling_target
+            / rolling_pax.replace(0, np.nan)
+        )
 
     return df
 
-def calculate_same_weekday_average_entry_penetration(
+
+def calculate_same_weekday_average_penetration(
     daily_driver_dataset,
     n_occurrences,
+    penetration_col,
+    target_name,
 ):
     """
-    Calculate same-weekday rolling average of daily entry penetration.
-
-    Difference from calculate_same_weekday_entry_penetration:
-        Existing method:
-            sum(entries) / sum(departing_pax)
-
-        This method:
-            average(entry_penetration)
+    Calculate same-weekday rolling average of daily penetration.
 
     Example:
-        To forecast a Friday, use the average entry penetration
-        of the previous n Fridays.
+        To estimate a Friday entry penetration, use the average of the
+        previous n Friday entry penetration values.
+
+    This differs from ratio-of-sums because each historical day receives
+    equal weight regardless of passenger volume.
     """
 
     df = daily_driver_dataset.sort_values("date").copy()
 
-    pen_col = f"same_weekday_avg_last_{n_occurrences}_entry_penetration"
+    pen_col = f"same_weekday_avg_last_{n_occurrences}_{target_name}_penetration"
 
     df[pen_col] = np.nan
 
     for weekday in df["weekday"].dropna().unique():
 
         mask = df["weekday"].eq(weekday)
-
         sub = df.loc[mask].copy().sort_values("date")
 
         rolling_avg_pen = (
-            sub["entry_penetration"]
+            sub[penetration_col]
             .shift(1)
             .rolling(n_occurrences)
             .mean()
@@ -4677,29 +4145,30 @@ def calculate_same_weekday_average_entry_penetration(
 
     return df
 
-def calculate_weighted_same_weekday_entry_penetration(
+
+def calculate_weighted_same_weekday_penetration(
     daily_driver_dataset,
     n_occurrences,
+    penetration_col,
+    target_name,
 ):
     """
-    Calculate weighted same-weekday rolling entry penetration.
+    Calculate weighted same-weekday rolling penetration.
 
     Purpose:
-        Test whether recent same weekdays should matter more than older ones.
+        Test whether recent same weekdays should matter more than older
+        same weekdays.
 
     Example for n=4:
-        Previous 4 Fridays are weighted:
-            oldest Friday      = 1
-            second oldest      = 2
-            second most recent = 3
-            most recent Friday = 4
-
-    This makes the method more responsive to recent changes.
+        oldest same weekday      = weight 1
+        second oldest            = weight 2
+        second most recent       = weight 3
+        most recent              = weight 4
     """
 
     df = daily_driver_dataset.sort_values("date").copy()
 
-    pen_col = f"same_weekday_weighted_last_{n_occurrences}_entry_penetration"
+    pen_col = f"same_weekday_weighted_last_{n_occurrences}_{target_name}_penetration"
 
     df[pen_col] = np.nan
 
@@ -4714,11 +4183,10 @@ def calculate_weighted_same_weekday_entry_penetration(
     for weekday in df["weekday"].dropna().unique():
 
         mask = df["weekday"].eq(weekday)
-
         sub = df.loc[mask].copy().sort_values("date")
 
         weighted_pen = (
-            sub["entry_penetration"]
+            sub[penetration_col]
             .shift(1)
             .rolling(n_occurrences)
             .apply(weighted_average, raw=True)
@@ -4728,15 +4196,22 @@ def calculate_weighted_same_weekday_entry_penetration(
 
     return df
 
+
 def run_tendency_window_backtest(daily_driver_dataset, config):
     """
-    Back-test multiple entry tendency methods.
+    Back-test entry and exit penetration tendency methods.
+
+    Entry tendency:
+        forecast_entries = departing_pax * historical_entry_penetration
+
+    Exit tendency:
+        forecast_exits = arriving_pax * historical_exit_penetration
 
     Methods tested:
-        1. Optional general rolling penetration across all weekdays
-        2. Same weekday ratio-of-sums penetration
-        3. Same weekday average daily penetration
-        4. Weighted same weekday average daily penetration
+        1. Optional general rolling ratio-of-sums penetration
+        2. Same-weekday ratio-of-sums penetration
+        3. Same-weekday average daily penetration
+        4. Weighted same-weekday daily penetration
     """
 
     results = []
@@ -4744,19 +4219,55 @@ def run_tendency_window_backtest(daily_driver_dataset, config):
     base = daily_driver_dataset.copy()
     base["date"] = pd.to_datetime(base["date"])
 
-    def append_entry_forecast_results(temp, pen_col, method_name):
+    target_specs = [
+        {
+            "target_name": "entry",
+            "target_col": "entries",
+            "pax_col": "departing_pax",
+            "penetration_col": "entry_penetration",
+            "run_general_rolling": config.get(
+                "run_general_rolling_entry_tendency",
+                True,
+            ),
+        },
+        {
+            "target_name": "exit",
+            "target_col": "exits",
+            "pax_col": "arriving_pax",
+            "penetration_col": "exit_penetration",
+            "run_general_rolling": config.get(
+                "run_general_rolling_exit_tendency",
+                True,
+            ),
+        },
+    ]
 
+    def append_forecast_results(
+        temp,
+        pen_col,
+        method_name,
+        target_name,
+        target_col,
+        pax_col,
+    ):
         temp = temp.copy()
 
+        temp["target"] = target_name
         temp["method"] = method_name
-        temp["forecast_entries"] = temp["departing_pax"] * temp[pen_col]
-        temp["actual_entries"] = temp["entries"]
 
-        temp["error"] = temp["forecast_entries"] - temp["actual_entries"]
+        temp["forecast_value"] = temp[pax_col] * temp[pen_col]
+        temp["actual_value"] = temp[target_col]
+
+        temp["error"] = (
+            temp["forecast_value"]
+            - temp["actual_value"]
+        )
+
         temp["absolute_error"] = temp["error"].abs()
 
         temp["percentage_error"] = (
-            temp["error"] / temp["actual_entries"].replace(0, np.nan)
+            temp["error"]
+            / temp["actual_value"].replace(0, np.nan)
         )
 
         temp["absolute_percentage_error"] = (
@@ -4771,91 +4282,128 @@ def run_tendency_window_backtest(daily_driver_dataset, config):
                     "date",
                     "weekday",
                     "month",
+                    "target",
                     "method",
-                    "forecast_entries",
-                    "actual_entries",
+                    pax_col,
+                    pen_col,
+                    "forecast_value",
+                    "actual_value",
                     "error",
                     "absolute_error",
                     "percentage_error",
                     "absolute_percentage_error",
                     "squared_error",
                 ]
-            ]
+            ].rename(
+                columns={
+                    pax_col: "passenger_base",
+                    pen_col: "penetration_used",
+                }
+            )
         )
 
-    # --------------------------------------------------------
-    # 1. Optional general rolling methods
-    # --------------------------------------------------------
-    if config.get("run_general_rolling_entry_tendency", True):
+    for spec in target_specs:
 
-        for window in config["tendency_windows_weeks"]:
+        target_name = spec["target_name"]
+        target_col = spec["target_col"]
+        pax_col = spec["pax_col"]
+        penetration_col = spec["penetration_col"]
 
-            df_window = calculate_rolling_entry_penetration(
-                base,
-                window,
+        # --------------------------------------------------------
+        # 1. Optional general rolling methods
+        # --------------------------------------------------------
+        if spec["run_general_rolling"]:
+
+            for window in config["tendency_windows_weeks"]:
+
+                df_window = calculate_rolling_penetration(
+                    daily_driver_dataset=base,
+                    window_weeks=window,
+                    target_col=target_col,
+                    pax_col=pax_col,
+                    target_name=target_name,
+                )
+
+                pen_col = f"rolling_{window}wk_{target_name}_penetration"
+
+                append_forecast_results(
+                    temp=df_window,
+                    pen_col=pen_col,
+                    method_name=f"rolling_{window}wk_{target_name}_penetration",
+                    target_name=target_name,
+                    target_col=target_col,
+                    pax_col=pax_col,
+                )
+
+        # --------------------------------------------------------
+        # 2. Same-weekday ratio-of-sums methods
+        # --------------------------------------------------------
+        for n in config["same_weekday_occurrences"]:
+
+            df_same = calculate_same_weekday_penetration(
+                daily_driver_dataset=base,
+                n_occurrences=n,
+                target_col=target_col,
+                pax_col=pax_col,
+                target_name=target_name,
             )
 
-            pen_col = f"rolling_{window}wk_entry_penetration"
+            pen_col = f"same_weekday_last_{n}_{target_name}_penetration"
 
-            append_entry_forecast_results(
-                temp=df_window,
+            append_forecast_results(
+                temp=df_same,
                 pen_col=pen_col,
-                method_name=f"rolling_{window}wk_entry_penetration",
+                method_name=f"same_weekday_last_{n}_{target_name}_penetration",
+                target_name=target_name,
+                target_col=target_col,
+                pax_col=pax_col,
             )
 
-    # --------------------------------------------------------
-    # 2. Same weekday ratio-of-sums methods
-    # --------------------------------------------------------
-    for n in config["same_weekday_occurrences"]:
+        # --------------------------------------------------------
+        # 3. Same-weekday rolling average methods
+        # --------------------------------------------------------
+        for n in config.get("same_weekday_average_occurrences", []):
 
-        df_same = calculate_same_weekday_entry_penetration(
-            base,
-            n,
-        )
+            df_avg = calculate_same_weekday_average_penetration(
+                daily_driver_dataset=base,
+                n_occurrences=n,
+                penetration_col=penetration_col,
+                target_name=target_name,
+            )
 
-        pen_col = f"same_weekday_last_{n}_entry_penetration"
+            pen_col = f"same_weekday_avg_last_{n}_{target_name}_penetration"
 
-        append_entry_forecast_results(
-            temp=df_same,
-            pen_col=pen_col,
-            method_name=f"same_weekday_last_{n}_entry_penetration",
-        )
+            append_forecast_results(
+                temp=df_avg,
+                pen_col=pen_col,
+                method_name=f"same_weekday_avg_last_{n}_{target_name}_penetration",
+                target_name=target_name,
+                target_col=target_col,
+                pax_col=pax_col,
+            )
 
-    # --------------------------------------------------------
-    # 3. Same weekday rolling average methods
-    # --------------------------------------------------------
-    for n in config.get("same_weekday_average_occurrences", []):
+        # --------------------------------------------------------
+        # 4. Weighted same-weekday methods
+        # --------------------------------------------------------
+        for n in config.get("same_weekday_weighted_occurrences", []):
 
-        df_avg = calculate_same_weekday_average_entry_penetration(
-            base,
-            n,
-        )
+            df_weighted = calculate_weighted_same_weekday_penetration(
+                daily_driver_dataset=base,
+                n_occurrences=n,
+                penetration_col=penetration_col,
+                target_name=target_name,
+            )
 
-        pen_col = f"same_weekday_avg_last_{n}_entry_penetration"
+            pen_col = f"same_weekday_weighted_last_{n}_{target_name}_penetration"
 
-        append_entry_forecast_results(
-            temp=df_avg,
-            pen_col=pen_col,
-            method_name=f"same_weekday_avg_last_{n}_entry_penetration",
-        )
-
-    # --------------------------------------------------------
-    # 4. Weighted same weekday methods
-    # --------------------------------------------------------
-    for n in config.get("same_weekday_weighted_occurrences", []):
-
-        df_weighted = calculate_weighted_same_weekday_entry_penetration(
-            base,
-            n,
-        )
-
-        pen_col = f"same_weekday_weighted_last_{n}_entry_penetration"
-
-        append_entry_forecast_results(
-            temp=df_weighted,
-            pen_col=pen_col,
-            method_name=f"same_weekday_weighted_last_{n}_entry_penetration",
-        )
+            append_forecast_results(
+                temp=df_weighted,
+                pen_col=pen_col,
+                method_name=f"same_weekday_weighted_last_{n}_{target_name}_penetration",
+                target_name=target_name,
+                target_col=target_col,
+                pax_col=pax_col,
+            )
 
     if results:
         return pd.concat(results, ignore_index=True)
@@ -4865,21 +4413,13 @@ def run_tendency_window_backtest(daily_driver_dataset, config):
 
 def summarise_backtest_results(backtest_results):
     """
-    Summarise tendency back-test performance.
-
-    Purpose:
-        Identify which tendency method performs best overall and by segment.
-
-    Parameters:
-        backtest_results: pandas.DataFrame
-            Output from run_tendency_window_backtest().
+    Summarise tendency back-test performance for entries and exits.
 
     Returns:
         dict:
-            Summary tables:
-                - overall_method_performance
-                - performance_by_weekday
-                - performance_by_month
+            - overall_method_performance
+            - performance_by_weekday
+            - performance_by_month
     """
 
     if backtest_results is None or backtest_results.empty:
@@ -4893,39 +4433,39 @@ def summarise_backtest_results(backtest_results):
 
     overall_method_performance = (
         df
-        .groupby("method")
+        .groupby(["target", "method"])
         .agg(
             mae=("absolute_error", "mean"),
             bias=("error", "mean"),
             mape=("absolute_percentage_error", "mean"),
             rmse=("squared_error", lambda x: (x.mean()) ** 0.5),
-            total_forecast_entries=("forecast_entries", "sum"),
-            total_actual_entries=("actual_entries", "sum"),
-            records=("actual_entries", "count"),
+            total_forecast=("forecast_value", "sum"),
+            total_actual=("actual_value", "sum"),
+            records=("actual_value", "count"),
         )
         .reset_index()
     )
 
     performance_by_weekday = (
         df
-        .groupby(["method", "weekday"])
+        .groupby(["target", "method", "weekday"])
         .agg(
             mae=("absolute_error", "mean"),
             bias=("error", "mean"),
             mape=("absolute_percentage_error", "mean"),
-            records=("actual_entries", "count"),
+            records=("actual_value", "count"),
         )
         .reset_index()
     )
 
     performance_by_month = (
         df
-        .groupby(["method", "month"])
+        .groupby(["target", "method", "month"])
         .agg(
             mae=("absolute_error", "mean"),
             bias=("error", "mean"),
             mape=("absolute_percentage_error", "mean"),
-            records=("actual_entries", "count"),
+            records=("actual_value", "count"),
         )
         .reset_index()
     )
@@ -4936,905 +4476,9 @@ def summarise_backtest_results(backtest_results):
         "performance_by_month": performance_by_month,
     }
 
-# ============================================================
-# 12. ENTRY FORECAST METHOD COMPARISON
-# ============================================================
 
-def forecast_entries_booking_curve(
-    booking_curve,
-    completion_basis_col="completion_vs_actual_entries",
-):
-    """
-    Forecast final FastPark entries using booking curve completion rates.
-
-    Purpose:
-        Estimate final entries from known bookings at each lead time checkpoint.
-
-    Method:
-        For each lead time, calculate the historical completion rate excluding
-        the current entry date, then forecast:
-
-            forecast_entries = bookings_known / historical_completion_rate
-
-    Why exclude the current row:
-        This avoids directly using the target day's own completion rate, which
-        would make the comparison artificially perfect.
-
-    Parameters
-    ----------
-    booking_curve : pandas.DataFrame
-        Booking curve dataset from create_booking_curve_dataset().
-
-    completion_basis_col : str
-        Which completion rate column to use:
-            - completion_vs_actual_entries
-            - completion_vs_valid_bookings
-
-    Returns
-    -------
-    pandas.DataFrame
-        Booking curve forecast evaluation-ready dataframe.
-    """
-
-    df = booking_curve.copy()
-
-    df["entry_date"] = pd.to_datetime(df["entry_date"])
-    df["date"] = df["entry_date"]
-
-    # Choose final actual target depending on basis.
-    if completion_basis_col == "completion_vs_actual_entries":
-        actual_col = "final_actual_entries"
-    elif completion_basis_col == "completion_vs_valid_bookings":
-        actual_col = "final_valid_bookings"
-    else:
-        raise ValueError(
-            "completion_basis_col must be 'completion_vs_actual_entries' "
-            "or 'completion_vs_valid_bookings'"
-        )
-
-    # Aggregate by lead time so we can create an excluding-current-row completion rate.
-    lead_totals = (
-        df
-        .groupby("lead_time_checkpoint")
-        .agg(
-            total_bookings_known=("bookings_known", "sum"),
-            total_actual=("final_actual_entries", "sum"),
-            total_valid=("final_valid_bookings", "sum"),
-        )
-        .reset_index()
-    )
-
-    df = df.merge(
-        lead_totals,
-        on="lead_time_checkpoint",
-        how="left",
-    )
-
-    if completion_basis_col == "completion_vs_actual_entries":
-        df["completion_denominator_excl_current"] = (
-            df["total_actual"] - df["final_actual_entries"]
-        )
-    else:
-        df["completion_denominator_excl_current"] = (
-            df["total_valid"] - df["final_valid_bookings"]
-        )
-
-    df["bookings_known_excl_current"] = (
-        df["total_bookings_known"] - df["bookings_known"]
-    )
-
-    df["historical_completion_rate_excl_current"] = (
-        df["bookings_known_excl_current"]
-        / df["completion_denominator_excl_current"].replace(0, np.nan)
-    )
-
-    df["forecast_entries"] = (
-        df["bookings_known"]
-        / df["historical_completion_rate_excl_current"].replace(0, np.nan)
-    )
-
-    df["actual_entries"] = df[actual_col]
-
-    df["method"] = f"booking_curve_{completion_basis_col}_lead_only"
-
-    return df[
-        [
-            "date",
-            "weekday",
-            "month",
-            "lead_time_checkpoint",
-            "method",
-            "bookings_known",
-            "historical_completion_rate_excl_current",
-            "forecast_entries",
-            "actual_entries",
-        ]
-    ]
-
-
-def select_best_tendency_method(tendency_backtest_results):
-    """
-    Select the best tendency method based on lowest MAE.
-
-    Parameters
-    ----------
-    tendency_backtest_results : pandas.DataFrame
-        Output from run_tendency_window_backtest().
-
-    Returns
-    -------
-    str
-        Best method name.
-    """
-
-    if tendency_backtest_results is None or tendency_backtest_results.empty:
-        return None
-
-    method_summary = (
-        tendency_backtest_results
-        .groupby("method")
-        .agg(mae=("absolute_error", "mean"))
-        .reset_index()
-        .sort_values("mae")
-    )
-
-    if method_summary.empty:
-        return None
-
-    return method_summary.iloc[0]["method"]
-
-
-def forecast_entries_from_tendency(
-    tendency_backtest_results,
-    method=None,
-):
-    """
-    Extract entry forecasts from the tendency backtest results.
-
-    Purpose:
-        Use the rolling/same-weekday tendency method as the passenger/tendency
-        based forecast.
-
-    Parameters
-    ----------
-    tendency_backtest_results : pandas.DataFrame
-        Output from run_tendency_window_backtest().
-
-    method : str, optional
-        Specific method to use. If None, the method with lowest MAE is selected.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Tendency forecast dataframe.
-    """
-
-    if tendency_backtest_results is None or tendency_backtest_results.empty:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "weekday",
-                "month",
-                "method",
-                "forecast_entries",
-                "actual_entries",
-            ]
-        )
-
-    selected_method = method or select_best_tendency_method(tendency_backtest_results)
-
-    if selected_method is None:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "weekday",
-                "month",
-                "method",
-                "forecast_entries",
-                "actual_entries",
-            ]
-        )
-
-    df = tendency_backtest_results[
-        tendency_backtest_results["method"].eq(selected_method)
-    ].copy()
-
-    df["method"] = f"tendency_{selected_method}"
-
-    return df[
-        [
-            "date",
-            "weekday",
-            "month",
-            "method",
-            "forecast_entries",
-            "actual_entries",
-        ]
-    ]
-
-
-def forecast_entries_hybrid(
-    booking_curve_forecast,
-    tendency_forecast,
-):
-    """
-    Create hybrid entry forecast.
-
-    Concept:
-        Close to entry date, rely more heavily on booking curve.
-        Further away, rely more heavily on tendency/passenger forecast.
-
-    Weighting rule:
-        lead time <= 3 days   -> 90% booking curve
-        lead time <= 7 days   -> 75% booking curve
-        lead time <= 14 days  -> 50% booking curve
-        lead time <= 28 days  -> 30% booking curve
-        lead time > 28 days   -> 10% booking curve
-
-    Parameters
-    ----------
-    booking_curve_forecast : pandas.DataFrame
-        Output from forecast_entries_booking_curve().
-
-    tendency_forecast : pandas.DataFrame
-        Output from forecast_entries_from_tendency().
-
-    Returns
-    -------
-    pandas.DataFrame
-        Hybrid forecast dataframe.
-    """
-
-    booking = booking_curve_forecast.copy()
-    tendency = tendency_forecast.copy()
-
-    if booking.empty or tendency.empty:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "weekday",
-                "month",
-                "lead_time_checkpoint",
-                "method",
-                "booking_weight",
-                "bookings_known",
-                "booking_curve_forecast_entries",
-                "tendency_forecast_entries",
-                "forecast_entries",
-                "actual_entries",
-            ]
-        )
-
-    booking["date"] = pd.to_datetime(booking["date"])
-    tendency["date"] = pd.to_datetime(tendency["date"])
-
-    tendency = tendency.rename(
-        columns={
-            "forecast_entries": "tendency_forecast_entries",
-            "actual_entries": "actual_entries_tendency",
-        }
-    )
-
-    booking = booking.rename(
-        columns={
-            "forecast_entries": "booking_curve_forecast_entries",
-            "actual_entries": "actual_entries_booking",
-        }
-    )
-
-    hybrid = booking.merge(
-        tendency[
-            [
-                "date",
-                "tendency_forecast_entries",
-                "actual_entries_tendency",
-            ]
-        ],
-        on="date",
-        how="left",
-    )
-
-    def get_booking_weight(lead_time):
-        if lead_time <= 3:
-            return 0.90
-        if lead_time <= 7:
-            return 0.75
-        if lead_time <= 14:
-            return 0.50
-        if lead_time <= 28:
-            return 0.30
-        return 0.10
-
-    hybrid["booking_weight"] = hybrid["lead_time_checkpoint"].apply(get_booking_weight)
-
-    # Fill missing forecast components so the hybrid does not collapse to NaN.
-    # If tendency is missing, fall back to booking curve.
-    # If booking curve is missing, fall back to tendency.
-    hybrid["tendency_forecast_entries"] = hybrid["tendency_forecast_entries"].fillna(
-        hybrid["booking_curve_forecast_entries"]
-    )
-
-    hybrid["booking_curve_forecast_entries"] = hybrid["booking_curve_forecast_entries"].fillna(
-        hybrid["tendency_forecast_entries"]
-    )
-
-    hybrid["forecast_entries"] = (
-        hybrid["booking_weight"] * hybrid["booking_curve_forecast_entries"]
-        + (1 - hybrid["booking_weight"]) * hybrid["tendency_forecast_entries"]
-    )
-
-    hybrid["actual_entries"] = hybrid["actual_entries_booking"]
-
-    hybrid["method"] = "hybrid_booking_curve_plus_tendency"
-
-    return hybrid[
-        [
-            "date",
-            "weekday",
-            "month",
-            "lead_time_checkpoint",
-            "method",
-            "booking_weight",
-            "bookings_known",
-            "booking_curve_forecast_entries",
-            "tendency_forecast_entries",
-            "forecast_entries",
-            "actual_entries",
-        ]
-    ]
-
-
-def evaluate_entry_forecast(entry_forecast):
-    """
-    Add forecast error columns to an entry forecast dataframe.
-
-    Parameters
-    ----------
-    entry_forecast : pandas.DataFrame
-        Forecast dataframe containing:
-            - forecast_entries
-            - actual_entries
-
-    Returns
-    -------
-    pandas.DataFrame
-        Forecast dataframe with error columns.
-    """
-
-    if entry_forecast is None or entry_forecast.empty:
-        return pd.DataFrame()
-
-    df = entry_forecast.copy()
-
-    df["error"] = df["forecast_entries"] - df["actual_entries"]
-    df["absolute_error"] = df["error"].abs()
-    df["percentage_error"] = (
-        df["error"] / df["actual_entries"].replace(0, np.nan)
-    )
-    df["absolute_percentage_error"] = df["percentage_error"].abs()
-    df["squared_error"] = df["error"] ** 2
-
-    return df
-
-
-def summarise_entry_forecast_performance(entry_evaluation):
-    """
-    Summarise entry forecast performance.
-
-    Parameters
-    ----------
-    entry_evaluation : pandas.DataFrame
-        Evaluation dataframe from evaluate_entry_forecast().
-
-    Returns
-    -------
-    dict
-        Performance summaries.
-    """
-
-    if entry_evaluation is None or entry_evaluation.empty:
-        return {
-            "overall_performance": pd.DataFrame(),
-            "performance_by_weekday": pd.DataFrame(),
-            "performance_by_month": pd.DataFrame(),
-            "performance_by_lead_time": pd.DataFrame(),
-        }
-
-    df = entry_evaluation.copy()
-
-    overall = (
-        df
-        .groupby("method")
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            rmse=("squared_error", lambda x: (x.mean()) ** 0.5),
-            total_forecast_entries=("forecast_entries", "sum"),
-            total_actual_entries=("actual_entries", "sum"),
-            records=("actual_entries", "count"),
-        )
-        .reset_index()
-    )
-
-    by_weekday = (
-        df
-        .groupby(["method", "weekday"])
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            records=("actual_entries", "count"),
-        )
-        .reset_index()
-    )
-
-    by_month = (
-        df
-        .groupby(["method", "month"])
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            records=("actual_entries", "count"),
-        )
-        .reset_index()
-    )
-
-    if "lead_time_checkpoint" in df.columns:
-        by_lead_time = (
-            df
-            .groupby(["method", "lead_time_checkpoint"])
-            .agg(
-                mae=("absolute_error", "mean"),
-                bias=("error", "mean"),
-                mape=("absolute_percentage_error", "mean"),
-                records=("actual_entries", "count"),
-            )
-            .reset_index()
-        )
-    else:
-        by_lead_time = pd.DataFrame()
-
-    return {
-        "overall_performance": overall,
-        "performance_by_weekday": by_weekday,
-        "performance_by_month": by_month,
-        "performance_by_lead_time": by_lead_time,
-    }
-
-
-def run_entry_forecast_method_comparison(
-    booking_curve,
-    tendency_backtest_results,
-):
-    """
-    Run entry forecast method comparison.
-
-    Methods compared:
-        A. best tendency method from Section 11
-        B. booking curve forecast from Section 9
-        C. hybrid booking curve + best tendency method
-
-    Parameters
-    ----------
-    booking_curve : pandas.DataFrame
-        Output from create_booking_curve_dataset().
-
-    tendency_backtest_results : pandas.DataFrame
-        Output from run_tendency_window_backtest().
-
-    Returns
-    -------
-    dict
-        Entry forecast comparison outputs.
-    """
-
-    tendency_forecast = forecast_entries_from_tendency(
-        tendency_backtest_results=tendency_backtest_results,
-        method=None,
-    )
-
-    booking_curve_forecast = forecast_entries_booking_curve(
-        booking_curve=booking_curve,
-        completion_basis_col="completion_vs_actual_entries",
-    )
-
-    hybrid_forecast = forecast_entries_hybrid(
-        booking_curve_forecast=booking_curve_forecast,
-        tendency_forecast=tendency_forecast,
-    )
-
-    tendency_eval = evaluate_entry_forecast(tendency_forecast)
-    booking_curve_eval = evaluate_entry_forecast(booking_curve_forecast)
-    hybrid_eval = evaluate_entry_forecast(hybrid_forecast)
-
-    eval_parts = [
-        tendency_eval,
-        booking_curve_eval,
-        hybrid_eval,
-    ]
-
-    eval_parts = [x for x in eval_parts if x is not None and not x.empty]
-
-    if eval_parts:
-        all_evaluations = pd.concat(eval_parts, ignore_index=True)
-    else:
-        all_evaluations = pd.DataFrame()
-
-    performance_summary = summarise_entry_forecast_performance(all_evaluations)
-
-    return {
-        "tendency_forecast": tendency_forecast,
-        "booking_curve_forecast": booking_curve_forecast,
-        "hybrid_forecast": hybrid_forecast,
-        "entry_forecast_evaluations": all_evaluations,
-        "entry_forecast_performance_summary": performance_summary,
-    }
-
-
-
-
-# ============================================================
-# 13. FORECAST EVALUATION
-# ============================================================
-
-def calculate_forecast_errors(
-    forecast_df,
-    actual_df,
-    target_col,
-    forecast_col,
-    date_cols,
-    method_col="method",
-):
-    """
-    Calculate standard forecast error metrics.
-
-    Parameters
-    ----------
-    forecast_df : pandas.DataFrame
-        Forecast results.
-
-    actual_df : pandas.DataFrame
-        Actual demand results.
-
-    target_col : str
-        Name of actual column, e.g. "entries" or "exits".
-
-    forecast_col : str
-        Name of forecast column.
-
-    date_cols : list
-        Columns to join on, e.g. ["date"] or ["datetime_hour"].
-
-    method_col : str
-        Forecast method column.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Forecast with error columns.
-    """
-
-    if forecast_df is None or forecast_df.empty:
-        return pd.DataFrame()
-
-    forecast = forecast_df.copy()
-    actual = actual_df.copy()
-
-    df = forecast.merge(
-        actual[date_cols + [target_col]],
-        on=date_cols,
-        how="left",
-    )
-
-    df[target_col] = df[target_col].fillna(0)
-
-    df["error"] = df[forecast_col] - df[target_col]
-    df["absolute_error"] = df["error"].abs()
-    df["percentage_error"] = (
-        df["error"] / df[target_col].replace(0, np.nan)
-    )
-    df["absolute_percentage_error"] = df["percentage_error"].abs()
-    df["squared_error"] = df["error"] ** 2
-
-    return df
-
-
-def summarise_forecast_errors(error_df, group_cols):
-    """
-    Summarise forecast errors by method and segment.
-
-    Parameters
-    ----------
-    error_df : pandas.DataFrame
-        Forecast dataframe with error columns.
-
-    group_cols : list
-        Columns to group by.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Error summary with MAE, MAPE, RMSE and bias.
-    """
-
-    if error_df is None or error_df.empty:
-        return pd.DataFrame()
-
-    summary = (
-        error_df
-        .groupby(group_cols)
-        .agg(
-            mae=("absolute_error", "mean"),
-            bias=("error", "mean"),
-            mape=("absolute_percentage_error", "mean"),
-            rmse=("squared_error", lambda x: (x.mean()) ** 0.5),
-            n=("absolute_error", "count"),
-        )
-        .reset_index()
-    )
-
-    return summary
-
-
-
-# # ============================================================
-# # 14. OPERATIONAL / FTE TRANSLATION
-# # ============================================================
-
-# def estimate_hourly_workload(hourly_forecast, assumptions):
-#     """
-#     Convert hourly entry and exit forecasts into workload.
-
-#     Purpose:
-#         Translate hourly forecast entries/exits into operational effort.
-
-#     Parameters
-#     ----------
-#     hourly_forecast : pandas.DataFrame
-#         Forecast by hour with:
-#             - forecast_entries
-#             - forecast_exits
-
-#     assumptions : dict
-#         Example:
-#             {
-#                 "minutes_per_entry_move": 6,
-#                 "minutes_per_exit_move": 6,
-#                 "minutes_per_internal_move": 0,
-#                 "productive_minutes_per_fte_hour": 45
-#             }
-
-#     Returns
-#     -------
-#     pandas.DataFrame
-#         Hourly workload table.
-#     """
-
-#     if hourly_forecast is None or hourly_forecast.empty:
-#         return pd.DataFrame()
-
-#     df = hourly_forecast.copy()
-
-#     if "forecast_entries" not in df.columns:
-#         df["forecast_entries"] = 0
-
-#     if "forecast_exits" not in df.columns:
-#         df["forecast_exits"] = 0
-
-#     if "forecast_internal_moves" not in df.columns:
-#         df["forecast_internal_moves"] = 0
-
-#     df["entry_workload_minutes"] = (
-#         df["forecast_entries"] * assumptions.get("minutes_per_entry_move", 0)
-#     )
-
-#     df["exit_workload_minutes"] = (
-#         df["forecast_exits"] * assumptions.get("minutes_per_exit_move", 0)
-#     )
-
-#     df["internal_move_workload_minutes"] = (
-#         df["forecast_internal_moves"] * assumptions.get("minutes_per_internal_move", 0)
-#     )
-
-#     df["total_workload_minutes"] = (
-#         df["entry_workload_minutes"]
-#         + df["exit_workload_minutes"]
-#         + df["internal_move_workload_minutes"]
-#     )
-
-#     df["required_fte"] = (
-#         df["total_workload_minutes"]
-#         / assumptions.get("productive_minutes_per_fte_hour", 60)
-#     )
-
-#     return df
-
-
-# def estimate_capacity_pressure(hourly_forecast, capacity_assumptions):
-#     """
-#     Estimate simple block parking pressure from hourly entries and exits.
-
-#     Purpose:
-#         Identify whether forecast net flow creates occupancy pressure.
-
-#     Parameters
-#     ----------
-#     hourly_forecast : pandas.DataFrame
-#         Forecast by hour with:
-#             - datetime_hour
-#             - forecast_entries
-#             - forecast_exits
-
-#     capacity_assumptions : dict
-#         Example:
-#             {
-#                 "opening_occupancy": 0,
-#                 "block_parking_capacity": 1000,
-#                 "return_bay_capacity": 100,
-#                 "ferry_lane_capacity": 100
-#             }
-
-#     Returns
-#     -------
-#     pandas.DataFrame
-#         Capacity pressure table.
-#     """
-
-#     if hourly_forecast is None or hourly_forecast.empty:
-#         return pd.DataFrame()
-
-#     df = hourly_forecast.copy()
-
-#     if "forecast_entries" not in df.columns:
-#         df["forecast_entries"] = 0
-
-#     if "forecast_exits" not in df.columns:
-#         df["forecast_exits"] = 0
-
-#     df = df.sort_values("datetime_hour").copy()
-
-#     opening_occupancy = capacity_assumptions.get("opening_occupancy", 0)
-
-#     df["forecast_net_flow"] = df["forecast_entries"] - df["forecast_exits"]
-
-#     df["estimated_block_parking_occupancy"] = (
-#         opening_occupancy + df["forecast_net_flow"].cumsum()
-#     )
-
-#     df["block_parking_breach_flag"] = (
-#         df["estimated_block_parking_occupancy"]
-#         > capacity_assumptions.get("block_parking_capacity", np.inf)
-#     )
-
-#     df["ferry_lane_breach_flag"] = (
-#         df["forecast_entries"]
-#         > capacity_assumptions.get("ferry_lane_capacity", np.inf)
-#     )
-
-#     df["return_bay_breach_flag"] = (
-#         df["forecast_exits"]
-#         > capacity_assumptions.get("return_bay_capacity", np.inf)
-#     )
-
-#     return df
-
-
-# ============================================================
-# 15. OUTPUT TABLES
-# ============================================================
-
-def build_executive_summary(
-    tendency_summary,
-    entry_forecast_comparison,
-    exit_forecast_comparison,
-):
-    """
-    Build a simple executive summary table for Excel.
-
-    Returns
-    -------
-    pandas.DataFrame
-    """
-
-    rows = []
-
-    # ----------------------------
-    # Best tendency method
-    # ----------------------------
-    try:
-
-        tendency_perf = (
-            tendency_summary["overall_method_performance"]
-            .sort_values("mae")
-        )
-
-        best_tendency = tendency_perf.iloc[0]
-
-        rows.append(
-            {
-                "metric": "Best Tendency Method",
-                "value": best_tendency["method"],
-            }
-        )
-
-        rows.append(
-            {
-                "metric": "Best Tendency MAE",
-                "value": round(best_tendency["mae"], 2),
-            }
-        )
-
-    except Exception:
-        pass
-
-    # ----------------------------
-    # Best entry method
-    # ----------------------------
-    try:
-
-        entry_perf = (
-            entry_forecast_comparison[
-                "entry_forecast_performance_summary"
-            ]["overall_performance"]
-            .sort_values("mae")
-        )
-
-        best_entry = entry_perf.iloc[0]
-
-        rows.append(
-            {
-                "metric": "Best Entry Forecast Method",
-                "value": best_entry["method"],
-            }
-        )
-
-        rows.append(
-            {
-                "metric": "Best Entry Forecast MAE",
-                "value": round(best_entry["mae"], 2),
-            }
-        )
-
-    except Exception:
-        pass
-
-    # ----------------------------
-    # Best exit method
-    # ----------------------------
-    try:
-
-        exit_perf = (
-            exit_forecast_comparison[
-                "daily_exit_performance_summary"
-            ]["overall_performance"]
-            .sort_values("mae")
-        )
-
-        best_exit = exit_perf.iloc[0]
-
-        rows.append(
-            {
-                "metric": "Best Exit Forecast Method",
-                "value": best_exit["method"],
-            }
-        )
-
-        rows.append(
-            {
-                "metric": "Best Exit Forecast MAE",
-                "value": round(best_exit["mae"], 2),
-            }
-        )
-
-    except Exception:
-        pass
-
-    return pd.DataFrame(rows)
 
 def build_output_tables(
-    executive_summary,
     reconciliation_summary,
     daily_fastpark_actuals,
     hourly_fastpark_actuals,
@@ -5866,7 +4510,6 @@ def build_output_tables(
     """
 
     outputs = {
-        "Executive Summary": executive_summary,
         "Data Validation Summary": reconciliation_summary,
         "Daily FastPark Actuals": daily_fastpark_actuals,
         "Hourly FastPark Actuals": hourly_fastpark_actuals,
@@ -5989,6 +4632,16 @@ def export_outputs_to_excel(outputs, output_path):
             "Demand by Pax Band",
 
 
+        # Passenger Mix
+
+        "forecast_error_summaries_mix_summary":
+            "Passenger Mix",
+
+        # Tendency Analysis
+
+        "Tendency Backtest Results":
+            "Tendency Results",
+
         "forecast_error_summaries_tendency_summary_overall_method_performance":
             "Tendency Performance",
 
@@ -6026,6 +4679,106 @@ def export_outputs_to_excel(outputs, output_path):
 
         "forecast_error_summaries_duration_patterns_planned_vs_actual_summary":
             "Duration Validation",
+
+        "forecast_error_summaries_no_show_results_duration_match_check":
+            "No Show Check",
+
+        "forecast_error_summaries_status_summary":
+            "Status Summary",
+
+        # Cancellation Analysis
+
+        "forecast_error_summaries_cancellation_results_cancellation_summary":
+            "Cancellation Summary",
+
+        "forecast_error_summaries_cancellation_results_cancellation_by_lead_time":
+            "Cancel by Lead Time",
+
+        "forecast_error_summaries_cancellation_results_cancellation_by_duration_band":
+            "Cancel by Duration",
+
+        "forecast_error_summaries_cancellation_results_cancellation_by_duration_and_lead_time":
+            "Cancel by Duration/Lead Time",
+
+        "forecast_error_summaries_cancellation_results_cancellation_by_airline":
+            "Cancel by Airline",
+
+
+        # No-Show Analysis
+
+        "forecast_error_summaries_no_show_results_no_show_summary":
+            "No Show Summary",
+
+        "forecast_error_summaries_no_show_results_no_show_by_lead_time":
+            "No Show Lead Time",
+
+        "forecast_error_summaries_no_show_results_no_show_by_duration_band":
+            "No Show Duration",
+
+        "forecast_error_summaries_no_show_results_no_show_by_duration_and_lead_time":
+            "No Show Duration/Lead Time",
+
+
+        # Hourly Profiles
+
+        "forecast_error_summaries_hourly_profiles_entry_profile_overall":
+            "Hourly Entry Profile",
+
+        "forecast_error_summaries_hourly_profiles_exit_profile_overall":
+            "Hourly Exit Profile",
+
+        "forecast_error_summaries_hourly_profiles_movement_profile_overall":
+            "Hourly Move Profile",
+
+        "forecast_error_summaries_hourly_profiles_entry_profile_by_weekday":
+            "Hourly Entry Weekday",
+
+        "forecast_error_summaries_hourly_profiles_exit_profile_by_weekday":
+            "Hourly Exit Weekday",
+
+        "forecast_error_summaries_hourly_profiles_movement_profile_by_weekday":
+            "Hourly Move Weekday",
+
+        # Hourly Offset Analysis
+
+        "forecast_error_summaries_hourly_offset_analysis_entry_departure_offset_summary":
+            "Entry Pax Offset",
+
+        "forecast_error_summaries_hourly_offset_analysis_exit_arrival_offset_summary":
+            "Exit Pax Offset",
+
+        "forecast_error_summaries_hourly_offset_analysis_best_entry_departure_offset":
+            "Best Entry Offset",
+
+        "forecast_error_summaries_hourly_offset_analysis_best_exit_arrival_offset":
+            "Best Exit Offset",
+
+
+        # Return Behaviour
+
+        "forecast_error_summaries_return_deviation_overall_deviation_summary":
+            "Return Summary",
+
+        "forecast_error_summaries_return_deviation_deviation_by_expected_return_hour":
+            "Return by Hour",
+
+        "forecast_error_summaries_return_deviation_deviation_by_month":
+            "Return by Month",
+
+        "forecast_error_summaries_return_deviation_deviation_by_duration_band":
+            "Return by Duration",
+
+        "forecast_error_summaries_return_deviation_early_return_summary":
+            "Early Return Summary",
+
+        "forecast_error_summaries_return_deviation_late_return_summary":
+            "Late Return Summary",
+
+        "forecast_error_summaries_return_deviation_different_day_return_summary":
+            "Different Day Returns",
+
+        "forecast_error_summaries_known_booked_exit_profile":
+            "Known Exit Profile",
     }
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
@@ -6206,7 +4959,10 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     print("[8/17] Creating Passenger Context Features…")
     daily_passenger_summary = create_daily_passenger_summary(flights_clean, config)
     hourly_passenger_summary = create_hourly_passenger_summary(flights_clean, config)
-    mix_features = create_airline_country_mix_features(flights_clean)
+
+    # Raw daily airline/country mix tables are not exported in this version
+    # passenger mix is summarised later from the daily driver dataset
+    #mix_features = create_airline_country_mix_features(flights_clean)
 
     t8 = step(t7, "Created Passenger Context Features")
 
@@ -6236,6 +4992,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     )
 
     driver_analysis = analyse_actual_demand_drivers(daily_driver_dataset)
+    mix_summary = analyse_mix_features(daily_driver_dataset)
 
     t10 = step(t9, "Analysed Daily FastPark Drivers")
 
@@ -6287,26 +5044,10 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     duration_df = create_duration_analysis_dataset(master, config)
     duration_patterns = analyse_duration_patterns(duration_df)
     return_deviation = analyse_return_deviation(duration_df)
-    known_booked_exit_forecast = create_known_booked_exit_forecast(master)
+    known_booked_exit_profile = create_known_booked_exit_profile(master)
 
     t12 = step(t11, "Analysed Duration and Return Behaviour")
 
-    # ----------------------------
-    # Exit forecast method comparison
-    # ----------------------------
-
-    print("[13/17] Comparing Exit Forecast Methods…")
-
-    exit_forecast_comparison = run_exit_forecast_method_comparison(
-        master=master,
-        daily_driver_dataset=daily_driver_dataset,
-        daily_fastpark_actuals=daily_fastpark_actuals,
-        hourly_fastpark_actuals=hourly_fastpark_actuals,
-        duration_df=duration_df,
-        config=config,
-    )
-
-    t13 = step(t12, "Compared Exit Forecast Methods")
 
     # ----------------------------
     # Tendency back-testing
@@ -6321,34 +5062,8 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
 
     tendency_summary = summarise_backtest_results(tendency_backtest_results)
 
-    t14 = step(t13, "Back-tested Tendency Forecast Methods")
+    t14 = step(t12, "Back-tested Tendency Forecast Methods")
 
-    # ----------------------------
-    # Entry forecast method comparison
-    # ----------------------------
-
-    print("[15/17] Comparing Entry Forecast Methods…")
-
-    entry_forecast_comparison = run_entry_forecast_method_comparison(
-        booking_curve=booking_curve,
-        tendency_backtest_results=tendency_backtest_results,
-    )
-
-    t15 = step(t14, "Compared Entry Forecast Methods")
-
-    # ----------------------------
-    # Executive summary 
-    # ----------------------------
-
-    print("[16/17] Building Executive Summary…")
-
-    executive_summary = build_executive_summary(
-        tendency_summary=tendency_summary,
-        entry_forecast_comparison=entry_forecast_comparison,
-        exit_forecast_comparison=exit_forecast_comparison,
-    )
-
-    t16 = step(t15, "Built Executive Summary")
     # ----------------------------
     # Package outputs
     # ----------------------------
@@ -6361,18 +5076,15 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         "hourly_profiles": hourly_profiles,
         "hourly_offset_analysis": hourly_offset_analysis,
         "driver_analysis": driver_analysis,
-        "mix_features": mix_features,
+        "mix_summary": mix_summary,
         "booking_visibility_curves": booking_visibility_curves,
         "duration_patterns": duration_patterns,
         "return_deviation": return_deviation,
-        "known_booked_exit_forecast": known_booked_exit_forecast,
-        "exit_forecast_comparison": exit_forecast_comparison,
+        "known_booked_exit_profile": known_booked_exit_profile,
         "tendency_summary": tendency_summary,
-        "entry_forecast_comparison": entry_forecast_comparison,
     }
 
     outputs = build_output_tables(
-        executive_summary=executive_summary,
         reconciliation_summary=reconciliation_summary,
         daily_fastpark_actuals=daily_fastpark_actuals,
         hourly_fastpark_actuals=hourly_fastpark_actuals,
@@ -6383,7 +5095,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         forecast_error_summaries=forecast_error_summaries,
     )
 
-    t17 = step(t16, "Built Outputs")
+    t17 = step(t14, "Built Outputs")
 
     
     final_time = t17
