@@ -87,7 +87,7 @@ def get_analysis_config():
         # Date range for historical analysis
         # Fill these in depending on the history you want to use
         "analysis_start_date": "2024-01-01",
-        "analysis_end_date": "2026-07-30", 
+        "analysis_end_date": "2026-04-08", 
 
         # Lead time checkpoints for booking curve analysis
         # These represent days before entry date
@@ -4842,6 +4842,638 @@ def analyse_price_premium_booking_curve(
         "price_premium_duration_summary": price_premium_duration_summary,
     }
 
+def analyse_price_booking_response(
+    bookings_clean,
+    booking_entry_curve_duration,
+    config,
+):
+    """
+    Analyse whether lower or higher price relative to normal changes booking behaviour.
+
+    Purpose:
+        This analysis treats price as a bookings driver rather than only
+        a final demand signal.
+
+        It asks:
+            When price per day is higher or lower than normal for the same
+            lead-time horizon, month and duration band, do we see more or
+            fewer bookings created in that booking window?
+
+    Important:
+        This uses the price paid at booking creation.
+
+        It does not observe advertised prices for customers who looked but
+        did not book. Therefore this is behavioural evidence from completed
+        bookings, not a perfect causal elasticity model.
+
+    Outputs:
+        dict:
+            - price_booking_response_detail
+            - price_booking_response_band_summary
+            - price_booking_response_horizon_summary
+            - price_booking_response_duration_summary
+    """
+
+    empty_results = {
+        "price_booking_response_detail": pd.DataFrame(),
+        "price_booking_response_band_summary": pd.DataFrame(),
+        "price_booking_response_horizon_summary": pd.DataFrame(),
+        "price_booking_response_duration_summary": pd.DataFrame(),
+    }
+
+    if booking_entry_curve_duration is None or booking_entry_curve_duration.empty:
+        return empty_results
+
+    curve = booking_entry_curve_duration.copy()
+
+    curve["entry_date"] = pd.to_datetime(
+        curve["entry_date"],
+        errors="coerce",
+    )
+
+    curve["planned_duration_band"] = (
+        curve["planned_duration_band"]
+        .astype(str)
+    )
+
+    curve["month"] = curve["entry_date"].dt.month
+    curve["year"] = curve["entry_date"].dt.year
+    curve["weekday"] = curve["entry_date"].dt.day_name()
+    curve["weekday_num"] = curve["entry_date"].dt.weekday
+
+    # --------------------------------------------------------
+    # Prepare valid bookings
+    # --------------------------------------------------------
+    valid = bookings_clean[
+        bookings_clean["is_valid_booking"]
+    ].copy()
+
+    valid["planned_entry_date"] = pd.to_datetime(
+        valid["planned_entry_date"],
+        errors="coerce",
+    )
+
+    valid["entryDate"] = pd.to_datetime(
+        valid["entryDate"],
+        errors="coerce",
+    )
+
+    valid["createdAt"] = pd.to_datetime(
+        valid["createdAt"],
+        errors="coerce",
+    )
+
+    valid["planned_duration_band"] = (
+        valid["planned_duration_band"]
+        .astype(str)
+    )
+
+    # Defensive price calculations.
+    if "booking_total_per_quantity" not in valid.columns:
+        valid["booking_total_per_quantity"] = (
+            valid["bookingTotal"]
+            / valid["productQuantity"].replace(0, np.nan)
+        )
+
+    if "booking_total_per_planned_day" not in valid.columns:
+        valid["booking_total_per_planned_day"] = (
+            valid["bookingTotal"]
+            / valid["planned_duration_days_calc"].replace(0, np.nan)
+        )
+
+    if "booking_total_per_quantity_per_day" not in valid.columns:
+        valid["booking_total_per_quantity_per_day"] = (
+            valid["booking_total_per_quantity"]
+            / valid["planned_duration_days_calc"].replace(0, np.nan)
+        )
+
+    if "product_price_per_planned_day" not in valid.columns:
+        valid["product_price_per_planned_day"] = (
+            valid["productPrice"]
+            / valid["planned_duration_days_calc"].replace(0, np.nan)
+        )
+
+    # Lead time when the customer booked.
+    valid["lead_time_days_calc"] = (
+        valid["entryDate"] - valid["createdAt"]
+    ).dt.total_seconds() / 86400
+
+    checkpoints = sorted(config["lead_time_checkpoints"])
+
+    def assign_price_checkpoint(lead_time_days):
+        """
+        Assign each booking to the lead-time window in which it was created.
+
+        Example:
+            If checkpoints contain 7 and 10, then a booking created
+            7 to less than 10 days before entry is assigned to checkpoint 7.
+        """
+
+        if pd.isna(lead_time_days):
+            return np.nan
+
+        if lead_time_days <= checkpoints[0]:
+            return checkpoints[0]
+
+        for i, checkpoint in enumerate(checkpoints):
+
+            if i == len(checkpoints) - 1:
+                if lead_time_days >= checkpoint:
+                    return checkpoint
+
+            next_checkpoint = checkpoints[i + 1]
+
+            if (
+                lead_time_days >= checkpoint
+                and lead_time_days < next_checkpoint
+            ):
+                return checkpoint
+
+        return np.nan
+
+    valid["lead_time_checkpoint"] = valid["lead_time_days_calc"].apply(
+        assign_price_checkpoint
+    )
+
+    valid = valid.dropna(
+        subset=[
+            "planned_entry_date",
+            "planned_duration_band",
+            "lead_time_checkpoint",
+        ]
+    ).copy()
+
+    valid["lead_time_checkpoint"] = (
+        valid["lead_time_checkpoint"]
+        .astype(int)
+    )
+
+    # --------------------------------------------------------
+    # Bookings created in each lead-time price window
+    # --------------------------------------------------------
+    price_window_summary = (
+        valid
+        .groupby(
+            [
+                "planned_entry_date",
+                "planned_duration_band",
+                "lead_time_checkpoint",
+            ],
+            dropna=False,
+            observed=False,
+        )
+        .agg(
+            bookings_created_in_price_window=("bookingId", "nunique"),
+
+            avg_booking_total_at_horizon=("bookingTotal", "mean"),
+            median_booking_total_at_horizon=("bookingTotal", "median"),
+
+            avg_price_per_day_at_horizon=(
+                "booking_total_per_planned_day",
+                "mean",
+            ),
+            median_price_per_day_at_horizon=(
+                "booking_total_per_planned_day",
+                "median",
+            ),
+
+            avg_price_per_quantity_per_day_at_horizon=(
+                "booking_total_per_quantity_per_day",
+                "mean",
+            ),
+            median_price_per_quantity_per_day_at_horizon=(
+                "booking_total_per_quantity_per_day",
+                "median",
+            ),
+
+            avg_product_price_per_day_at_horizon=(
+                "product_price_per_planned_day",
+                "mean",
+            ),
+            median_product_price_per_day_at_horizon=(
+                "product_price_per_planned_day",
+                "median",
+            ),
+
+            avg_lead_time_days_in_price_window=(
+                "lead_time_days_calc",
+                "mean",
+            ),
+            min_lead_time_days_in_price_window=(
+                "lead_time_days_calc",
+                "min",
+            ),
+            max_lead_time_days_in_price_window=(
+                "lead_time_days_calc",
+                "max",
+            ),
+        )
+        .reset_index()
+        .rename(columns={"planned_entry_date": "entry_date"})
+    )
+
+    price_window_summary["entry_date"] = pd.to_datetime(
+        price_window_summary["entry_date"],
+        errors="coerce",
+    )
+
+    # --------------------------------------------------------
+    # Merge booking curve stock with booking-window price activity
+    # --------------------------------------------------------
+    detail = curve.merge(
+        price_window_summary,
+        on=[
+            "entry_date",
+            "planned_duration_band",
+            "lead_time_checkpoint",
+        ],
+        how="left",
+    )
+
+    detail["bookings_created_in_price_window"] = (
+        detail["bookings_created_in_price_window"]
+        .fillna(0)
+    )
+
+    # --------------------------------------------------------
+    # Baseline normal behaviour
+    # Same horizon, same month, same duration band.
+    # --------------------------------------------------------
+    baseline = (
+        detail
+        .groupby(
+            [
+                "lead_time_checkpoint",
+                "month",
+                "planned_duration_band",
+            ],
+            dropna=False,
+            observed=False,
+        )
+        .agg(
+            normal_median_price_per_day=(
+                "median_price_per_day_at_horizon",
+                "median",
+            ),
+            normal_avg_price_per_day=(
+                "avg_price_per_day_at_horizon",
+                "mean",
+            ),
+            normal_median_price_per_quantity_per_day=(
+                "median_price_per_quantity_per_day_at_horizon",
+                "median",
+            ),
+            normal_avg_price_per_quantity_per_day=(
+                "avg_price_per_quantity_per_day_at_horizon",
+                "mean",
+            ),
+
+            normal_bookings_created_in_price_window=(
+                "bookings_created_in_price_window",
+                "mean",
+            ),
+            normal_median_bookings_created_in_price_window=(
+                "bookings_created_in_price_window",
+                "median",
+            ),
+
+            normal_completion_vs_valid=(
+                "completion_vs_valid_bookings",
+                "mean",
+            ),
+            normal_final_valid_bookings=(
+                "final_valid_bookings",
+                "mean",
+            ),
+            normal_bookings_known=(
+                "bookings_known",
+                "mean",
+            ),
+            baseline_observations=("entry_date", "nunique"),
+        )
+        .reset_index()
+    )
+
+    detail = detail.merge(
+        baseline,
+        on=[
+            "lead_time_checkpoint",
+            "month",
+            "planned_duration_band",
+        ],
+        how="left",
+    )
+
+    # --------------------------------------------------------
+    # Price premium
+    # --------------------------------------------------------
+    detail["price_premium"] = (
+        detail["median_price_per_quantity_per_day_at_horizon"]
+        / detail["normal_median_price_per_quantity_per_day"].replace(0, np.nan)
+        - 1
+    )
+
+    detail["price_premium_avg"] = (
+        detail["avg_price_per_quantity_per_day_at_horizon"]
+        / detail["normal_avg_price_per_quantity_per_day"].replace(0, np.nan)
+        - 1
+    )
+
+    # --------------------------------------------------------
+    # Booking response metrics
+    # --------------------------------------------------------
+    detail["booking_window_uplift_vs_normal"] = (
+        detail["bookings_created_in_price_window"]
+        / detail["normal_bookings_created_in_price_window"].replace(0, np.nan)
+        - 1
+    )
+
+    detail["booking_window_uplift_vs_normal_median"] = (
+        detail["bookings_created_in_price_window"]
+        / detail["normal_median_bookings_created_in_price_window"].replace(0, np.nan)
+        - 1
+    )
+
+    detail["booking_window_share_of_final_valid"] = (
+        detail["bookings_created_in_price_window"]
+        / detail["final_valid_bookings"].replace(0, np.nan)
+    )
+
+    detail["normal_booking_window_share_of_final_valid"] = (
+        detail["normal_bookings_created_in_price_window"]
+        / detail["normal_final_valid_bookings"].replace(0, np.nan)
+    )
+
+    detail["booking_window_share_uplift_vs_normal"] = (
+        detail["booking_window_share_of_final_valid"]
+        / detail["normal_booking_window_share_of_final_valid"].replace(0, np.nan)
+        - 1
+    )
+
+    # --------------------------------------------------------
+    # Remaining pickup after checkpoint
+    # This answers the "what happens after today?" question.
+    # --------------------------------------------------------
+    detail["remaining_valid_booking_pickup_after_checkpoint"] = (
+        detail["final_valid_bookings"]
+        - detail["bookings_known"]
+    )
+
+    detail["normal_remaining_valid_booking_pickup_after_checkpoint"] = (
+        detail["normal_final_valid_bookings"]
+        - detail["normal_bookings_known"]
+    )
+
+    detail["remaining_pickup_uplift_vs_normal"] = (
+        detail["remaining_valid_booking_pickup_after_checkpoint"]
+        / detail["normal_remaining_valid_booking_pickup_after_checkpoint"].replace(0, np.nan)
+        - 1
+    )
+
+    # --------------------------------------------------------
+    # Price premium bands
+    # --------------------------------------------------------
+    premium_bins = [
+        -np.inf,
+        -0.20,
+        -0.10,
+        -0.05,
+        0.05,
+        0.10,
+        0.20,
+        np.inf,
+    ]
+
+    premium_labels = [
+        "< -20%",
+        "-20% to -10%",
+        "-10% to -5%",
+        "-5% to +5%",
+        "+5% to +10%",
+        "+10% to +20%",
+        "> +20%",
+    ]
+
+    detail["price_premium_band"] = pd.cut(
+        detail["price_premium"],
+        bins=premium_bins,
+        labels=premium_labels,
+    )
+
+    # --------------------------------------------------------
+    # Summary by horizon and price premium band
+    # --------------------------------------------------------
+    price_booking_response_band_summary = (
+        detail
+        .groupby(
+            [
+                "lead_time_checkpoint",
+                "price_premium_band",
+            ],
+            dropna=False,
+            observed=False,
+        )
+        .agg(
+            observations=("entry_date", "nunique"),
+
+            avg_price_premium=("price_premium", "mean"),
+            median_price_premium=("price_premium", "median"),
+
+            avg_bookings_created_in_price_window=(
+                "bookings_created_in_price_window",
+                "mean",
+            ),
+            normal_avg_bookings_created_in_price_window=(
+                "normal_bookings_created_in_price_window",
+                "mean",
+            ),
+            avg_booking_window_uplift_vs_normal=(
+                "booking_window_uplift_vs_normal",
+                "mean",
+            ),
+            median_booking_window_uplift_vs_normal=(
+                "booking_window_uplift_vs_normal",
+                "median",
+            ),
+
+            avg_booking_window_share_of_final_valid=(
+                "booking_window_share_of_final_valid",
+                "mean",
+            ),
+            avg_booking_window_share_uplift_vs_normal=(
+                "booking_window_share_uplift_vs_normal",
+                "mean",
+            ),
+
+            avg_remaining_valid_booking_pickup_after_checkpoint=(
+                "remaining_valid_booking_pickup_after_checkpoint",
+                "mean",
+            ),
+            normal_avg_remaining_valid_booking_pickup_after_checkpoint=(
+                "normal_remaining_valid_booking_pickup_after_checkpoint",
+                "mean",
+            ),
+            avg_remaining_pickup_uplift_vs_normal=(
+                "remaining_pickup_uplift_vs_normal",
+                "mean",
+            ),
+            median_remaining_pickup_uplift_vs_normal=(
+                "remaining_pickup_uplift_vs_normal",
+                "median",
+            ),
+
+            avg_median_price_per_day_at_horizon=(
+                "median_price_per_day_at_horizon",
+                "mean",
+            ),
+            avg_normal_median_price_per_day=(
+                "normal_median_price_per_day",
+                "mean",
+            ),
+        )
+        .reset_index()
+        .sort_values(
+            [
+                "lead_time_checkpoint",
+                "price_premium_band",
+            ]
+        )
+    )
+
+    # --------------------------------------------------------
+    # Summary by horizon with correlations
+    # --------------------------------------------------------
+    horizon_rows = []
+
+    for horizon, horizon_df in detail.groupby("lead_time_checkpoint"):
+
+        valid_corr = horizon_df[
+            [
+                "price_premium",
+                "booking_window_uplift_vs_normal",
+                "booking_window_share_uplift_vs_normal",
+                "remaining_pickup_uplift_vs_normal",
+            ]
+        ].replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(valid_corr) > 1:
+            corr_window = valid_corr["price_premium"].corr(
+                valid_corr["booking_window_uplift_vs_normal"]
+            )
+            corr_share = valid_corr["price_premium"].corr(
+                valid_corr["booking_window_share_uplift_vs_normal"]
+            )
+            corr_remaining = valid_corr["price_premium"].corr(
+                valid_corr["remaining_pickup_uplift_vs_normal"]
+            )
+        else:
+            corr_window = np.nan
+            corr_share = np.nan
+            corr_remaining = np.nan
+
+        horizon_rows.append(
+            {
+                "lead_time_checkpoint": horizon,
+                "observations": horizon_df["entry_date"].nunique(),
+
+                "avg_price_premium": horizon_df["price_premium"].mean(),
+                "median_price_premium": horizon_df["price_premium"].median(),
+
+                "corr_price_premium_with_booking_window_uplift": corr_window,
+                "corr_price_premium_with_booking_window_share_uplift": corr_share,
+                "corr_price_premium_with_remaining_pickup_uplift": corr_remaining,
+
+                "avg_bookings_created_in_price_window": (
+                    horizon_df["bookings_created_in_price_window"].mean()
+                ),
+                "avg_booking_window_uplift_vs_normal": (
+                    horizon_df["booking_window_uplift_vs_normal"].mean()
+                ),
+                "median_booking_window_uplift_vs_normal": (
+                    horizon_df["booking_window_uplift_vs_normal"].median()
+                ),
+
+                "avg_remaining_pickup_uplift_vs_normal": (
+                    horizon_df["remaining_pickup_uplift_vs_normal"].mean()
+                ),
+                "median_remaining_pickup_uplift_vs_normal": (
+                    horizon_df["remaining_pickup_uplift_vs_normal"].median()
+                ),
+            }
+        )
+
+    price_booking_response_horizon_summary = pd.DataFrame(horizon_rows)
+
+    # --------------------------------------------------------
+    # Summary by horizon and duration band
+    # --------------------------------------------------------
+    price_booking_response_duration_summary = (
+        detail
+        .groupby(
+            [
+                "lead_time_checkpoint",
+                "planned_duration_band",
+            ],
+            dropna=False,
+            observed=False,
+        )
+        .agg(
+            observations=("entry_date", "nunique"),
+
+            avg_price_premium=("price_premium", "mean"),
+            median_price_premium=("price_premium", "median"),
+
+            avg_bookings_created_in_price_window=(
+                "bookings_created_in_price_window",
+                "mean",
+            ),
+            normal_avg_bookings_created_in_price_window=(
+                "normal_bookings_created_in_price_window",
+                "mean",
+            ),
+            avg_booking_window_uplift_vs_normal=(
+                "booking_window_uplift_vs_normal",
+                "mean",
+            ),
+            median_booking_window_uplift_vs_normal=(
+                "booking_window_uplift_vs_normal",
+                "median",
+            ),
+
+            avg_remaining_pickup_uplift_vs_normal=(
+                "remaining_pickup_uplift_vs_normal",
+                "mean",
+            ),
+            median_remaining_pickup_uplift_vs_normal=(
+                "remaining_pickup_uplift_vs_normal",
+                "median",
+            ),
+
+            avg_median_price_per_day_at_horizon=(
+                "median_price_per_day_at_horizon",
+                "mean",
+            ),
+            avg_normal_median_price_per_day=(
+                "normal_median_price_per_day",
+                "mean",
+            ),
+        )
+        .reset_index()
+        .sort_values(
+            [
+                "lead_time_checkpoint",
+                "planned_duration_band",
+            ]
+        )
+    )
+
+    return {
+        "price_booking_response_detail": detail,
+        "price_booking_response_band_summary": price_booking_response_band_summary,
+        "price_booking_response_horizon_summary": price_booking_response_horizon_summary,
+        "price_booking_response_duration_summary": price_booking_response_duration_summary,
+    }
+
 # ============================================================
 # 10. STAY DURATION, RETURN BEHAVIOUR AND EXIT FORECAST BACKTESTING
 # ============================================================
@@ -5984,6 +6616,19 @@ def export_outputs_to_excel(outputs, output_path):
         "forecast_error_summaries_price_premium_analysis_price_premium_duration_summary":
             "Price Premium Duration",
 
+        # Price Booking Response Analysis
+        "forecast_error_summaries_price_booking_response_price_booking_response_detail":
+            "Price Booking Detail",
+
+        "forecast_error_summaries_price_booking_response_price_booking_response_band_summary":
+            "Price Booking Bands",
+
+        "forecast_error_summaries_price_booking_response_price_booking_response_horizon_summary":
+            "Price Booking Horizon",
+
+        "forecast_error_summaries_price_booking_response_price_booking_response_duration_summary":
+            "Price Booking Duration",
+
         # Planned duration analysis
         "forecast_error_summaries_duration_patterns_planned_duration_distribution":
             "Planned Duration Dist",
@@ -6368,6 +7013,12 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         config=config,
     )
 
+    price_booking_response = analyse_price_booking_response(
+        bookings_clean=bookings_clean,
+        booking_entry_curve_duration=booking_entry_curve_duration,
+        config=config,
+    )
+
     t11 = step(
         t10,
         "Analysed Booking, Exit Visibility and Price Premium Curves",
@@ -6419,6 +7070,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
         "daily_occupancy_summary": daily_occupancy_summary,
         "booking_visibility_curves": booking_visibility_curves,
         "price_premium_analysis": price_premium_analysis,
+        "price_booking_response": price_booking_response,
         "duration_patterns": duration_patterns,
         "return_deviation": return_deviation,
         "known_booked_exit_profile": known_booked_exit_profile,
@@ -6468,5 +7120,5 @@ if __name__ == "__main__":
 
     outputs = run_fastpark_historical_analysis(
         sql_connection=sql_connection,
-        output_path=r"output\fastpark\reports\fastpark_historical_analysis_v3.xlsx",
+        output_path=r"output\fastpark\reports\fastpark_historical_analysis_v4.xlsx",
     )
