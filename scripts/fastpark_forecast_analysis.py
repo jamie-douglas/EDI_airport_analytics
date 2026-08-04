@@ -2517,22 +2517,20 @@ def analyse_relative_price_and_market_share(
     config,
 ):
     """
-    Analyse FastPark price position versus competitor car parks.
+    Analyse FastPark dynamic pricing as a booking-choice driver.
 
     Purpose:
-        Test whether FastPark gains or loses booking share when it is cheaper
-        or more expensive than other AirportX car park products.
+        Understand whether FastPark price changes affect:
+            - FastPark bookings
+            - FastPark booking share versus other products
+            - later entries, exits and movements
 
-    Uses:
-        - booking created date
-        - planned entry date
-        - planned duration band
-        - lead time checkpoint
-        - price per day = bookingTotal / planned duration days
-        - FastPark bookings
-        - competitor bookings
-        - FastPark share of AirportX bookings
-        - correlations to bookings, entries, exits and movements
+    Core logic:
+        1. Calculate price per day for each booking.
+        2. Group by booking created date, lead-time checkpoint and duration band.
+        3. Compare FastPark price against each other product separately.
+        4. Measure FastPark bookings and booking share.
+        5. Measure whether FastPark price changes are followed by booking/share changes.
     """
 
     df = all_bookings_clean.copy()
@@ -2559,8 +2557,9 @@ def analyse_relative_price_and_market_share(
         .astype(str)
     )
 
-    # Main price metric
-    # bookingTotal and productTotal are effectively equivalent in this data.
+    # Main price metric.
+    # You said bookingTotal and productTotal are effectively the same,
+    # so use bookingTotal consistently.
     df["price_per_day"] = (
         df["bookingTotal"]
         / df["planned_duration_days_calc"].replace(0, np.nan)
@@ -2581,6 +2580,9 @@ def analyse_relative_price_and_market_share(
 
     df = df[df["planned_duration_days_calc"] > 0].copy()
 
+    # --------------------------------------------------------
+    # Assign booking lead time to configured checkpoints.
+    # --------------------------------------------------------
     checkpoints = sorted(config["lead_time_checkpoints"])
 
     def assign_lead_time_checkpoint(lead_time_days):
@@ -2614,24 +2616,34 @@ def analyse_relative_price_and_market_share(
     df = df.dropna(subset=["lead_time_checkpoint"]).copy()
     df["lead_time_checkpoint"] = df["lead_time_checkpoint"].astype(int)
 
+    # --------------------------------------------------------
+    # Helper for clean product column names.
+    # --------------------------------------------------------
+    def clean_product_name(name):
+        return (
+            str(name)
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+            .replace("/", "_")
+        )
+
+    product_slug_map = {
+        product: clean_product_name(product)
+        for product in [fastpark_asset] + competitor_assets
+    }
+
+    fastpark_slug = product_slug_map[fastpark_asset]
+
     # ========================================================
-    # 1. FastPark price driver analysis
+    # 1. FastPark price shape
+    # ========================================================
+    # This answers:
+    #   Does FastPark price/day change by duration and lead time?
     # ========================================================
     fastpark = df[df["assetName"].eq(fastpark_asset)].copy()
 
-    price_driver_corr_cols = [
-        "price_per_day",
-        "lead_time_days_calc",
-        "planned_duration_days_calc",
-    ]
-
-    fastpark_price_driver_correlations = (
-        fastpark[price_driver_corr_cols]
-        .replace([np.inf, -np.inf], np.nan)
-        .corr()
-    )
-
-    fastpark_price_by_lead_duration = (
+    fastpark_price_shape = (
         fastpark
         .groupby(
             [
@@ -2642,9 +2654,9 @@ def analyse_relative_price_and_market_share(
             observed=False,
         )
         .agg(
-            bookings=("bookingId", "nunique"),
-            avg_price_per_day=("price_per_day", "mean"),
-            median_price_per_day=("price_per_day", "median"),
+            fastpark_bookings=("bookingId", "nunique"),
+            avg_fastpark_price_per_day=("price_per_day", "mean"),
+            median_fastpark_price_per_day=("price_per_day", "median"),
             avg_lead_time_days=("lead_time_days_calc", "mean"),
             median_lead_time_days=("lead_time_days_calc", "median"),
             avg_duration_days=("planned_duration_days_calc", "mean"),
@@ -2659,34 +2671,34 @@ def analyse_relative_price_and_market_share(
         )
     )
 
-    fastpark_price_by_created_date = (
-        fastpark
-        .groupby("booking_created_date", dropna=False)
-        .agg(
-            fastpark_bookings=("bookingId", "nunique"),
-            avg_fastpark_price_per_day=("price_per_day", "mean"),
-            median_fastpark_price_per_day=("price_per_day", "median"),
-            avg_lead_time_days=("lead_time_days_calc", "mean"),
-            median_lead_time_days=("lead_time_days_calc", "median"),
-            avg_duration_days=("planned_duration_days_calc", "mean"),
-            median_duration_days=("planned_duration_days_calc", "median"),
-        )
-        .reset_index()
-    )
-
     # ========================================================
-    # 2. Relative price position at booking creation date
+    # 2. Product price matrix
     # ========================================================
-    choice_group_cols = [
+    # One row per:
+    #   created date + lead time + duration band
+    #
+    # Columns:
+    #   FastPark price/day
+    #   Long Stay price/day
+    #   Mid Stay price/day
+    #   Multi price/day
+    #   Plane Parking price/day
+    #   Terminal price/day
+    #   FastPark bookings
+    #   product bookings
+    #   FastPark share
+    #   price index versus each product
+    # ========================================================
+    group_cols = [
         "booking_created_date",
         "lead_time_checkpoint",
         "planned_duration_band",
     ]
 
-    asset_choice_summary = (
+    product_summary = (
         df
         .groupby(
-            choice_group_cols + ["assetName"],
+            group_cols + ["assetName"],
             dropna=False,
             observed=False,
         )
@@ -2694,364 +2706,404 @@ def analyse_relative_price_and_market_share(
             bookings=("bookingId", "nunique"),
             avg_price_per_day=("price_per_day", "mean"),
             median_price_per_day=("price_per_day", "median"),
+            avg_lead_time_days=("lead_time_days_calc", "mean"),
+            avg_duration_days=("planned_duration_days_calc", "mean"),
         )
         .reset_index()
     )
 
-    total_choice_summary = (
-        asset_choice_summary
-        .groupby(choice_group_cols, dropna=False, observed=False)
-        .agg(
-            total_airportx_bookings=("bookings", "sum"),
-            avg_all_asset_price_per_day=("avg_price_per_day", "mean"),
-            median_all_asset_price_per_day=("median_price_per_day", "median"),
+    # Wide price table.
+    price_matrix = product_summary.pivot_table(
+        index=group_cols,
+        columns="assetName",
+        values="median_price_per_day",
+        aggfunc="mean",
+    )
+
+    price_matrix.columns = [
+        f"{product_slug_map.get(col, clean_product_name(col))}_median_price_per_day"
+        for col in price_matrix.columns
+    ]
+
+    price_matrix = price_matrix.reset_index()
+
+    # Wide bookings table.
+    booking_matrix = product_summary.pivot_table(
+        index=group_cols,
+        columns="assetName",
+        values="bookings",
+        aggfunc="sum",
+    )
+
+    booking_matrix.columns = [
+        f"{product_slug_map.get(col, clean_product_name(col))}_bookings"
+        for col in booking_matrix.columns
+    ]
+
+    booking_matrix = booking_matrix.reset_index()
+
+    product_price_matrix = price_matrix.merge(
+        booking_matrix,
+        on=group_cols,
+        how="outer",
+    )
+
+    product_booking_cols = [
+        col for col in product_price_matrix.columns
+        if col.endswith("_bookings")
+    ]
+
+    for col in product_booking_cols:
+        product_price_matrix[col] = product_price_matrix[col].fillna(0)
+
+    product_price_matrix["total_airportx_bookings"] = (
+        product_price_matrix[product_booking_cols].sum(axis=1)
+    )
+
+    fastpark_booking_col = f"{fastpark_slug}_bookings"
+    fastpark_price_col = f"{fastpark_slug}_median_price_per_day"
+
+    if fastpark_booking_col not in product_price_matrix.columns:
+        product_price_matrix[fastpark_booking_col] = 0
+
+    product_price_matrix["fastpark_booking_share"] = (
+        product_price_matrix[fastpark_booking_col]
+        / product_price_matrix["total_airportx_bookings"].replace(0, np.nan)
+    )
+
+    # Price rank: 1 = cheapest among available products in that group.
+    product_price_cols = [
+        f"{product_slug_map.get(product, clean_product_name(product))}_median_price_per_day"
+        for product in [fastpark_asset] + competitor_assets
+        if f"{product_slug_map.get(product, clean_product_name(product))}_median_price_per_day"
+        in product_price_matrix.columns
+    ]
+
+    product_price_matrix["fastpark_price_rank"] = np.nan
+
+    if fastpark_price_col in product_price_matrix.columns and product_price_cols:
+        price_ranks = product_price_matrix[product_price_cols].rank(
+            axis=1,
+            method="min",
+            ascending=True,
         )
-        .reset_index()
-    )
+        product_price_matrix["fastpark_price_rank"] = price_ranks[fastpark_price_col]
 
-    fastpark_choice = asset_choice_summary[
-        asset_choice_summary["assetName"].eq(fastpark_asset)
-    ].copy()
+    # Compare FastPark to each competitor separately.
+    for competitor in competitor_assets:
 
-    fastpark_choice = fastpark_choice.rename(
-        columns={
-            "bookings": "fastpark_bookings",
-            "avg_price_per_day": "fastpark_avg_price_per_day",
-            "median_price_per_day": "fastpark_median_price_per_day",
-        }
-    )
+        competitor_slug = product_slug_map[competitor]
+        competitor_price_col = f"{competitor_slug}_median_price_per_day"
+        competitor_booking_col = f"{competitor_slug}_bookings"
 
-    competitor_choice = asset_choice_summary[
-        asset_choice_summary["assetName"].isin(competitor_assets)
-    ].copy()
+        if competitor_price_col not in product_price_matrix.columns:
+            continue
 
-    competitor_choice = (
-        competitor_choice
-        .groupby(choice_group_cols, dropna=False, observed=False)
-        .agg(
-            competitor_bookings=("bookings", "sum"),
-            competitor_avg_price_per_day=("avg_price_per_day", "mean"),
-            competitor_median_price_per_day=("median_price_per_day", "median"),
+        product_price_matrix[
+            f"fastpark_price_index_vs_{competitor_slug}"
+        ] = (
+            product_price_matrix[fastpark_price_col]
+            / product_price_matrix[competitor_price_col].replace(0, np.nan)
         )
-        .reset_index()
-    )
 
-    relative_price_choice = (
-        total_choice_summary
-        .merge(
-            fastpark_choice[
-                choice_group_cols
-                + [
-                    "fastpark_bookings",
-                    "fastpark_avg_price_per_day",
-                    "fastpark_median_price_per_day",
-                ]
-            ],
-            on=choice_group_cols,
-            how="left",
+        product_price_matrix[
+            f"fastpark_price_diff_pct_vs_{competitor_slug}"
+        ] = (
+            product_price_matrix[f"fastpark_price_index_vs_{competitor_slug}"]
+            - 1
         )
-        .merge(
-            competitor_choice,
-            on=choice_group_cols,
-            how="left",
-        )
-    )
 
-    relative_price_choice["fastpark_bookings"] = (
-        relative_price_choice["fastpark_bookings"].fillna(0)
-    )
-
-    relative_price_choice["competitor_bookings"] = (
-        relative_price_choice["competitor_bookings"].fillna(0)
-    )
-
-    relative_price_choice["fastpark_booking_share"] = (
-        relative_price_choice["fastpark_bookings"]
-        / relative_price_choice["total_airportx_bookings"].replace(0, np.nan)
-    )
-
-    relative_price_choice["fastpark_price_index_vs_competitors"] = (
-        relative_price_choice["fastpark_median_price_per_day"]
-        / relative_price_choice["competitor_median_price_per_day"].replace(0, np.nan)
-    )
-
-    relative_price_choice["fastpark_price_difference_vs_competitors"] = (
-        relative_price_choice["fastpark_price_index_vs_competitors"]
-        - 1
-    )
-
-    relative_price_choice["fastpark_is_cheaper_than_competitors"] = (
-        relative_price_choice["fastpark_price_index_vs_competitors"] < 1
-    )
-
-    relative_price_choice["relative_price_band"] = pd.cut(
-        relative_price_choice["fastpark_price_difference_vs_competitors"],
-        bins=[
-            -np.inf,
-            -0.20,
-            -0.10,
-            -0.05,
-            0.05,
-            0.10,
-            0.20,
-            np.inf,
-        ],
-        labels=[
-            "FastPark >20% cheaper",
-            "FastPark 10-20% cheaper",
-            "FastPark 5-10% cheaper",
-            "Similar price",
-            "FastPark 5-10% dearer",
-            "FastPark 10-20% dearer",
-            "FastPark >20% dearer",
-        ],
-    )
-
-    # ========================================================
-    # 3. Market share by relative price band
-    # ========================================================
-    market_share_by_price_band = (
-        relative_price_choice
-        .groupby("relative_price_band", dropna=False, observed=False)
-        .agg(
-            observations=("booking_created_date", "nunique"),
-            avg_fastpark_price_index=("fastpark_price_index_vs_competitors", "mean"),
-            median_fastpark_price_index=("fastpark_price_index_vs_competitors", "median"),
-            avg_fastpark_booking_share=("fastpark_booking_share", "mean"),
-            avg_fastpark_bookings=("fastpark_bookings", "mean"),
-            avg_competitor_bookings=("competitor_bookings", "mean"),
-            avg_total_airportx_bookings=("total_airportx_bookings", "mean"),
-        )
-        .reset_index()
-    )
-
-    # ========================================================
-    # 4. Lead-time price sensitivity
-    # ========================================================
-    lead_time_price_sensitivity = (
-        relative_price_choice
-        .groupby("lead_time_checkpoint", dropna=False, observed=False)
-        .apply(
-            lambda x: pd.Series(
-                {
-                    "observations": len(x),
-                    "corr_price_index_vs_fastpark_share": (
-                        x["fastpark_price_index_vs_competitors"]
-                        .corr(x["fastpark_booking_share"])
-                    ),
-                    "corr_price_index_vs_fastpark_bookings": (
-                        x["fastpark_price_index_vs_competitors"]
-                        .corr(x["fastpark_bookings"])
-                    ),
-                    "avg_fastpark_share": x["fastpark_booking_share"].mean(),
-                    "avg_fastpark_price_index": (
-                        x["fastpark_price_index_vs_competitors"].mean()
-                    ),
-                    "median_fastpark_price_index": (
-                        x["fastpark_price_index_vs_competitors"].median()
-                    ),
-                }
+        if competitor_booking_col in product_price_matrix.columns:
+            product_price_matrix[
+                f"fastpark_share_vs_{competitor_slug}"
+            ] = (
+                product_price_matrix[fastpark_booking_col]
+                / (
+                    product_price_matrix[fastpark_booking_col]
+                    + product_price_matrix[competitor_booking_col]
+                ).replace(0, np.nan)
             )
-        )
-        .reset_index()
-    )
 
     # ========================================================
-    # 5. Duration price sensitivity
+    # 3. FastPark price change response
     # ========================================================
-    duration_price_sensitivity = (
-        relative_price_choice
-        .groupby("planned_duration_band", dropna=False, observed=False)
-        .apply(
-            lambda x: pd.Series(
-                {
-                    "observations": len(x),
-                    "corr_price_index_vs_fastpark_share": (
-                        x["fastpark_price_index_vs_competitors"]
-                        .corr(x["fastpark_booking_share"])
-                    ),
-                    "corr_price_index_vs_fastpark_bookings": (
-                        x["fastpark_price_index_vs_competitors"]
-                        .corr(x["fastpark_bookings"])
-                    ),
-                    "avg_fastpark_share": x["fastpark_booking_share"].mean(),
-                    "avg_fastpark_price_index": (
-                        x["fastpark_price_index_vs_competitors"].mean()
-                    ),
-                    "median_fastpark_price_index": (
-                        x["fastpark_price_index_vs_competitors"].median()
-                    ),
-                }
-            )
+    # This answers:
+    #   When FastPark price goes up/down, do bookings or share move?
+    # ========================================================
+    fastpark_response_cols = [
+        "booking_created_date",
+        "lead_time_checkpoint",
+        "planned_duration_band",
+        fastpark_price_col,
+        fastpark_booking_col,
+        "total_airportx_bookings",
+        "fastpark_booking_share",
+        "fastpark_price_rank",
+    ]
+
+    fastpark_response_cols = [
+        col for col in fastpark_response_cols
+        if col in product_price_matrix.columns
+    ]
+
+    fastpark_price_change_response = (
+        product_price_matrix[fastpark_response_cols]
+        .copy()
+        .sort_values(
+            [
+                "lead_time_checkpoint",
+                "planned_duration_band",
+                "booking_created_date",
+            ]
         )
-        .reset_index()
     )
 
-    # ========================================================
-    # 6. Planned entry date view for entries/exits/movements
-    # ========================================================
-    entry_group_cols = [
-        "planned_entry_date",
+    group_for_change = [
         "lead_time_checkpoint",
         "planned_duration_band",
     ]
 
-    entry_asset_summary = (
-        df
-        .groupby(entry_group_cols + ["assetName"], dropna=False, observed=False)
-        .agg(
-            bookings=("bookingId", "nunique"),
-            avg_price_per_day=("price_per_day", "mean"),
-            median_price_per_day=("price_per_day", "median"),
+    fastpark_price_change_response["previous_fastpark_price_per_day"] = (
+        fastpark_price_change_response
+        .groupby(group_for_change)[fastpark_price_col]
+        .shift(1)
+    )
+
+    fastpark_price_change_response["previous_fastpark_bookings"] = (
+        fastpark_price_change_response
+        .groupby(group_for_change)[fastpark_booking_col]
+        .shift(1)
+    )
+
+    fastpark_price_change_response["previous_fastpark_booking_share"] = (
+        fastpark_price_change_response
+        .groupby(group_for_change)["fastpark_booking_share"]
+        .shift(1)
+    )
+
+    fastpark_price_change_response["fastpark_price_change_pct"] = (
+        fastpark_price_change_response[fastpark_price_col]
+        / fastpark_price_change_response["previous_fastpark_price_per_day"].replace(0, np.nan)
+        - 1
+    )
+
+    fastpark_price_change_response["fastpark_booking_change_pct"] = (
+        fastpark_price_change_response[fastpark_booking_col]
+        / fastpark_price_change_response["previous_fastpark_bookings"].replace(0, np.nan)
+        - 1
+    )
+
+    fastpark_price_change_response["fastpark_share_change_points"] = (
+        fastpark_price_change_response["fastpark_booking_share"]
+        - fastpark_price_change_response["previous_fastpark_booking_share"]
+    )
+
+    price_change_bins = [
+        -np.inf,
+        -0.20,
+        -0.10,
+        -0.05,
+        0.05,
+        0.10,
+        0.20,
+        np.inf,
+    ]
+
+    price_change_labels = [
+        "Price down >20%",
+        "Price down 10-20%",
+        "Price down 5-10%",
+        "Price broadly flat",
+        "Price up 5-10%",
+        "Price up 10-20%",
+        "Price up >20%",
+    ]
+
+    fastpark_price_change_response["fastpark_price_change_band"] = pd.cut(
+        fastpark_price_change_response["fastpark_price_change_pct"],
+        bins=price_change_bins,
+        labels=price_change_labels,
+    )
+
+    # ========================================================
+    # 4. Product comparison summary
+    # ========================================================
+    # This answers:
+    #   Against each individual car park, when FastPark is cheaper/dearer,
+    #   what happens to FastPark share?
+    # ========================================================
+    pairwise_rows = []
+
+    for competitor in competitor_assets:
+
+        competitor_slug = product_slug_map[competitor]
+
+        index_col = f"fastpark_price_index_vs_{competitor_slug}"
+        diff_col = f"fastpark_price_diff_pct_vs_{competitor_slug}"
+        share_col = f"fastpark_share_vs_{competitor_slug}"
+        competitor_price_col = f"{competitor_slug}_median_price_per_day"
+        competitor_booking_col = f"{competitor_slug}_bookings"
+
+        required_cols = [
+            index_col,
+            diff_col,
+            competitor_price_col,
+            competitor_booking_col,
+        ]
+
+        if not all(col in product_price_matrix.columns for col in required_cols):
+            continue
+
+        temp = product_price_matrix[
+            [
+                "booking_created_date",
+                "lead_time_checkpoint",
+                "planned_duration_band",
+                fastpark_price_col,
+                competitor_price_col,
+                fastpark_booking_col,
+                competitor_booking_col,
+                "fastpark_booking_share",
+                index_col,
+                diff_col,
+            ]
+            + ([share_col] if share_col in product_price_matrix.columns else [])
+        ].copy()
+
+        temp["comparison_product"] = competitor
+
+        temp = temp.rename(
+            columns={
+                fastpark_price_col: "fastpark_price_per_day",
+                competitor_price_col: "comparison_product_price_per_day",
+                fastpark_booking_col: "fastpark_bookings",
+                competitor_booking_col: "comparison_product_bookings",
+                index_col: "fastpark_price_index_vs_product",
+                diff_col: "fastpark_price_diff_pct_vs_product",
+                share_col: "fastpark_share_vs_product",
+            }
         )
-        .reset_index()
-    )
 
-    entry_total_summary = (
-        entry_asset_summary
-        .groupby(entry_group_cols, dropna=False, observed=False)
-        .agg(
-            total_airportx_bookings=("bookings", "sum"),
+        pairwise_rows.append(temp)
+
+    if pairwise_rows:
+        pairwise_product_comparison = pd.concat(
+            pairwise_rows,
+            ignore_index=True,
         )
-        .reset_index()
-    )
+    else:
+        pairwise_product_comparison = pd.DataFrame()
 
-    entry_fastpark = entry_asset_summary[
-        entry_asset_summary["assetName"].eq(fastpark_asset)
-    ].copy()
+    if not pairwise_product_comparison.empty:
 
-    entry_fastpark = entry_fastpark.rename(
-        columns={
-            "bookings": "fastpark_bookings",
-            "median_price_per_day": "fastpark_median_price_per_day",
-            "avg_price_per_day": "fastpark_avg_price_per_day",
-        }
-    )
-
-    entry_competitors = entry_asset_summary[
-        entry_asset_summary["assetName"].isin(competitor_assets)
-    ].copy()
-
-    entry_competitors = (
-        entry_competitors
-        .groupby(entry_group_cols, dropna=False, observed=False)
-        .agg(
-            competitor_bookings=("bookings", "sum"),
-            competitor_median_price_per_day=("median_price_per_day", "median"),
-            competitor_avg_price_per_day=("avg_price_per_day", "mean"),
-        )
-        .reset_index()
-    )
-
-    price_position_by_entry_date = (
-        entry_total_summary
-        .merge(
-            entry_fastpark[
-                entry_group_cols
-                + [
-                    "fastpark_bookings",
-                    "fastpark_median_price_per_day",
-                    "fastpark_avg_price_per_day",
-                ]
+        pairwise_product_comparison["relative_price_band"] = pd.cut(
+            pairwise_product_comparison["fastpark_price_diff_pct_vs_product"],
+            bins=[
+                -np.inf,
+                -0.20,
+                -0.10,
+                -0.05,
+                0.05,
+                0.10,
+                0.20,
+                np.inf,
             ],
-            on=entry_group_cols,
-            how="left",
+            labels=[
+                "FastPark >20% cheaper",
+                "FastPark 10-20% cheaper",
+                "FastPark 5-10% cheaper",
+                "Similar price",
+                "FastPark 5-10% dearer",
+                "FastPark 10-20% dearer",
+                "FastPark >20% dearer",
+            ],
         )
-        .merge(
-            entry_competitors,
-            on=entry_group_cols,
-            how="left",
+
+        product_comparison_summary = (
+            pairwise_product_comparison
+            .groupby(
+                [
+                    "comparison_product",
+                    "lead_time_checkpoint",
+                    "planned_duration_band",
+                    "relative_price_band",
+                ],
+                dropna=False,
+                observed=False,
+            )
+            .agg(
+                observations=("booking_created_date", "nunique"),
+                avg_fastpark_price_per_day=("fastpark_price_per_day", "mean"),
+                avg_comparison_product_price_per_day=(
+                    "comparison_product_price_per_day",
+                    "mean",
+                ),
+                avg_fastpark_price_index=(
+                    "fastpark_price_index_vs_product",
+                    "mean",
+                ),
+                median_fastpark_price_index=(
+                    "fastpark_price_index_vs_product",
+                    "median",
+                ),
+                avg_fastpark_bookings=("fastpark_bookings", "mean"),
+                avg_comparison_product_bookings=(
+                    "comparison_product_bookings",
+                    "mean",
+                ),
+                avg_fastpark_share_all_products=(
+                    "fastpark_booking_share",
+                    "mean",
+                ),
+                avg_fastpark_share_vs_product=(
+                    "fastpark_share_vs_product",
+                    "mean",
+                ),
+            )
+            .reset_index()
         )
-    )
 
-    price_position_by_entry_date["fastpark_bookings"] = (
-        price_position_by_entry_date["fastpark_bookings"].fillna(0)
-    )
+    else:
+        product_comparison_summary = pd.DataFrame()
 
-    price_position_by_entry_date["fastpark_share_of_airportx_bookings"] = (
-        price_position_by_entry_date["fastpark_bookings"]
-        / price_position_by_entry_date["total_airportx_bookings"].replace(0, np.nan)
-    )
-
-    price_position_by_entry_date["fastpark_price_index_vs_competitors"] = (
-        price_position_by_entry_date["fastpark_median_price_per_day"]
-        / price_position_by_entry_date["competitor_median_price_per_day"].replace(0, np.nan)
-    )
-
-    daily_entry_price_position = (
-        price_position_by_entry_date
-        .groupby("planned_entry_date", dropna=False)
+    # ========================================================
+    # 5. Booking response summary
+    # ========================================================
+    # This answers:
+    #   When FastPark price changes up/down, do bookings/share move?
+    # ========================================================
+    booking_response_summary = (
+        fastpark_price_change_response
+        .groupby(
+            [
+                "lead_time_checkpoint",
+                "planned_duration_band",
+                "fastpark_price_change_band",
+            ],
+            dropna=False,
+            observed=False,
+        )
         .agg(
-            fastpark_bookings=("fastpark_bookings", "sum"),
-            total_airportx_bookings=("total_airportx_bookings", "sum"),
-            avg_fastpark_share=("fastpark_share_of_airportx_bookings", "mean"),
-            avg_fastpark_price_index=("fastpark_price_index_vs_competitors", "mean"),
-            median_fastpark_price_index=("fastpark_price_index_vs_competitors", "median"),
+            observations=("booking_created_date", "nunique"),
+            avg_fastpark_price_change_pct=("fastpark_price_change_pct", "mean"),
+            median_fastpark_price_change_pct=("fastpark_price_change_pct", "median"),
+            avg_fastpark_booking_change_pct=("fastpark_booking_change_pct", "mean"),
+            median_fastpark_booking_change_pct=("fastpark_booking_change_pct", "median"),
+            avg_fastpark_share_change_points=("fastpark_share_change_points", "mean"),
+            median_fastpark_share_change_points=("fastpark_share_change_points", "median"),
+            avg_fastpark_booking_share=("fastpark_booking_share", "mean"),
+            avg_fastpark_bookings=(fastpark_booking_col, "mean"),
         )
         .reset_index()
-        .rename(columns={"planned_entry_date": "date"})
-    )
-
-    daily_entry_price_position["date"] = pd.to_datetime(
-        daily_entry_price_position["date"],
-        errors="coerce",
-    )
-
-    demand = daily_driver_dataset.copy()
-    demand["date"] = pd.to_datetime(demand["date"], errors="coerce")
-
-    price_demand_dataset = demand.merge(
-        daily_entry_price_position,
-        on="date",
-        how="left",
-    )
-
-    price_demand_corr_cols = [
-        "fastpark_bookings",
-        "total_airportx_bookings",
-        "avg_fastpark_share",
-        "avg_fastpark_price_index",
-        "median_fastpark_price_index",
-
-        "valid_bookings",
-        "entries",
-        "exits",
-        "movements",
-        "net_flow",
-        "relative_occupancy",
-        "entry_penetration",
-        "exit_penetration",
-
-        "departing_pax",
-        "arriving_pax",
-        "total_pax",
-        "estimated_cars_on_site",
-        "estimated_available_spaces",
-        "estimated_occupancy_pct",
-    ]
-
-    price_demand_corr_cols = [
-        col for col in price_demand_corr_cols
-        if col in price_demand_dataset.columns
-    ]
-
-    price_demand_correlations = (
-        price_demand_dataset[price_demand_corr_cols]
-        .replace([np.inf, -np.inf], np.nan)
-        .corr()
     )
 
     return {
-        "fastpark_price_driver_correlations": fastpark_price_driver_correlations,
-        "fastpark_price_by_lead_duration": fastpark_price_by_lead_duration,
-        "fastpark_price_by_created_date": fastpark_price_by_created_date,
-        "relative_price_choice_detail": relative_price_choice,
-        "market_share_by_price_band": market_share_by_price_band,
-        "lead_time_price_sensitivity": lead_time_price_sensitivity,
-        "duration_price_sensitivity": duration_price_sensitivity,
-        "price_position_by_entry_date": price_position_by_entry_date,
-        "price_demand_dataset": price_demand_dataset,
-        "price_demand_correlations": price_demand_correlations,
+        "fastpark_price_shape": fastpark_price_shape,
+        "product_price_matrix": product_price_matrix,
+        "fastpark_price_change_response": fastpark_price_change_response,
+        "pairwise_product_comparison": pairwise_product_comparison,
+        "product_comparison_summary": product_comparison_summary,
+        "booking_response_summary": booking_response_summary,
     }
 
 # ============================================================
@@ -6008,36 +6060,24 @@ def export_outputs_to_excel(outputs, output_path):
         "forecast_error_summaries_occupancy_analysis_occupancy_correlation_summary":
             "Occupancy Correlations",
 
-        # Pricing / Competitor Analysis
-        "forecast_error_summaries_price_competitor_analysis_fastpark_price_driver_correlations":
-            "Price Drivers Corr",
+        # Dynamic Pricing / Booking Response Analysis
+        "forecast_error_summaries_price_competitor_analysis_fastpark_price_shape":
+            "FP Price Shape",
 
-        "forecast_error_summaries_price_competitor_analysis_fastpark_price_by_lead_duration":
-            "Price by Lead Duration",
+        "forecast_error_summaries_price_competitor_analysis_product_price_matrix":
+            "Product Price Matrix",
 
-        "forecast_error_summaries_price_competitor_analysis_fastpark_price_by_created_date":
-            "Price by Created Date",
+        "forecast_error_summaries_price_competitor_analysis_fastpark_price_change_response":
+            "FP Price Change Response",
 
-        "forecast_error_summaries_price_competitor_analysis_relative_price_choice_detail":
-            "Relative Price Detail",
+        "forecast_error_summaries_price_competitor_analysis_pairwise_product_comparison":
+            "Pairwise Product Compare",
 
-        "forecast_error_summaries_price_competitor_analysis_market_share_by_price_band":
-            "Price Band Market Share",
+        "forecast_error_summaries_price_competitor_analysis_product_comparison_summary":
+            "Product Compare Summary",
 
-        "forecast_error_summaries_price_competitor_analysis_lead_time_price_sensitivity":
-            "Lead Price Sensitivity",
-
-        "forecast_error_summaries_price_competitor_analysis_duration_price_sensitivity":
-            "Duration Price Sensitivity",
-
-        "forecast_error_summaries_price_competitor_analysis_price_position_by_entry_date":
-            "Price Position Entry",
-
-        "forecast_error_summaries_price_competitor_analysis_price_demand_dataset":
-            "Price Demand Dataset",
-
-        "forecast_error_summaries_price_competitor_analysis_price_demand_correlations":
-            "Price Demand Corr",
+        "forecast_error_summaries_price_competitor_analysis_booking_response_summary":
+            "Booking Response Summary",
 
         # Tendency Analysis
 
@@ -6556,5 +6596,5 @@ if __name__ == "__main__":
 
     outputs = run_fastpark_historical_analysis(
         sql_connection=sql_connection,
-        output_path=r"output\fastpark\reports\fastpark_historical_analysis_v5.xlsx",
+        output_path=r"output\fastpark\reports\fastpark_historical_analysis_v6.xlsx",
     )
