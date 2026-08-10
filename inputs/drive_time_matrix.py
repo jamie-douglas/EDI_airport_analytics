@@ -9,7 +9,7 @@ import numpy as np
 
 INPUT_FILE = "inputs/movements_july25_26.csv"
 
-OUTPUT_EXCEL = "inputs/driving_time_matrices.xlsx"
+OUTPUT_EXCEL = "inputs/driving_time_matrices_v2.xlsx"
 
 MAX_DRIVING_TIME_MINUTES = 90
 
@@ -48,7 +48,7 @@ def get_location(value):
         return "Returns"
 
     match = re.match(
-        r"^block\s*([A-Za-z])",
+        r"^block\s*([A-Za-z]+)",
         value,
         flags=re.IGNORECASE
     )

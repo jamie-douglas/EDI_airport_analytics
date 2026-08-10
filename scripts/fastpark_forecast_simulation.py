@@ -115,14 +115,13 @@ That keeps the forecasting framework aligned with the existing analysis.
 
 import sys
 import pathlib
+import time
+
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-import time
-from modules.utils.progress import step
 
 
 # -----------------------------------------------------------------------------
@@ -139,6 +138,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Existing project utilities
 # -----------------------------------------------------------------------------
 
+from modules.utils.progress import step
 from modules.utils.db import get_engine
 
 
@@ -199,6 +199,45 @@ def get_simulation_config():
         # ---------------------------------------------------------------------
 
         "asset_name": "FastPark",
+
+        # ---------------------------------------------------------------------
+        # SETTINGS REQUIRED BY REUSED ANALYSIS CLEANING FUNCTIONS
+        # ---------------------------------------------------------------------
+
+        # Booking status definitions
+        "valid_booking_status": "B",
+        "cancelled_status": "CX",
+        "unknown_statuses": ["F"],
+
+        # Duration bands used by clean_bookings()
+        "duration_bins_days": [
+            0,
+            1,
+            3,
+            7,
+            10,
+            14,
+            21,
+            999,
+        ],
+
+        "duration_labels": [
+            "0-1 days",
+            "2-3 days",
+            "4-7 days",
+            "8-10 days",
+            "11-14 days",
+            "15-21 days",
+            "22+ days",
+        ],
+
+        # Operational timestamp definitions used by clean_operations()
+        "actual_entry_timestamp_col": "CheckInEnded",
+        "actual_exit_timestamp_col": "ActualCheckedOutDate",
+
+        # Passenger field used by clean_flights()
+        "historical_pax_col": "Passengers",
+
 
 
         # ---------------------------------------------------------------------
@@ -1022,88 +1061,43 @@ def get_bookings_active_as_of(
     cutoff_timestamp,
 ):
     """
-    Return the FastPark book of business exactly as it would have appeared
-    at the historical forecast cut-off.
+    Return bookings active at the historical forecast cutoff.
 
-    THIS FUNCTION IS CRITICAL.
-
-    --------------------------------------------------------------------------
-    WRONG APPROACH
-    --------------------------------------------------------------------------
-
-    A tempting approach is:
-
-        status == "B"
-        AND createdAt <= cutoff
-
-    But this introduces look-ahead bias.
-
-    Example:
-
-        Created:    1 August
-        Cancelled:  20 August
-        Target:     1 September
-
-    At T-31, the booking was known.
-
-    If we inspect today's database and see:
-
-        status = CX
-
-    then filtering it out would incorrectly pretend that we knew on 1 August
-    that the customer would later cancel.
-
-    --------------------------------------------------------------------------
-    CORRECT APPROACH
-    --------------------------------------------------------------------------
-
+    A booking is active when:
         createdAt <= cutoff
-
-        AND
-
-        (
-            cancelledAt IS NULL
+        AND (
+            cancelledAt is null
             OR cancelledAt > cutoff
         )
+        AND status != "F"
 
-    Therefore the booking is considered active until the moment the
-    cancellation actually happened.
-
-    Unknown "F" statuses are excluded for now because the analysis has not
-    established what "F" means.
+    The booking dataframe is expected to have already been cleaned, so
+    datetime conversion is not repeated here.
     """
 
-    df = bookings.copy()
-
-    df["createdAt"] = pd.to_datetime(
-        df["createdAt"],
-        errors="coerce",
-    )
-
-    df["cancelledAt"] = pd.to_datetime(
-        df["cancelledAt"],
-        errors="coerce",
+    cutoff_timestamp = pd.Timestamp(
+        cutoff_timestamp
     )
 
     active_mask = (
-        df["createdAt"].le(
+        bookings["createdAt"].le(
             cutoff_timestamp
         )
         &
         (
-            df["cancelledAt"].isna()
+            bookings["cancelledAt"].isna()
             |
-            df["cancelledAt"].gt(
+            bookings["cancelledAt"].gt(
                 cutoff_timestamp
             )
         )
         &
-        df["status"].ne("F")
+        bookings["status"].ne("F")
     )
 
-    return df.loc[
+    return bookings.loc[
         active_mask
-    ].copy()
+    ]
 
 
 # =============================================================================
@@ -2174,34 +2168,37 @@ def build_historical_booking_curve(
     target_field,
     actual_field,
     cutoff_days,
-    target_date_col,
+    target_date_col=None,
 ):
     """
-    Build a historical booking visibility dataset.
+    Build the historical booking visibility curve efficiently.
 
-    target_field:
-        entryDate or exitDate
+    For each forecast horizon, this function evaluates all historical
+    target dates together rather than scanning the full booking table
+    separately for every target date.
 
-    actual_field:
-        actual_entry_ts or actual_exit_ts
+    Historical as-of logic:
+        createdAt <= cutoff
+        AND (
+            cancelledAt is null
+            OR cancelledAt > cutoff
+        )
+        AND status != "F"
 
-    target_date_col:
-        entry_date or exit_date
-
-    For every historical target date, we calculate:
-
-        bookings_known_at_cutoff
-        final_actual_demand
-
-    This allows us to estimate:
-
-        final demand / bookings visible at T-x
-
-    which is the booking curve completion factor.
+    This means a booking whose final status is CX remains included at a
+    historical cutoff if its cancellation happened after that cutoff.
     """
 
-    booking_df = bookings.copy()
-    master_df = master.copy()
+    # Use only the booking columns needed by this calculation.
+    booking_df = bookings[
+        [
+            "bookingId",
+            "createdAt",
+            "cancelledAt",
+            "status",
+            target_field,
+        ]
+    ].copy()
 
     booking_df["createdAt"] = pd.to_datetime(
         booking_df["createdAt"],
@@ -2213,102 +2210,172 @@ def build_historical_booking_curve(
         errors="coerce",
     )
 
-    booking_df[target_field] = pd.to_datetime(
+    booking_df["booking_target_date"] = pd.to_datetime(
         booking_df[target_field],
         errors="coerce",
-    )
+    ).dt.normalize()
 
-    master_df[target_date_col] = pd.to_datetime(
-        master_df[target_date_col],
+    booking_df = booking_df[
+        booking_df["bookingId"].notna()
+        &
+        booking_df["createdAt"].notna()
+        &
+        booking_df["booking_target_date"].notna()
+        &
+        booking_df["status"].ne("F")
+    ].copy()
+
+    # -------------------------------------------------------------
+    # Final actual operational demand by actual movement date.
+    #
+    # Entry curve:
+    #     actual_entry_ts
+    #
+    # Exit curve:
+    #     actual_exit_ts
+    # -------------------------------------------------------------
+
+    actual_df = master[
+        [
+            "bookingId",
+            actual_field,
+        ]
+    ].copy()
+
+    actual_df[actual_field] = pd.to_datetime(
+        actual_df[actual_field],
         errors="coerce",
     )
 
-    master_df[actual_field] = pd.to_datetime(
-        master_df[actual_field],
-        errors="coerce",
+    actual_df["target_date"] = (
+        actual_df[actual_field]
+        .dt.normalize()
     )
 
-    # Historical target dates for which we have actual operational demand.
-    target_dates = (
-        master_df
+    actual_demand = (
+        actual_df
         .dropna(
             subset=[
-                target_date_col,
-                actual_field,
+                "bookingId",
+                "target_date",
             ]
         )
-        .groupby(target_date_col)
+        .groupby(
+            "target_date",
+            as_index=False,
+        )
         .agg(
             actual_demand=(
                 "bookingId",
                 "nunique",
             )
         )
-        .reset_index()
     )
+
+    if actual_demand.empty:
+        return pd.DataFrame(
+            columns=[
+                "target_date",
+                "lead_days",
+                "bookings_known",
+                "actual_demand",
+                "completion_ratio",
+            ]
+        )
+
+    historical_target_dates = set(
+        actual_demand["target_date"]
+    )
+
+    # There is no reason to retain bookings for target dates with no
+    # actual operational validation target.
+    booking_df = booking_df[
+        booking_df["booking_target_date"].isin(
+            historical_target_dates
+        )
+    ].copy()
 
     rows = []
 
-    for _, row in target_dates.iterrows():
+    # -------------------------------------------------------------
+    # Only 15 full-table operations are now required.
+    #
+    # Previously, the script performed one full-table operation for
+    # every target date and horizon combination.
+    # -------------------------------------------------------------
 
-        target_date = pd.Timestamp(
-            row[target_date_col]
-        ).normalize()
+    for lead_days in cutoff_days:
 
-        final_actual = float(
-            row["actual_demand"]
+        cutoff_by_booking = (
+            booking_df["booking_target_date"]
+            - pd.Timedelta(days=lead_days)
+            + pd.Timedelta(hours=7)
         )
 
-        for lead_days in cutoff_days:
-
-            cutoff = (
-                target_date
-                -
-                pd.Timedelta(
-                    days=lead_days
-                )
-                +
-                pd.Timedelta(
-                    hours=23,
-                    minutes=59,
-                    seconds=59,
+        active_mask = (
+            booking_df["createdAt"].le(
+                cutoff_by_booking
+            )
+            &
+            (
+                booking_df["cancelledAt"].isna()
+                |
+                booking_df["cancelledAt"].gt(
+                    cutoff_by_booking
                 )
             )
+        )
 
-            active = get_bookings_active_as_of(
-                bookings=booking_df,
-                cutoff_timestamp=cutoff,
-            )
-
-            target_bookings = active[
-                pd.to_datetime(
-                    active[target_field],
-                    errors="coerce",
-                )
-                .dt.normalize()
-                .eq(target_date)
+        known_counts = (
+            booking_df.loc[
+                active_mask,
+                [
+                    "booking_target_date",
+                    "bookingId",
+                ],
             ]
-
-            known = (
-                target_bookings["bookingId"]
-                .nunique()
+            .groupby(
+                "booking_target_date",
+                as_index=False,
             )
-
-            rows.append(
-                {
-                    "target_date": target_date,
-                    "lead_days": lead_days,
-                    "bookings_known": known,
-                    "actual_demand": final_actual,
+            .agg(
+                bookings_known=(
+                    "bookingId",
+                    "nunique",
+                )
+            )
+            .rename(
+                columns={
+                    "booking_target_date":
+                        "target_date",
                 }
             )
+        )
 
-    curve = pd.DataFrame(
-        rows
+        horizon_result = actual_demand.merge(
+            known_counts,
+            on="target_date",
+            how="left",
+        )
+
+        horizon_result["bookings_known"] = (
+            horizon_result["bookings_known"]
+            .fillna(0)
+            .astype(int)
+        )
+
+        horizon_result["lead_days"] = (
+            lead_days
+        )
+
+        rows.append(
+            horizon_result
+        )
+
+    curve = pd.concat(
+        rows,
+        ignore_index=True,
     )
-
-    if curve.empty:
-        return curve
 
     curve["completion_ratio"] = (
         curve["actual_demand"]
@@ -2319,8 +2386,24 @@ def build_historical_booking_curve(
         )
     )
 
-    return curve
-
+    return (
+        curve[
+            [
+                "target_date",
+                "lead_days",
+                "bookings_known",
+                "actual_demand",
+                "completion_ratio",
+            ]
+        ]
+        .sort_values(
+            [
+                "target_date",
+                "lead_days",
+            ]
+        )
+        .reset_index(drop=True)
+    )
 
 def get_booking_curve_factor(
     curve,
@@ -2643,12 +2726,27 @@ def get_duration_adjusted_booking_curve(
         ]
 
         if factor_row.empty:
-            factor = 1.0
-        else:
-            factor = float(
-                factor_row[
-                    "completion_ratio"
-                ].iloc[0]
+            return forecast_booking_curve(
+                bookings=bookings,
+                curve=curve,
+                target_date=target_date,
+                cutoff_timestamp=cutoff_timestamp,
+                demand_type=demand_type,
+            )
+
+        factor = float(
+            factor_row[
+                "completion_ratio"
+            ].iloc[0]
+        )
+
+        if not np.isfinite(factor) or factor <= 0:
+            return forecast_booking_curve(
+                bookings=bookings,
+                curve=curve,
+                target_date=target_date,
+                cutoff_timestamp=cutoff_timestamp,
+                demand_type=demand_type,
             )
 
         forecasts.append(
@@ -2964,8 +3062,16 @@ def forecast_entry_cohort_exits(
     historical = df[
         df["actual_entry_ts"].notna()
         &
-        df["actual_entry_ts"].dt.normalize().lt(
-            cutoff_date
+        df["actual_entry_ts"].lt(
+            pd.Timestamp(cutoff_timestamp)
+        )
+        &
+        (
+            df["actual_exit_ts"].isna()
+            |
+            df["actual_exit_ts"].ge(
+                pd.Timestamp(cutoff_timestamp)
+            )
         )
     ].copy()
 
@@ -3046,380 +3152,396 @@ def forecast_entry_cohort_exits(
 # 18. BUILD HISTORICAL DURATION FACTORS
 # =============================================================================
 
-def create_duration_completion_factors(
+def build_historical_duration_exit_curve(
     bookings,
     master,
-    cutoff_timestamp,
+    cutoff_days,
 ):
     """
-    Create duration-specific completion factors using ONLY historical
-    outcomes that were known by the forecast cut-off.
+    Build duration-specific exit booking-curve observations efficiently.
 
-    This function is AS-OF aware.
+    The booking table is evaluated once per forecast horizon rather than
+    separately for every historical target date and horizon.
 
-    Why this matters
-    ----------------
-    X12 uses duration to adjust the exit booking-curve forecast.
+    Visible bookings are grouped by:
+        planned exit date
+        planned duration band
+        forecast horizon
 
-    If we calculated duration completion factors using the entire
-    historical dataset, then a forecast made in August 2025 could
-    accidentally learn from September 2025, October 2025, etc.
-
-    That would make the historical backtest unrealistically strong.
-
-    For a forecast made at T-28 on 23 August 2025, only operational
-    outcomes that had actually happened by 23 August 2025 are allowed
-    to contribute to the learned duration factors.
-
-    Parameters
-    ----------
-    bookings:
-        Cleaned booking data.
-
-    master:
-        Reconciled booking / operational dataset.
-
-    cutoff_timestamp:
-        Historical forecast cut-off.
-
-    Returns
-    -------
-    pd.DataFrame
-        Duration-specific completion factors.
+    Final actual exits are grouped by:
+        actual operational exit date
+        planned duration band
     """
 
-    cutoff_timestamp = pd.Timestamp(
-        cutoff_timestamp
-    )
+    duration_bins = [
+        -np.inf,
+        1,
+        3,
+        7,
+        14,
+        28,
+        np.inf,
+    ]
 
-    df = master.copy()
+    duration_labels = [
+        "0-1",
+        "2-3",
+        "4-7",
+        "8-14",
+        "15-28",
+        "29+",
+    ]
 
-    # -------------------------------------------------------------------------
-    # Parse dates
-    # -------------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # Booking population
+    # -------------------------------------------------------------
 
-    df["entryDate"] = pd.to_datetime(
-        df["entryDate"],
-        errors="coerce",
-    )
-
-    df["exitDate"] = pd.to_datetime(
-        df["exitDate"],
-        errors="coerce",
-    )
-
-    df["actual_entry_ts"] = pd.to_datetime(
-        df["actual_entry_ts"],
-        errors="coerce",
-    )
-
-    df["actual_exit_ts"] = pd.to_datetime(
-        df["actual_exit_ts"],
-        errors="coerce",
-    )
-
-    # -------------------------------------------------------------------------
-    # AS-OF FILTER
-    # -------------------------------------------------------------------------
-    #
-    # For a completion factor we need to know the eventual operational
-    # outcome.
-    #
-    # Therefore the relevant outcome must already have happened by the
-    # forecast cut-off.
-    #
-    # Entry completion:
-    #     actual_entry_ts <= cutoff
-    #
-    # Exit completion:
-    #     actual_exit_ts <= cutoff
-    #
-    # We create separate counts below so that each completion ratio only
-    # uses outcomes that were genuinely knowable at the time.
-    # -------------------------------------------------------------------------
-
-    entry_outcomes = df[
-        df["actual_entry_ts"].notna()
-        &
-        df["actual_entry_ts"].le(
-            cutoff_timestamp
-        )
+    booking_df = bookings[
+        [
+            "bookingId",
+            "createdAt",
+            "cancelledAt",
+            "status",
+            "entryDate",
+            "exitDate",
+        ]
     ].copy()
 
-    exit_outcomes = df[
-        df["actual_exit_ts"].notna()
-        &
-        df["actual_exit_ts"].le(
-            cutoff_timestamp
+    for column in [
+        "createdAt",
+        "cancelledAt",
+        "entryDate",
+        "exitDate",
+    ]:
+        booking_df[column] = pd.to_datetime(
+            booking_df[column],
+            errors="coerce",
         )
+
+    booking_df["booking_target_date"] = (
+        booking_df["exitDate"]
+        .dt.normalize()
+    )
+
+    booking_df["planned_duration_days_calc"] = (
+        (
+            booking_df["exitDate"]
+            - booking_df["entryDate"]
+        )
+        .dt.total_seconds()
+        / 86400
+    )
+
+    booking_df["duration_band"] = pd.cut(
+        booking_df[
+            "planned_duration_days_calc"
+        ],
+        bins=duration_bins,
+        labels=duration_labels,
+    )
+
+    booking_df = booking_df[
+        booking_df["bookingId"].notna()
+        &
+        booking_df["createdAt"].notna()
+        &
+        booking_df["booking_target_date"].notna()
+        &
+        booking_df["duration_band"].notna()
+        &
+        booking_df["status"].ne("F")
     ].copy()
 
-    # -------------------------------------------------------------------------
-    # Duration is based on the planned booking duration.
-    #
-    # This is the information that would have been visible when the
-    # booking was made / when the booking curve was being evaluated.
-    # -------------------------------------------------------------------------
+    # Converting to string avoids categorical merge/grouping issues.
+    booking_df["duration_band"] = (
+        booking_df["duration_band"]
+        .astype(str)
+    )
 
-    df["duration_days"] = (
+    # -------------------------------------------------------------
+    # Final actual exits
+    # -------------------------------------------------------------
+
+    actual_df = master[
+        [
+            "bookingId",
+            "entryDate",
+            "exitDate",
+            "actual_exit_ts",
+        ]
+    ].copy()
+
+    for column in [
+        "entryDate",
+        "exitDate",
+        "actual_exit_ts",
+    ]:
+        actual_df[column] = pd.to_datetime(
+            actual_df[column],
+            errors="coerce",
+        )
+
+    actual_df["target_date"] = (
+        actual_df["actual_exit_ts"]
+        .dt.normalize()
+    )
+
+    actual_df["planned_duration_days_calc"] = (
         (
-            df["exitDate"]
-            -
-            df["entryDate"]
+            actual_df["exitDate"]
+            - actual_df["entryDate"]
         )
         .dt.total_seconds()
-        /
-        86400
+        / 86400
     )
 
-    df["duration_band"] = pd.cut(
-        df["duration_days"],
-        bins=[
-            -np.inf,
-            1,
-            3,
-            7,
-            14,
-            28,
-            np.inf,
+    actual_df["duration_band"] = pd.cut(
+        actual_df[
+            "planned_duration_days_calc"
         ],
-        labels=[
-            "0-1",
-            "2-3",
-            "4-7",
-            "8-14",
-            "15-28",
-            "29+",
-        ],
+        bins=duration_bins,
+        labels=duration_labels,
     )
 
-    # -------------------------------------------------------------------------
-    # Attach the same duration band to the outcome datasets.
-    # -------------------------------------------------------------------------
-
-    entry_outcomes["duration_days"] = (
-        (
-            entry_outcomes["exitDate"]
-            -
-            entry_outcomes["entryDate"]
-        )
-        .dt.total_seconds()
-        /
-        86400
-    )
-
-    entry_outcomes["duration_band"] = pd.cut(
-        entry_outcomes["duration_days"],
-        bins=[
-            -np.inf,
-            1,
-            3,
-            7,
-            14,
-            28,
-            np.inf,
-        ],
-        labels=[
-            "0-1",
-            "2-3",
-            "4-7",
-            "8-14",
-            "15-28",
-            "29+",
-        ],
-    )
-
-    exit_outcomes["duration_days"] = (
-        (
-            exit_outcomes["exitDate"]
-            -
-            exit_outcomes["entryDate"]
-        )
-        .dt.total_seconds()
-        /
-        86400
-    )
-
-    exit_outcomes["duration_band"] = pd.cut(
-        exit_outcomes["duration_days"],
-        bins=[
-            -np.inf,
-            1,
-            3,
-            7,
-            14,
-            28,
-            np.inf,
-        ],
-        labels=[
-            "0-1",
-            "2-3",
-            "4-7",
-            "8-14",
-            "15-28",
-            "29+",
-        ],
-    )
-
-    # -------------------------------------------------------------------------
-    # Denominator
-    # -------------------------------------------------------------------------
-    #
-    # The denominator represents bookings that existed historically.
-    # We use booking creation time where available so that we do not
-    # accidentally include bookings that did not yet exist at the cut-off.
-    # -------------------------------------------------------------------------
-
-    booking_df = bookings.copy()
-
-    booking_df["createdAt"] = pd.to_datetime(
-        booking_df["createdAt"],
-        errors="coerce",
-    )
-
-    booking_df["cancelledAt"] = pd.to_datetime(
-        booking_df["cancelledAt"],
-        errors="coerce",
-    )
-
-    known_bookings = get_bookings_active_as_of(
-        bookings=booking_df,
-        cutoff_timestamp=cutoff_timestamp,
-    )
-
-    if known_bookings.empty:
-        return pd.DataFrame()
-
-    known_bookings["entryDate"] = pd.to_datetime(
-        known_bookings["entryDate"],
-        errors="coerce",
-    )
-
-    known_bookings["exitDate"] = pd.to_datetime(
-        known_bookings["exitDate"],
-        errors="coerce",
-    )
-
-    known_bookings["duration_days"] = (
-        (
-            known_bookings["exitDate"]
-            -
-            known_bookings["entryDate"]
-        )
-        .dt.total_seconds()
-        /
-        86400
-    )
-
-    known_bookings["duration_band"] = pd.cut(
-        known_bookings["duration_days"],
-        bins=[
-            -np.inf,
-            1,
-            3,
-            7,
-            14,
-            28,
-            np.inf,
-        ],
-        labels=[
-            "0-1",
-            "2-3",
-            "4-7",
-            "8-14",
-            "15-28",
-            "29+",
-        ],
-    )
-
-    denominator = (
-        known_bookings
-        .groupby(
+    actual_df = actual_df.dropna(
+        subset=[
+            "bookingId",
+            "target_date",
             "duration_band",
-            observed=False,
+        ]
+    ).copy()
+
+    actual_df["duration_band"] = (
+        actual_df["duration_band"]
+        .astype(str)
+    )
+
+    actuals = (
+        actual_df
+        .groupby(
+            [
+                "target_date",
+                "duration_band",
+            ],
+            as_index=False,
         )
         .agg(
-            bookings=(
+            actual_exits=(
                 "bookingId",
                 "nunique",
             )
         )
-        .reset_index()
     )
 
-    entry_counts = (
-        entry_outcomes
-        .groupby(
-            "duration_band",
-            observed=False,
+    if actuals.empty:
+        return pd.DataFrame(
+            columns=[
+                "target_date",
+                "lead_days",
+                "duration_band",
+                "visible_bookings",
+                "actual_exits",
+                "completion_ratio",
+            ]
         )
-        .agg(
-            actual_entries=(
-                "actual_entry_ts",
-                lambda x: x.notna().sum(),
+
+    historical_target_dates = set(
+        actuals["target_date"]
+    )
+
+    booking_df = booking_df[
+        booking_df["booking_target_date"].isin(
+            historical_target_dates
+        )
+    ].copy()
+
+    rows = []
+
+    # -------------------------------------------------------------
+    # One vectorised calculation per horizon.
+    # -------------------------------------------------------------
+
+    for lead_days in cutoff_days:
+
+        cutoff_by_booking = (
+            booking_df["booking_target_date"]
+            - pd.Timedelta(days=lead_days)
+            + pd.Timedelta(hours=7)
+        )
+
+        active_mask = (
+            booking_df["createdAt"].le(
+                cutoff_by_booking
+            )
+            &
+            (
+                booking_df["cancelledAt"].isna()
+                |
+                booking_df["cancelledAt"].gt(
+                    cutoff_by_booking
+                )
             )
         )
-        .reset_index()
-    )
 
-    exit_counts = (
-        exit_outcomes
-        .groupby(
-            "duration_band",
-            observed=False,
-        )
-        .agg(
-            actual_exits=(
-                "actual_exit_ts",
-                lambda x: x.notna().sum(),
+        visible_counts = (
+            booking_df.loc[
+                active_mask,
+                [
+                    "booking_target_date",
+                    "duration_band",
+                    "bookingId",
+                ],
+            ]
+            .groupby(
+                [
+                    "booking_target_date",
+                    "duration_band",
+                ],
+                as_index=False,
+            )
+            .agg(
+                visible_bookings=(
+                    "bookingId",
+                    "nunique",
+                )
+            )
+            .rename(
+                columns={
+                    "booking_target_date":
+                        "target_date",
+                }
             )
         )
-        .reset_index()
-    )
 
-    grouped = (
-        denominator
-        .merge(
-            entry_counts,
-            on="duration_band",
+        horizon_result = actuals.merge(
+            visible_counts,
+            on=[
+                "target_date",
+                "duration_band",
+            ],
             how="left",
         )
-        .merge(
-            exit_counts,
-            on="duration_band",
-            how="left",
+
+        horizon_result["visible_bookings"] = (
+            horizon_result["visible_bookings"]
+            .fillna(0)
+            .astype(int)
         )
-    )
 
-    grouped["actual_entries"] = (
-        grouped["actual_entries"]
-        .fillna(0)
-    )
-
-    grouped["actual_exits"] = (
-        grouped["actual_exits"]
-        .fillna(0)
-    )
-
-    grouped["entry_completion_ratio"] = (
-        grouped["actual_entries"]
-        /
-        grouped["bookings"].replace(
-            0,
-            np.nan,
+        horizon_result["lead_days"] = (
+            lead_days
         )
-    )
 
-    grouped["exit_completion_ratio"] = (
-        grouped["actual_exits"]
-        /
-        grouped["bookings"].replace(
-            0,
-            np.nan,
+        horizon_result["completion_ratio"] = (
+            horizon_result["actual_exits"]
+            /
+            horizon_result[
+                "visible_bookings"
+            ].replace(
+                0,
+                np.nan,
+            )
         )
+
+        rows.append(
+            horizon_result
+        )
+
+    return (
+        pd.concat(
+            rows,
+            ignore_index=True,
+        )
+        [
+            [
+                "target_date",
+                "lead_days",
+                "duration_band",
+                "visible_bookings",
+                "actual_exits",
+                "completion_ratio",
+            ]
+        ]
+        .sort_values(
+            [
+                "target_date",
+                "lead_days",
+                "duration_band",
+            ]
+        )
+        .reset_index(drop=True)
     )
 
-    return grouped
+def get_duration_exit_factors_as_of(
+    duration_curve,
+    target_date,
+    cutoff_timestamp,
+    lead_days,
+    minimum_observations=10,
+    maximum_observations=20,
+):
+    """
+    Return duration-specific exit completion factors learned only from
+    historical target dates completed before the forecast cutoff.
+    """
+
+    if duration_curve is None or duration_curve.empty:
+        return pd.DataFrame()
+
+    target_date = pd.Timestamp(
+        target_date
+    ).normalize()
+
+    cutoff_date = pd.Timestamp(
+        cutoff_timestamp
+    ).normalize()
+
+    history = duration_curve.copy()
+
+    history["target_date"] = pd.to_datetime(
+        history["target_date"],
+        errors="coerce",
+    ).dt.normalize()
+
+    history = history[
+        history["target_date"].lt(cutoff_date)
+        &
+        history["target_date"].lt(target_date)
+        &
+        history["lead_days"].eq(lead_days)
+        &
+        history["completion_ratio"].notna()
+        &
+        history["visible_bookings"].gt(0)
+    ].copy()
+
+    rows = []
+
+    for duration_band, group in history.groupby(
+        "duration_band",
+        observed=False,
+    ):
+
+        group = (
+            group
+            .sort_values("target_date")
+            .tail(maximum_observations)
+        )
+
+        if len(group) < minimum_observations:
+            continue
+
+        rows.append(
+            {
+                "duration_band": duration_band,
+                "completion_ratio": float(
+                    group["completion_ratio"].median()
+                ),
+                "observations": len(group),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 # =============================================================================
@@ -4043,13 +4165,23 @@ def forecast_exit_scenario(
 
     if scenario_id == "X12":
 
+        lead_days = (
+                pd.Timestamp(target_date).normalize()
+            - pd.Timestamp(cutoff_timestamp).normalize()
+        ).days
+
         historical_duration_factors = (
-            create_duration_completion_factors(
-                bookings=bookings,
-                master=master,
-                cutoff_timestamp=cutoff_timestamp
+            get_duration_exit_factors_as_of(
+                duration_curve=data[
+                    "duration_exit_booking_curve"
+                ],
+                target_date=target_date,
+                cutoff_timestamp=cutoff_timestamp,
+                lead_days=lead_days,
+                minimum_observations=10,
+                maximum_observations=20,
             )
-        )
+        )   
 
         value = get_duration_adjusted_booking_curve(
             bookings=bookings,
@@ -4310,15 +4442,17 @@ def prepare_forecast_model_data(
 
     master = data["master"]
     bookings = data["bookings"]
-    operations = data["operations"]
     flights = data["flights"]
 
     print("\nPreparing forecasting model datasets...")
 
+    preparation_start = time.perf_counter()
 
-    # -------------------------------------------------------------------------
-    # Actual FastPark demand
-    # -------------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # Actual demand
+    # -------------------------------------------------------------
+
+    stage_start = time.perf_counter()
 
     daily_actuals = create_daily_actuals(
         master
@@ -4328,59 +4462,111 @@ def prepare_forecast_model_data(
         master
     )
 
-
-    # -------------------------------------------------------------------------
-    # Passenger demand
-    # -------------------------------------------------------------------------
-
-    daily_passengers = create_daily_passenger_context(
-        flights
+    print(
+        "  Created daily and hourly actuals "
+        f"[{time.perf_counter() - stage_start:.2f}s]"
     )
 
+    # -------------------------------------------------------------
+    # Passenger context
+    # -------------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # Booking visibility curves
-    # -------------------------------------------------------------------------
-    #
-    # We explicitly use the user's forecast horizons:
-    #
-    #     0,1,2,3,4,5,6,7,14,21,28,35,42,49,56
-    #
-    # This means the historical curve is calculated at exactly the same
-    # horizons that will later be tested.
-    # -------------------------------------------------------------------------
+    stage_start = time.perf_counter()
+
+    daily_passengers = (
+        create_daily_passenger_context(
+            flights
+        )
+    )
+
+    print(
+        "  Created daily passenger context "
+        f"[{time.perf_counter() - stage_start:.2f}s]"
+    )
 
     curve_horizons = config[
         "forecast_horizons_days"
     ]
 
-    print("  Building entry booking visibility curve...")
+    # -------------------------------------------------------------
+    # Entry booking curve
+    # -------------------------------------------------------------
 
-    entry_booking_curve = build_historical_booking_curve(
-        bookings=bookings,
-        master=master,
-        target_field="entryDate",
-        actual_field="actual_entry_ts",
-        cutoff_days=curve_horizons,
-        target_date_col="entry_date",
+    stage_start = time.perf_counter()
+
+    print(
+        "  Building entry booking visibility curve..."
     )
 
-    print("  Building exit booking visibility curve...")
-
-    exit_booking_curve = build_historical_booking_curve(
-        bookings=bookings,
-        master=master,
-        target_field="exitDate",
-        actual_field="actual_exit_ts",
-        cutoff_days=curve_horizons,
-        target_date_col="exit_date",
+    entry_booking_curve = (
+        build_historical_booking_curve(
+            bookings=bookings,
+            master=master,
+            target_field="entryDate",
+            actual_field="actual_entry_ts",
+            cutoff_days=curve_horizons,
+            target_date_col="actual_entry_date",
+        )
     )
 
+    print(
+        "  Completed entry booking visibility curve "
+        f"[{time.perf_counter() - stage_start:.2f}s]"
+    )
 
-    # -------------------------------------------------------------------------
-    # Duration factors
-    # -------------------------------------------------------------------------
+    # -------------------------------------------------------------
+    # Exit booking curve
+    # -------------------------------------------------------------
 
+    stage_start = time.perf_counter()
+
+    print(
+        "  Building exit booking visibility curve..."
+    )
+
+    exit_booking_curve = (
+        build_historical_booking_curve(
+            bookings=bookings,
+            master=master,
+            target_field="exitDate",
+            actual_field="actual_exit_ts",
+            cutoff_days=curve_horizons,
+            target_date_col="actual_exit_date",
+        )
+    )
+
+    print(
+        "  Completed exit booking visibility curve "
+        f"[{time.perf_counter() - stage_start:.2f}s]"
+    )
+
+    # -------------------------------------------------------------
+    # Duration-segmented exit curve
+    # -------------------------------------------------------------
+
+    stage_start = time.perf_counter()
+
+    print(
+        "  Building duration-segmented exit booking curve..."
+    )
+
+    duration_exit_booking_curve = (
+        build_historical_duration_exit_curve(
+            bookings=bookings,
+            master=master,
+            cutoff_days=curve_horizons,
+        )
+    )
+
+    print(
+        "  Completed duration-segmented exit booking curve "
+        f"[{time.perf_counter() - stage_start:.2f}s]"
+    )
+
+    print(
+        "  Forecast model preparation complete "
+        f"[{time.perf_counter() - preparation_start:.2f}s]"
+    )
 
     return {
         **data,
@@ -4391,6 +4577,8 @@ def prepare_forecast_model_data(
 
         "entry_booking_curve": entry_booking_curve,
         "exit_booking_curve": exit_booking_curve,
+        "duration_exit_booking_curve":
+            duration_exit_booking_curve,
     }
 
 
@@ -4427,16 +4615,8 @@ def run_daily_forecast_snapshot(
 
     cutoff_timestamp = (
         target_date
-        -
-        pd.Timedelta(
-            days=horizon_days
-        )
-        +
-        pd.Timedelta(
-            hours=23,
-            minutes=59,
-            seconds=59,
-        )
+        - pd.Timedelta(days=horizon_days)
+        + pd.Timedelta(hours=7)
     )
 
     rows = []
@@ -4878,2037 +5058,9 @@ def print_simulation_quick_check(
         .sum()
     )
 
-# =============================================================================
-# SECTION 3 — FORECAST SIMULATION ENGINE
-# =============================================================================
-#
-# WHAT THIS SECTION DOES
-# ----------------------
-#
-# We now have:
-#   1. The historical booking / operational data loaded and cleaned.
-#   2. The simulation dates defined.
-#   3. The booking cut-off horizons defined.
-#   4. The E1-E13 entry scenarios and X1-X16 exit scenarios defined.
-#
-# This section actually runs the experiment.
-#
-# For every test date:
-#
-#     Test date
-#         |
-#         +--> T-0
-#         +--> T-1
-#         +--> T-2
-#         +--> ...
-#         +--> T-56
-#
-# At each cut-off we ask:
-#
-#     "If we had been standing on this date, with ONLY the information
-#      that would genuinely have been available at this point, what
-#      would each forecasting method have predicted?"
-#
-# We then compare that prediction against the actual number of:
-#
-#     - entries
-#     - exits
-#
-# that eventually occurred.
-#
-# This is deliberately a BACKTEST rather than simply fitting a model to
-# the whole dataset.
-#
-# The purpose is to find out which forecasting approach would have worked
-# best in the real world when applied before the outcome was known.
-#
-# =============================================================================
-
-
-# =============================================================================
-# 3.1 — GENERAL FORECASTING UTILITIES
-# =============================================================================
-
-import numpy as np
-import pandas as pd
-
-
-def safe_mean(values):
-    """
-    Return the mean of a collection of values.
-
-    We use this instead of np.mean() directly because many of the scenario
-    calculations will naturally produce NaN values when there is not enough
-    historical data available.
-
-    Returning NaN rather than crashing allows the simulation to continue and
-    lets us identify scenarios/horizons where there simply was not enough
-    information to make a forecast.
-    """
-
-    values = pd.Series(values).dropna()
-
-    if len(values) == 0:
-        return np.nan
-
-    return values.mean()
-
-
-def safe_median(values):
-    """
-    Same principle as safe_mean(), but using the median.
-
-    Median-based forecasts are useful where historical demand contains
-    occasional unusually high or low days.
-    """
-
-    values = pd.Series(values).dropna()
-
-    if len(values) == 0:
-        return np.nan
-
-    return values.median()
-
-
-def safe_sum(values):
-    """
-    Sum values while ignoring missing observations.
-
-    Returns NaN if there are no valid observations.
-    """
-
-    values = pd.Series(values).dropna()
-
-    if len(values) == 0:
-        return np.nan
-
-    return values.sum()
-
-
-def calculate_error(forecast, actual):
-    """
-    Basic forecast error.
-
-    Positive value:
-        forecast was above actual.
-
-    Negative value:
-        forecast was below actual.
-    """
-
-    if pd.isna(forecast) or pd.isna(actual):
-        return np.nan
-
-    return forecast - actual
-
-
-def calculate_abs_error(forecast, actual):
-    """
-    Absolute forecast error.
-
-    This is one of the most useful measures for comparing scenarios because
-    it tells us how far away the forecast was from the actual outcome,
-    regardless of whether we over- or under-forecasted.
-    """
-
-    if pd.isna(forecast) or pd.isna(actual):
-        return np.nan
-
-    return abs(forecast - actual)
-
-
-def calculate_squared_error(forecast, actual):
-    """
-    Squared forecast error.
-
-    This deliberately penalises large misses more heavily than small misses.
-
-    It is useful because a scenario that is normally accurate but occasionally
-    produces a very large miss may be less desirable operationally than its
-    average MAE initially suggests.
-    """
-
-    if pd.isna(forecast) or pd.isna(actual):
-        return np.nan
-
-    return (forecast - actual) ** 2
-
-
-def calculate_ape(forecast, actual):
-    """
-    Absolute Percentage Error.
-
-    We avoid dividing by zero.
-
-    For actual == 0:
-        percentage error is not meaningful, so return NaN.
-
-    NOTE:
-    We will also calculate WAPE later. WAPE is generally more stable than
-    MAPE for demand data containing zero or very small actuals.
-    """
-
-    if pd.isna(forecast) or pd.isna(actual):
-        return np.nan
-
-    if actual == 0:
-        return np.nan
-
-    return abs(forecast - actual) / abs(actual)
-
-
-def calculate_bias(forecast, actual):
-    """
-    Forecast bias.
-
-    Positive:
-        systematic over-forecasting.
-
-    Negative:
-        systematic under-forecasting.
-
-    Bias is important because two scenarios can have the same average absolute
-    error while one consistently over-forecasts and the other consistently
-    under-forecasts.
-    """
-
-    if pd.isna(forecast) or pd.isna(actual):
-        return np.nan
-
-    return forecast - actual
-
-
-# =============================================================================
-# 3.2 — HISTORICAL OBSERVATION HELPERS
-# =============================================================================
-#
-# The scenarios should NOT directly manipulate the raw booking-level data.
-#
-# Instead, we create reusable functions which answer questions such as:
-#
-#     "How many entries happened on previous Mondays?"
-#
-#     "What did the same calendar date do last year?"
-#
-#     "What is the normal demand for this day of week?"
-#
-#     "What happened on comparable historical days?"
-#
-# This keeps the scenario definitions themselves much easier to understand.
-# =============================================================================
-
-
-def get_historical_daily_values(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date=None,
-    lookback_days=None,
-):
-    """
-    Return historical daily actuals available before the target date.
-
-    Parameters
-    ----------
-    daily_actuals : DataFrame
-        One row per operational day.
-
-    target_date : date/datetime
-        The day for which we are forecasting.
-
-    value_column : str
-        Demand measure, e.g. entries or exits.
-
-    before_date : date/datetime, optional
-        If supplied, only information strictly before this date is used.
-
-    lookback_days : int, optional
-        Restrict history to the specified number of calendar days.
-
-    IMPORTANT
-    ---------
-    The simulation must never allow the scenario to see future actuals.
-
-    This function therefore exists partly as a guardrail against accidental
-    leakage from the validation period into the forecast.
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-
-    if before_date is not None:
-        before_date = pd.Timestamp(before_date).normalize()
-
-        # Strictly before the information cut-off.
-        df = df[df["date"] < before_date]
-
-    else:
-        df = df[df["date"] < target_date]
-
-    if lookback_days is not None:
-        earliest_date = target_date - pd.Timedelta(days=lookback_days)
-
-        df = df[df["date"] >= earliest_date]
-
-    if value_column not in df.columns:
-        return pd.Series(dtype=float)
-
-    return df[value_column].dropna()
-
-
-def get_same_weekday_history(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date,
-    n_observations=None,
-):
-    """
-    Return historical observations for the same day of week as target_date.
-
-    Example:
-
-        Target = Monday
-
-        Historical sample:
-            previous Monday
-            Monday before that
-            etc.
-
-    This is important because entry and exit demand is unlikely to be
-    distributed evenly across all days of the week.
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-    before_date = pd.Timestamp(before_date).normalize()
-
-    df = df[df["date"] < before_date]
-
-    df = df[df["date"].dt.dayofweek == target_date.dayofweek]
-
-    df = df.sort_values("date", ascending=False)
-
-    if n_observations is not None:
-        df = df.head(n_observations)
-
-    if value_column not in df.columns:
-        return pd.Series(dtype=float)
-
-    return df[value_column].dropna()
-
-
-def get_same_month_history(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date,
-    n_observations=None,
-):
-    """
-    Return historical observations from the same calendar month.
-
-    This is useful where demand has seasonal variation across the year.
-
-    For example, January demand should not necessarily be treated as
-    interchangeable with July demand.
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-    before_date = pd.Timestamp(before_date).normalize()
-
-    df = df[df["date"] < before_date]
-
-    df = df[df["date"].dt.month == target_date.month]
-
-    df = df.sort_values("date", ascending=False)
-
-    if n_observations is not None:
-        df = df.head(n_observations)
-
-    if value_column not in df.columns:
-        return pd.Series(dtype=float)
-
-    return df[value_column].dropna()
-
-
-def get_same_day_of_month_history(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date,
-):
-    """
-    Return historical observations for approximately the same point in
-    the calendar month.
-
-    This is useful for testing whether demand behaves differently depending
-    on where the date falls within the month.
-
-    For example:
-
-        1st-7th
-        14th-20th
-        month-end
-
-    The simulation dates have deliberately been chosen from the 1st-7th
-    and 14th-20th windows, so this becomes particularly useful for testing
-    whether those periods have repeatable behaviour.
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-    before_date = pd.Timestamp(before_date).normalize()
-
-    df = df[df["date"] < before_date]
-
-    # Match the same broad position within the month.
-    #
-    # We use a +/- 3 day window rather than requiring the exact date because
-    # an exact date match would produce too few historical observations.
-    df = df[
-        (df["date"].dt.day >= target_date.day - 3)
-        & (df["date"].dt.day <= target_date.day + 3)
-    ]
-
-    df = df.sort_values("date", ascending=False)
-
-    if value_column not in df.columns:
-        return pd.Series(dtype=float)
-
-    return df[value_column].dropna()
-
-
-# =============================================================================
-# 3.3 — DAY-OF-WEEK WEIGHT
-# =============================================================================
-#
-# One of the central ideas we want to test is:
-#
-#     "Does the shape of demand depend on the day of week?"
-#
-# If Monday demand is systematically different from Tuesday demand, simply
-# using an overall average will throw away useful information.
-#
-# This helper calculates the historical average for each weekday and compares
-# it with the overall historical average.
-#
-# Example:
-#
-#     Overall average = 100
-#     Monday average  = 120
-#
-#     Monday index = 1.20
-#
-# Meaning:
-#
-#     Monday tends to generate 20% more demand than the average day.
-# =============================================================================
-
-
-def calculate_weekday_index(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date,
-    lookback_days=365,
-):
-    """
-    Calculate historical weekday demand index.
-
-    Index > 1:
-        target weekday historically has higher demand.
-
-    Index < 1:
-        target weekday historically has lower demand.
-
-    Index = 1:
-        target weekday is approximately average.
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-    before_date = pd.Timestamp(before_date).normalize()
-
-    df = df[
-        (df["date"] < before_date)
-        & (df["date"] >= target_date - pd.Timedelta(days=lookback_days))
-    ]
-
-    df = df.dropna(subset=[value_column])
-
-    if len(df) == 0:
-        return np.nan
-
-    overall_average = df[value_column].mean()
-
-    if overall_average == 0 or pd.isna(overall_average):
-        return np.nan
-
-    weekday_average = df[
-        df["date"].dt.dayofweek == target_date.dayofweek
-    ][value_column].mean()
-
-    if pd.isna(weekday_average):
-        return np.nan
-
-    return weekday_average / overall_average
-
-
-# =============================================================================
-# 3.4 — SEASONAL / MONTHLY INDEX
-# =============================================================================
-
-
-def calculate_month_index(
-    daily_actuals,
-    target_date,
-    value_column,
-    before_date,
-    lookback_days=730,
-):
-    """
-    Calculate the historical demand index for the target calendar month.
-
-    This allows us to test whether seasonality improves the forecast.
-
-    For example:
-
-        Overall average = 100
-        July average    = 130
-
-        July index = 1.30
-    """
-
-    df = daily_actuals.copy()
-
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-
-    target_date = pd.Timestamp(target_date).normalize()
-    before_date = pd.Timestamp(before_date).normalize()
-
-    df = df[
-        (df["date"] < before_date)
-        & (df["date"] >= target_date - pd.Timedelta(days=lookback_days))
-    ]
-
-    df = df.dropna(subset=[value_column])
-
-    if len(df) == 0:
-        return np.nan
-
-    overall_average = df[value_column].mean()
-
-    if overall_average == 0 or pd.isna(overall_average):
-        return np.nan
-
-    month_average = df[
-        df["date"].dt.month == target_date.month
-    ][value_column].mean()
-
-    if pd.isna(month_average):
-        return np.nan
-
-    return month_average / overall_average
-
-
-# =============================================================================
-# 3.5 — FORECAST SANITY CHECK
-# =============================================================================
-#
-# Forecast models can occasionally produce:
-#
-#     NaN
-#     negative numbers
-#     infinite values
-#
-# None of these make sense for bookings/demand.
-#
-# We therefore clean the output at the final stage of each scenario.
-# =============================================================================
-
-
-def clean_forecast(value):
-    """
-    Clean a forecast value before it is stored.
-    """
-
-    if value is None:
-        return np.nan
-
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return np.nan
-
-    if not np.isfinite(value):
-        return np.nan
-
-    # Demand cannot be negative.
-    return max(0.0, value)
-
-
-# =============================================================================
-# 3.6 — GENERIC SCENARIO CONTEXT
-# =============================================================================
-#
-# Every scenario receives the same basic context.
-#
-# This is important because it means we can run a large number of scenarios
-# without duplicating the simulation logic.
-# =============================================================================
-
-
-def build_scenario_context(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-):
-    """
-    Build the historical information available to a scenario at a given
-    forecast cut-off.
-
-    NO information from target_date or later is included in the historical
-    demand samples.
-    """
-
-    target_date = pd.Timestamp(target_date).normalize()
-    cutoff_date = pd.Timestamp(cutoff_date).normalize()
-
-    history = daily_actuals.copy()
-
-    history["date"] = pd.to_datetime(history["date"]).dt.normalize()
-
-    # Critical anti-leakage rule:
-    #
-    # The model can only use actual demand from dates BEFORE the target date.
-    history_before_target = history[
-        history["date"] < target_date
-    ].copy()
-
-    # Information available by the booking cut-off.
-    #
-    # This should contain any booking / operational variables which are
-    # genuinely known at cutoff_date.
-    history_before_cutoff = history[
-        history["date"] < cutoff_date
-    ].copy()
-
-    return {
-        "target_date": target_date,
-        "cutoff_date": cutoff_date,
-        "value_column": value_column,
-        "history_before_target": history_before_target,
-        "history_before_cutoff": history_before_cutoff,
-    }
-
-
-# =============================================================================
-# 3.7 — BASELINE FORECASTS
-# =============================================================================
-#
-# These are deliberately simple.
-#
-# We want the simulation to establish whether increasingly sophisticated
-# forecasting methods actually improve accuracy.
-#
-# A complex model should have to BEAT these baselines rather than simply
-# producing a forecast that looks sophisticated.
-# =============================================================================
-
-
-def forecast_overall_mean(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-):
-    """
-    Baseline:
-        Historical overall average demand.
-
-    This is the simplest possible demand forecast.
-
-    Why test it?
-    -----------
-    Because it establishes a benchmark.
-
-    If a complicated model cannot materially beat the historical mean,
-    that tells us something important about how much predictive signal
-    actually exists in the data.
-    """
-
-    history = daily_actuals.copy()
-
-    history["date"] = pd.to_datetime(history["date"]).dt.normalize()
-
-    history = history[
-        history["date"] < pd.Timestamp(cutoff_date).normalize()
-    ]
-
-    return clean_forecast(
-        safe_mean(history[value_column])
-    )
-
-
-def forecast_recent_mean(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-    recent_days=28,
-):
-    """
-    Recent rolling-average forecast.
-
-    Example:
-        Average the previous 28 days of actual demand.
-
-    Why test it?
-    ------------
-    Demand may have changed over time.
-
-    A long-run average can be too slow to respond if demand is trending
-    upwards or downwards.
-
-    This scenario therefore tests whether RECENCY contains useful signal.
-    """
-
-    target_date = pd.Timestamp(target_date).normalize()
-    cutoff_date = pd.Timestamp(cutoff_date).normalize()
-
-    history = daily_actuals.copy()
-    history["date"] = pd.to_datetime(history["date"]).dt.normalize()
-
-    history = history[
-        (history["date"] < cutoff_date)
-        & (
-            history["date"]
-            >= cutoff_date - pd.Timedelta(days=recent_days)
-        )
-    ]
-
-    return clean_forecast(
-        safe_mean(history[value_column])
-    )
-
-
-def forecast_same_weekday_mean(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-    observations=8,
-):
-    """
-    Same-weekday historical average.
-
-    Example:
-        Forecast a Monday using previous Mondays.
-
-    Why test it?
-    ------------
-    This isolates the effect of DAY-OF-WEEK seasonality.
-
-    If this consistently beats the overall mean, weekday behaviour is a
-    meaningful demand driver.
-    """
-
-    values = get_same_weekday_history(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-        n_observations=observations,
-    )
-
-    return clean_forecast(
-        safe_mean(values)
-    )
-
-
-def forecast_same_weekday_median(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-    observations=8,
-):
-    """
-    Same-weekday median.
-
-    Why test it?
-    ------------
-    The median is less affected by unusually large or small historical days.
-
-    This tells us whether the weekday relationship is robust to outliers.
-    """
-
-    values = get_same_weekday_history(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-        n_observations=observations,
-    )
-
-    return clean_forecast(
-        safe_median(values)
-    )
-
-
-# =============================================================================
-# 3.8 — FORECAST WITH WEEKDAY + RECENCY
-# =============================================================================
-
-
-def forecast_weekday_recent(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-    observations=8,
-):
-    """
-    Recent same-weekday forecast.
-
-    This deliberately combines two possible demand drivers:
-
-        1. Day-of-week pattern
-        2. Recent level of demand
-
-    The method takes the recent same-weekday observations and averages them.
-
-    This is particularly useful for testing whether the demand profile is
-    relatively stable within each weekday while the overall level changes
-    over time.
-    """
-
-    values = get_same_weekday_history(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-        n_observations=observations,
-    )
-
-    return clean_forecast(
-        safe_mean(values)
-    )
-
-
-# =============================================================================
-# 3.9 — FORECAST WITH WEEKDAY + MONTH
-# =============================================================================
-
-
-def forecast_weekday_month_adjusted(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-    observations=20,
-):
-    """
-    Weekday forecast with a seasonal/month adjustment.
-
-    Conceptually:
-
-        Base forecast
-            x
-        Month index
-            x
-        Weekday effect
-
-    However, we deliberately keep this implementation conservative.
-
-    We first calculate the same-weekday historical forecast and then adjust
-    it using the relative historical level of the target month.
-
-    Why test it?
-    ------------
-    This tests whether calendar seasonality provides additional explanatory
-    power beyond weekday effects alone.
-    """
-
-    weekday_values = get_same_weekday_history(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-        n_observations=observations,
-    )
-
-    base_forecast = safe_mean(weekday_values)
-
-    if pd.isna(base_forecast):
-        return np.nan
-
-    month_index = calculate_month_index(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-    )
-
-    if pd.isna(month_index):
-        return clean_forecast(base_forecast)
-
-    return clean_forecast(
-        base_forecast * month_index
-    )
-
-
-# =============================================================================
-# 3.10 — FORECAST USING SAME POSITION IN MONTH
-# =============================================================================
-
-
-def forecast_same_month_position(
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-):
-    """
-    Forecast from historically comparable dates within the month.
-
-    The target dates were specifically selected from:
-
-        1st-7th
-        14th-20th
-
-    This gives us an opportunity to test whether demand is systematically
-    different in those parts of the month.
-
-    This scenario is therefore designed to answer:
-
-        "Does position within the calendar month itself contain predictive
-         information?"
-    """
-
-    values = get_same_day_of_month_history(
-        daily_actuals=daily_actuals,
-        target_date=target_date,
-        value_column=value_column,
-        before_date=cutoff_date,
-    )
-
-    return clean_forecast(
-        safe_mean(values)
-    )
-
-
-# =============================================================================
-# 3.11 — SCENARIO REGISTRY
-# =============================================================================
-#
-# IMPORTANT:
-#
-# Section 2 defines the individual E and X scenarios.
-#
-# The simulation engine does NOT need to know how each scenario works.
-# It simply needs to know:
-#
-#     scenario ID
-#     scenario description
-#     forecasting function
-#
-# This registry is what allows us to run ALL scenarios consistently.
-#
-# If your Section 2 already defines SCENARIOS_ENTRIES and
-# SCENARIOS_EXITS, KEEP THOSE DEFINITIONS and replace the dictionaries below
-# with the ones from Section 2.
-#
-# The IDs MUST remain:
-#
-#     E1 ... E13
-#     X1 ... X16
-#
-# because we want these IDs to become stable labels in the output files.
-# =============================================================================
-
-
-ENTRY_SCENARIO_FUNCTIONS = {
-    "E1": forecast_overall_mean,
-    "E2": forecast_recent_mean,
-    "E3": forecast_same_weekday_mean,
-    "E4": forecast_same_weekday_median,
-    "E5": forecast_weekday_recent,
-    "E6": forecast_weekday_month_adjusted,
-    "E7": forecast_same_month_position,
-
-    # -------------------------------------------------------------------------
-    # IMPORTANT
-    # -------------------------------------------------------------------------
-    # E8-E13 are deliberately looked up from the scenario definitions created
-    # in Section 2.
-    #
-    # They should NOT be silently replaced by a generic forecast.
-    #
-    # If your Section 2 already contains these functions, they will be used
-    # here. If they have different names, change the references below to match
-    # those function names.
-    # -------------------------------------------------------------------------
-}
-
-
-EXIT_SCENARIO_FUNCTIONS = {
-    "X1": forecast_overall_mean,
-    "X2": forecast_recent_mean,
-    "X3": forecast_same_weekday_mean,
-    "X4": forecast_same_weekday_median,
-    "X5": forecast_weekday_recent,
-    "X6": forecast_weekday_month_adjusted,
-    "X7": forecast_same_month_position,
-
-    # X8-X16 are deliberately supplied by Section 2.
-}
-
-
-# =============================================================================
-# 3.12 — GENERIC SCENARIO RUNNER
-# =============================================================================
-#
-# This is the key abstraction.
-#
-# It takes:
-#
-#     - a scenario
-#     - a target date
-#     - a cut-off date
-#     - entry or exit demand
-#
-# and returns ONE forecast.
-#
-# This means the exact same simulation framework can be used for entries and
-# exits without duplicating the backtesting logic.
-# =============================================================================
-
-
-def run_single_scenario(
-    scenario_id,
-    scenario_function,
-    daily_actuals,
-    target_date,
-    cutoff_date,
-    value_column,
-):
-    """
-    Run one forecasting scenario for one target date and one cut-off.
-
-    Returns
-    -------
-    float
-        Forecast demand.
-    """
-
-    try:
-
-        forecast = scenario_function(
-            daily_actuals=daily_actuals,
-            target_date=target_date,
-            cutoff_date=cutoff_date,
-            value_column=value_column,
-        )
-
-        return clean_forecast(forecast)
-
-    except Exception as exc:
-
-        # We do NOT want one broken scenario to stop the entire simulation.
-        #
-        # Instead, return NaN and allow the result table to show that this
-        # scenario failed for this particular observation.
-        #
-        # The error can be investigated afterwards.
-        print(
-            f"WARNING: {scenario_id} failed for "
-            f"{pd.Timestamp(target_date).date()} "
-            f"at cutoff {pd.Timestamp(cutoff_date).date()}: {exc}"
-        )
-
-        return np.nan
-
-
-# =============================================================================
-# 3.13 — SINGLE TEST DATE / HORIZON
-# =============================================================================
-
-
-def simulate_one_date_horizon(
-    daily_actuals,
-    target_date,
-    horizon_days,
-    actual_column,
-    scenario_functions,
-    flow_type,
-):
-    """
-    Run every scenario for one target date and one forecast horizon.
-
-    Example:
-
-        Target date:
-            15 January 2026
-
-        Horizon:
-            T-14
-
-        Cut-off:
-            1 January 2026
-
-    Every scenario gets ONLY the information available at that cut-off.
-
-    The eventual actual for 15 January is then used only for validation.
-    """
-
-    target_date = pd.Timestamp(target_date).normalize()
-
-    cutoff_date = (
-        target_date - pd.Timedelta(days=horizon_days)
-    ).normalize()
-
-    # -------------------------------------------------------------------------
-    # ACTUAL
-    # -------------------------------------------------------------------------
-    #
-    # We intentionally retrieve the actual separately from the forecasting
-    # inputs.
-    #
-    # The actual is the answer we are trying to predict.
-    # It must NEVER be available to the forecasting function.
-    # -------------------------------------------------------------------------
-
-    actual_rows = daily_actuals[
-        pd.to_datetime(daily_actuals["date"]).dt.normalize()
-        == target_date
-    ]
-
-    if len(actual_rows) == 0:
-        actual = np.nan
-
-    else:
-        actual = safe_sum(
-            actual_rows[actual_column]
-        )
-
-    results = []
-
-    for scenario_id, scenario_function in scenario_functions.items():
-
-        forecast = run_single_scenario(
-            scenario_id=scenario_id,
-            scenario_function=scenario_function,
-            daily_actuals=daily_actuals,
-            target_date=target_date,
-            cutoff_date=cutoff_date,
-            value_column=actual_column,
-        )
-
-        result = {
-            "flow_type": flow_type,
-
-            "target_date": target_date,
-
-            "cutoff_date": cutoff_date,
-
-            "horizon_days": horizon_days,
-
-            "horizon_label": f"T-{horizon_days}",
-
-            "scenario_id": scenario_id,
-
-            "actual": actual,
-
-            "forecast": forecast,
-
-            "error": calculate_error(
-                forecast,
-                actual,
-            ),
-
-            "absolute_error": calculate_abs_error(
-                forecast,
-                actual,
-            ),
-
-            "squared_error": calculate_squared_error(
-                forecast,
-                actual,
-            ),
-
-            "ape": calculate_ape(
-                forecast,
-                actual,
-            ),
-
-            "bias": calculate_bias(
-                forecast,
-                actual,
-            ),
-        }
-
-        results.append(result)
-
-    return results
-
-
-# =============================================================================
-# 3.14 — FULL ENTRY SIMULATION
-# =============================================================================
-
-
-def run_entry_simulation(
-    daily_entries,
-    simulation_dates,
-    horizons,
-):
-    """
-    Run every entry scenario across every test date and forecast horizon.
-
-    Expected output:
-
-        test date
-        x
-        forecast horizon
-        x
-        E1-E13
-
-    This creates the core validation dataset for ENTRY forecasting.
-    """
-
-    all_results = []
-
-    for target_date in simulation_dates:
-
-        print(
-            f"ENTRY simulation: "
-            f"{pd.Timestamp(target_date).date()}"
-        )
-
-        for horizon_days in horizons:
-
-            horizon_results = simulate_one_date_horizon(
-                daily_actuals=daily_entries,
-                target_date=target_date,
-                horizon_days=horizon_days,
-                actual_column="entries",
-                scenario_functions=ENTRY_SCENARIO_FUNCTIONS,
-                flow_type="ENTRY",
-            )
-
-            all_results.extend(horizon_results)
-
-    return pd.DataFrame(all_results)
-
-
-# =============================================================================
-# 3.15 — FULL EXIT SIMULATION
-# =============================================================================
-
-
-def run_exit_simulation(
-    daily_exits,
-    simulation_dates,
-    horizons,
-):
-    """
-    Run every exit scenario across every test date and forecast horizon.
-
-    Expected output:
-
-        test date
-        x
-        forecast horizon
-        x
-        X1-X16
-
-    This creates the core validation dataset for EXIT forecasting.
-    """
-
-    all_results = []
-
-    for target_date in simulation_dates:
-
-        print(
-            f"EXIT simulation: "
-            f"{pd.Timestamp(target_date).date()}"
-        )
-
-        for horizon_days in horizons:
-
-            horizon_results = simulate_one_date_horizon(
-                daily_actuals=daily_exits,
-                target_date=target_date,
-                horizon_days=horizon_days,
-                actual_column="exits",
-                scenario_functions=EXIT_SCENARIO_FUNCTIONS,
-                flow_type="EXIT",
-            )
-
-            all_results.extend(horizon_results)
-
-    return pd.DataFrame(all_results)
-
-
-# =============================================================================
-# 3.16 — COMBINE ENTRY + EXIT RESULTS
-# =============================================================================
-
-
-def run_full_simulation(
-    daily_entries,
-    daily_exits,
-    simulation_dates,
-    horizons,
-):
-    """
-    Run the complete forecasting experiment.
-
-    Returns
-    -------
-    entry_results
-        Detailed entry-level backtest results.
-
-    exit_results
-        Detailed exit-level backtest results.
-
-    all_results
-        Combined table.
-    """
-
-    print("=" * 80)
-    print("STARTING ENTRY SIMULATION")
-    print("=" * 80)
-
-    entry_results = run_entry_simulation(
-        daily_entries=daily_entries,
-        simulation_dates=simulation_dates,
-        horizons=horizons,
-    )
-
-    print()
-    print("=" * 80)
-    print("STARTING EXIT SIMULATION")
-    print("=" * 80)
-
-    exit_results = run_exit_simulation(
-        daily_exits=daily_exits,
-        simulation_dates=simulation_dates,
-        horizons=horizons,
-    )
-
-    all_results = pd.concat(
-        [
-            entry_results,
-            exit_results,
-        ],
-        ignore_index=True,
-    )
-
-    return (
-        entry_results,
-        exit_results,
-        all_results,
-    )
-
-
-# =============================================================================
-# 3.17 — PERFORMANCE SUMMARY
-# =============================================================================
-#
-# This converts the huge detailed simulation output into something much more
-# useful for answering:
-#
-#     "Which scenario is actually best?"
-#
-# We calculate performance separately by:
-#
-#     ENTRY / EXIT
-#     scenario
-#     forecast horizon
-#
-# This is important because there may NOT be one universally best scenario.
-#
-# For example:
-#
-#     E7 could be best at T-56
-#     E3 could be best at T-14
-#     E10 could be best at T-1
-#
-# That would suggest that the optimal forecasting approach changes as the
-# booking window gets closer to the operational date.
-#
-# That is exactly the kind of behaviour this simulation is designed to find.
-# =============================================================================
-
-
-def summarise_simulation_results(results):
-    """
-    Produce performance statistics by flow, scenario and forecast horizon.
-    """
-
-    if results.empty:
-        return pd.DataFrame()
-
-    grouped = (
-        results
-        .groupby(
-            [
-                "flow_type",
-                "scenario_id",
-                "horizon_days",
-                "horizon_label",
-            ],
-            dropna=False,
-        )
-        .agg(
-            observations=("actual", "count"),
-
-            forecast_mean=("forecast", "mean"),
-
-            actual_mean=("actual", "mean"),
-
-            mae=("absolute_error", "mean"),
-
-            rmse=(
-                "squared_error",
-                lambda x: np.sqrt(np.nanmean(x))
-                if x.notna().any()
-                else np.nan,
-            ),
-
-            mape=("ape", "mean"),
-
-            bias=("bias", "mean"),
-
-            median_absolute_error=(
-                "absolute_error",
-                "median",
-            ),
-        )
-        .reset_index()
-    )
-
-    # Convert MAPE from decimal to percentage.
-    grouped["mape_pct"] = (
-        grouped["mape"] * 100
-    )
-
-    # WAPE is calculated separately below because it cannot be safely
-    # calculated from the mean APE.
-    wape_rows = []
-
-    for (
-        flow_type,
-        scenario_id,
-        horizon_days,
-        horizon_label,
-    ), group in results.groupby(
-        [
-            "flow_type",
-            "scenario_id",
-            "horizon_days",
-            "horizon_label",
-        ]
-    ):
-
-        valid = group[
-            group["actual"].notna()
-            & group["forecast"].notna()
-        ].copy()
-
-        if len(valid) == 0:
-            wape = np.nan
-
-        else:
-
-            denominator = valid["actual"].abs().sum()
-
-            if denominator == 0:
-                wape = np.nan
-
-            else:
-                wape = (
-                    valid["absolute_error"].sum()
-                    / denominator
-                )
-
-        wape_rows.append(
-            {
-                "flow_type": flow_type,
-                "scenario_id": scenario_id,
-                "horizon_days": horizon_days,
-                "horizon_label": horizon_label,
-                "wape": wape,
-                "wape_pct": (
-                    wape * 100
-                    if pd.notna(wape)
-                    else np.nan
-                ),
-            }
-        )
-
-    wape_df = pd.DataFrame(wape_rows)
-
-    summary = grouped.merge(
-        wape_df,
-        on=[
-            "flow_type",
-            "scenario_id",
-            "horizon_days",
-            "horizon_label",
-        ],
-        how="left",
-    )
-
-    return summary
-
-
-# =============================================================================
-# 3.18 — RANK SCENARIOS
-# =============================================================================
-#
-# We should not simply declare the scenario with the smallest error as
-# "best" without considering the structure of the problem.
-#
-# For now, the primary ranking metric is WAPE.
-#
-# Why WAPE?
-#
-#     WAPE = sum(abs(error)) / sum(abs(actual))
-#
-# It is generally more useful for demand forecasting than MAPE when some
-# periods have small or zero actual values.
-#
-# We retain MAE, RMSE and bias so we can challenge the WAPE ranking later.
-# =============================================================================
-
-
-def rank_scenarios(summary):
-    """
-    Rank scenarios separately for each flow and horizon.
-
-    Rank 1 = lowest WAPE.
-    """
-
-    if summary.empty:
-        return summary
-
-    ranked = summary.copy()
-
-    ranked["wape_rank"] = (
-        ranked
-        .groupby(
-            [
-                "flow_type",
-                "horizon_days",
-            ]
-        )["wape"]
-        .rank(
-            method="min",
-            ascending=True,
-        )
-    )
-
-    ranked["mae_rank"] = (
-        ranked
-        .groupby(
-            [
-                "flow_type",
-                "horizon_days",
-            ]
-        )["mae"]
-        .rank(
-            method="min",
-            ascending=True,
-        )
-    )
-
-    ranked["rmse_rank"] = (
-        ranked
-        .groupby(
-            [
-                "flow_type",
-                "horizon_days",
-            ]
-        )["rmse"]
-        .rank(
-            method="min",
-            ascending=True,
-        )
-    )
-
-    return ranked
-
-
-# =============================================================================
-# 3.19 — FIND THE BEST SCENARIO AT EACH HORIZON
-# =============================================================================
-
-
-def get_best_scenario_by_horizon(summary):
-    """
-    Return the best-performing scenario for every flow/horizon combination.
-
-    This is one of the most important outputs of the simulation.
-
-    Example:
-
-        ENTRY   T-56   E8
-        ENTRY   T-49   E8
-        ENTRY   T-42   E10
-        ...
-        ENTRY   T-7    E5
-        ENTRY   T-1    E3
-
-    This would tell us whether the best forecasting methodology changes
-    throughout the booking curve.
-    """
-
-    if summary.empty:
-        return pd.DataFrame()
-
-    ranked = rank_scenarios(summary)
-
-    best = (
-        ranked[
-            ranked["wape_rank"] == 1
-        ]
-        .sort_values(
-            [
-                "flow_type",
-                "horizon_days",
-                "scenario_id",
-            ]
-        )
-        .reset_index(drop=True)
-    )
-
-    return best
-
-
-# =============================================================================
-# 3.20 — OVERALL SCENARIO PERFORMANCE
-# =============================================================================
-#
-# This asks a different question:
-#
-#     "Across ALL tested horizons, which scenario is strongest overall?"
-#
-# This is useful for identifying robust models.
-#
-# However, we should NOT automatically use this as the final production model.
-#
-# A model which is average everywhere may be less useful than a model which
-# is excellent at long lead times and another which is excellent at short
-# lead times.
-# =============================================================================
-
-
-def get_overall_scenario_ranking(results):
-    """
-    Rank scenarios across all horizons.
-
-    WAPE remains the main metric.
-    """
-
-    if results.empty:
-        return pd.DataFrame()
-
-    valid = results[
-        results["actual"].notna()
-        & results["forecast"].notna()
-    ].copy()
-
-    if valid.empty:
-        return pd.DataFrame()
-
-    rows = []
-
-    for (
-        flow_type,
-        scenario_id,
-    ), group in valid.groupby(
-        [
-            "flow_type",
-            "scenario_id",
-        ]
-    ):
-
-        actual_total = group["actual"].abs().sum()
-
-        if actual_total == 0:
-            wape = np.nan
-
-        else:
-            wape = (
-                group["absolute_error"].sum()
-                / actual_total
-            )
-
-        rows.append(
-            {
-                "flow_type": flow_type,
-
-                "scenario_id": scenario_id,
-
-                "observations": len(group),
-
-                "mae": group["absolute_error"].mean(),
-
-                "rmse": np.sqrt(
-                    group["squared_error"].mean()
-                ),
-
-                "bias": group["bias"].mean(),
-
-                "wape": wape,
-
-                "wape_pct": (
-                    wape * 100
-                    if pd.notna(wape)
-                    else np.nan
-                ),
-            }
-        )
-
-    ranking = pd.DataFrame(rows)
-
-    ranking["overall_rank"] = (
-        ranking
-        .groupby("flow_type")["wape"]
-        .rank(
-            method="min",
-            ascending=True,
-        )
-    )
-
-    return ranking.sort_values(
-        [
-            "flow_type",
-            "overall_rank",
-            "scenario_id",
-        ]
-    )
-
-
-# =============================================================================
-# 3.21 — HORIZON-BY-HORIZON WINNER TABLE
-# =============================================================================
-#
-# This creates a compact table showing which scenario won at each booking
-# horizon.
-#
-# This is likely to become one of the most important outputs when we eventually
-# build the production forecasting logic.
-# =============================================================================
-
-
-def create_horizon_winner_table(summary):
-    """
-    Create a wide table with one row per horizon and columns for ENTRY / EXIT.
-
-    Example output:
-
-        horizon    entry_best    entry_wape    exit_best    exit_wape
-        T-56       E8            ...           X12          ...
-        T-49       E8            ...           X12          ...
-        ...
-    """
-
-    if summary.empty:
-        return pd.DataFrame()
-
-    best = get_best_scenario_by_horizon(summary)
-
-    if best.empty:
-        return pd.DataFrame()
-
-    entry = best[
-        best["flow_type"] == "ENTRY"
-    ][
-        [
-            "horizon_days",
-            "horizon_label",
-            "scenario_id",
-            "wape_pct",
-        ]
-    ].rename(
-        columns={
-            "scenario_id": "entry_best_scenario",
-            "wape_pct": "entry_wape_pct",
-        }
-    )
-
-    exit_ = best[
-        best["flow_type"] == "EXIT"
-    ][
-        [
-            "horizon_days",
-            "horizon_label",
-            "scenario_id",
-            "wape_pct",
-        ]
-    ].rename(
-        columns={
-            "scenario_id": "exit_best_scenario",
-            "wape_pct": "exit_wape_pct",
-        }
-    )
-
-    winner_table = pd.merge(
-        entry,
-        exit_,
-        on=[
-            "horizon_days",
-            "horizon_label",
-        ],
-        how="outer",
-    )
-
-    return winner_table.sort_values(
-        "horizon_days"
-    ).reset_index(drop=True)
-
-
-# =============================================================================
-# 3.22 — CHECK FOR FORECAST COVERAGE
-# =============================================================================
-#
-# Before trusting the results, we need to know whether each scenario actually
-# produced forecasts for all expected observations.
-#
-# A scenario that "wins" because it only successfully forecasts 20% of the
-# sample is not genuinely better.
-# =============================================================================
-
-
-def calculate_scenario_coverage(results):
-    """
-    Calculate the percentage of expected forecasts actually produced.
-    """
-
-    if results.empty:
-        return pd.DataFrame()
-
-    coverage = (
-        results
-        .groupby(
-            [
-                "flow_type",
-                "scenario_id",
-                "horizon_days",
-            ]
-        )
-        .agg(
-            expected_observations=(
-                "target_date",
-                "count",
-            ),
-
-            forecasts_available=(
-                "forecast",
-                lambda x: x.notna().sum(),
-            ),
-
-            actuals_available=(
-                "actual",
-                lambda x: x.notna().sum(),
-            ),
-        )
-        .reset_index()
-    )
-
-    coverage["forecast_coverage_pct"] = (
-        coverage["forecasts_available"]
-        / coverage["expected_observations"]
-        * 100
-    )
-
-    coverage["actual_coverage_pct"] = (
-        coverage["actuals_available"]
-        / coverage["expected_observations"]
-        * 100
-    )
-
-    return coverage
-
-
-# =============================================================================
-# 3.23 — COMPLETE ANALYSIS PIPELINE
-# =============================================================================
-#
-# This is the function that should eventually be called from the bottom of
-# fastpark_forecast_simulation.py.
-#
-# It:
-#
-#     1. Runs all entry scenarios
-#     2. Runs all exit scenarios
-#     3. Calculates errors
-#     4. Summarises performance
-#     5. Ranks scenarios
-#     6. Identifies winners by horizon
-#     7. Checks coverage
-#
-# =============================================================================
-
-
-def run_and_analyse_simulation(
-    daily_entries,
-    daily_exits,
-    simulation_dates,
-    horizons,
-):
-    """
-    Execute the full simulation and generate all core analysis outputs.
-    """
-
-    (
-        entry_results,
-        exit_results,
-        all_results,
-    ) = run_full_simulation(
-        daily_entries=daily_entries,
-        daily_exits=daily_exits,
-        simulation_dates=simulation_dates,
-        horizons=horizons,
-    )
-
-    print()
-    print("=" * 80)
-    print("CALCULATING PERFORMANCE SUMMARY")
-    print("=" * 80)
-
-    summary = summarise_simulation_results(
-        all_results
-    )
-
-    ranked_summary = rank_scenarios(
-        summary
-    )
-
-    best_by_horizon = get_best_scenario_by_horizon(
-        summary
-    )
-
-    overall_ranking = get_overall_scenario_ranking(
-        all_results
-    )
-
-    horizon_winners = create_horizon_winner_table(
-        summary
-    )
-
-    coverage = calculate_scenario_coverage(
-        all_results
-    )
-
-    return {
-        "entry_results": entry_results,
-        "exit_results": exit_results,
-        "all_results": all_results,
-        "summary": summary,
-        "ranked_summary": ranked_summary,
-        "best_by_horizon": best_by_horizon,
-        "overall_ranking": overall_ranking,
-        "horizon_winners": horizon_winners,
-        "coverage": coverage,
-    }
-
-
-# =============================================================================
-# 3.24 — BASIC CONSOLE REPORT
-# =============================================================================
-#
-# This gives us an immediate view when running the Python file.
-#
-# The Excel export will contain much more detail.
-# =============================================================================
-
-
-def print_simulation_summary(outputs):
-    """
-    Print the most important simulation findings to the console.
-    """
-
-    print()
-    print("=" * 80)
-    print("FORECAST SIMULATION RESULTS")
-    print("=" * 80)
-
-    overall = outputs["overall_ranking"]
-
-    if overall.empty:
-        print("No valid simulation results available.")
-        return
-
-    for flow_type in ["ENTRY", "EXIT"]:
-
-        print()
-        print("-" * 80)
-        print(f"{flow_type} — OVERALL SCENARIO RANKING")
-        print("-" * 80)
-
-        flow = overall[
-            overall["flow_type"] == flow_type
-        ].copy()
-
-        print(
-            flow[
-                [
-                    "scenario_id",
-                    "observations",
-                    "mae",
-                    "rmse",
-                    "bias",
-                    "wape_pct",
-                    "overall_rank",
-                ]
-            ]
-            .head(10)
-            .to_string(index=False)
-        )
-
-    print()
-    print("=" * 80)
-    print("BEST SCENARIO BY FORECAST HORIZON")
-    print("=" * 80)
-
-    winners = outputs["horizon_winners"]
-
-    if winners.empty:
-        print("No horizon winners available.")
-
-    else:
-
-        print(
-            winners.to_string(
-                index=False
-            )
-        )
 
 # =============================================================================
-# SECTION 4 — RUN, VALIDATE, SCORE AND EXPORT THE FORECAST SIMULATION
+# SECTION 3 — RUN, VALIDATE, SCORE AND EXPORT THE FORECAST SIMULATION
 # =============================================================================
 #
 # PURPOSE
@@ -6916,13 +5068,13 @@ def print_simulation_summary(outputs):
 #
 # This section is the final orchestration layer.
 #
-# Sections 1-3 have already defined:
+# Sections 1-2 have already defined:
 #
 #   1. How the data is loaded and cleaned
 #   2. The E1-E13 and X1-X16 forecasting scenarios
 #   3. The historical backtesting engine
 #
-# Section 4 now:
+# Section 3 now:
 #
 #   - loads the data
 #   - cleans and reconciles it
@@ -6934,35 +5086,9 @@ def print_simulation_summary(outputs):
 #   - identifies the best model at each T-minus horizon
 #   - exports everything to Excel
 #
-# IMPORTANT:
-# ----------
-#
-# We deliberately use the newer Section 2 scenario engine:
-#
-#       run_daily_simulation()
-#
-# rather than the older generic:
-#
-#       run_and_analyse_simulation()
-#
-# that exists earlier in the file.
-#
-# The newer engine is the one that actually calls:
-#
-#       forecast_entry_scenario()
-#       forecast_exit_scenario()
-#
-# and therefore runs the full:
-#
-#       E1-E13
-#       X1-X16
-#
-# catalogue.
-#
-# =============================================================================
 
 # =============================================================================
-# 4.1 — FINAL SIMULATION CONFIGURATION
+# 3.1 — FINAL SIMULATION CONFIGURATION
 # =============================================================================
 #
 # We use the configuration already defined in Section 1.
@@ -7013,7 +5139,7 @@ def get_final_simulation_config():
 
 
 # =============================================================================
-# 4.2 — VALIDATE THE INPUT DATASETS
+# 3.2 — VALIDATE THE INPUT DATASETS
 # =============================================================================
 #
 # Before running 54,810 forecast observations, we want to make sure the
@@ -7202,7 +5328,7 @@ def validate_loaded_data(data, config):
 
 
 # =============================================================================
-# 4.3 — VALIDATE TEST DATES
+# 3.3 — VALIDATE TEST DATES
 # =============================================================================
 
 
@@ -7305,7 +5431,7 @@ def validate_test_dates(config):
 
 
 # =============================================================================
-# 4.4 — VALIDATE SCENARIO CATALOGUE
+# 3.4 — VALIDATE SCENARIO CATALOGUE
 # =============================================================================
 #
 # We explicitly require:
@@ -7376,7 +5502,7 @@ def validate_final_scenario_catalogue(config):
 
 
 # =============================================================================
-# 4.5 — VALIDATE FORECAST HORIZONS
+# 3.5 — VALIDATE FORECAST HORIZONS
 # =============================================================================
 
 
@@ -7416,7 +5542,7 @@ def validate_horizons(config):
 
 
 # =============================================================================
-# 4.6 — VALIDATE DAILY ACTUAL VALIDATION TARGET
+# 3.6 — VALIDATE DAILY ACTUAL VALIDATION TARGET
 # =============================================================================
 #
 # The actual validation target must come from operational reality:
@@ -7521,7 +5647,7 @@ def validate_daily_actuals(
 
 
 # =============================================================================
-# 4.7 — SCORE THE NEW SECTION 2 SIMULATION RESULTS
+# 3.7 — SCORE THE NEW SECTION 2 SIMULATION RESULTS
 # =============================================================================
 #
 # The new run_daily_simulation() already calculates:
@@ -7706,10 +5832,9 @@ def score_daily_simulation_results(
 
 
 # =============================================================================
-# 4.8 — SCENARIO COVERAGE
+# 3.8 — SCENARIO COVERAGE
 # =============================================================================
 #
-# This is important.
 #
 # A scenario that only forecasts 40% of cases cannot fairly beat a scenario
 # that forecasts 100% of cases.
@@ -7797,7 +5922,7 @@ def calculate_final_coverage(
 
 
 # =============================================================================
-# 4.9 — RANK MODELS BY HORIZON
+# 3.9 — RANK MODELS BY HORIZON
 # =============================================================================
 #
 # WAPE is the primary model-selection metric.
@@ -7878,7 +6003,7 @@ def rank_final_models(
 
 
 # =============================================================================
-# 4.10 — BEST MODEL BY HORIZON
+# 3.10 — BEST MODEL BY HORIZON
 # =============================================================================
 
 
@@ -7958,7 +6083,7 @@ def create_best_by_horizon(
 
 
 # =============================================================================
-# 4.11 — OVERALL MODEL RANKING
+# 3.11 — OVERALL MODEL RANKING
 # =============================================================================
 #
 # This is deliberately secondary to the horizon-by-horizon result.
@@ -8094,7 +6219,7 @@ def create_overall_model_ranking(
 
 
 # =============================================================================
-# 4.12 — MODEL STABILITY ACROSS HORIZONS
+# 3.12 — MODEL STABILITY ACROSS HORIZONS
 # =============================================================================
 #
 # A useful model is not necessarily the model that wins once.
@@ -8195,7 +6320,7 @@ def create_model_stability(
 
 
 # =============================================================================
-# 4.13 — WAPE MATRIX
+# 3.13 — WAPE MATRIX
 # =============================================================================
 #
 # This gives us a very useful visual/table representation:
@@ -8268,7 +6393,7 @@ def create_wape_matrix(
 
 
 # =============================================================================
-# 4.14 — SCENARIO DOCUMENTATION TABLE
+# 3.14 — SCENARIO DOCUMENTATION TABLE
 # =============================================================================
 #
 # Pull the descriptions directly from Section 2.
@@ -8339,7 +6464,7 @@ def create_scenario_documentation():
 
 
 # =============================================================================
-# 4.15 — DATA QUALITY SUMMARY
+# 3.15 — DATA QUALITY SUMMARY
 # =============================================================================
 
 
@@ -8409,7 +6534,7 @@ def create_data_quality_summary(
 
 
 # =============================================================================
-# 4.16 — EXCEL FORMATTING
+# 3.16 — EXCEL FORMATTING
 # =============================================================================
 
 
@@ -8502,7 +6627,7 @@ def format_output_workbook(
 
 
 # =============================================================================
-# 4.17 — EXPORT RESULTS TO EXCEL
+# 3.17 — EXPORT RESULTS TO EXCEL
 # =============================================================================
 
 
@@ -8786,7 +6911,7 @@ def export_simulation_results(
 
 
 # =============================================================================
-# 4.18 — FINAL CONSOLE SUMMARY
+# 3.18 — FINAL CONSOLE SUMMARY
 # =============================================================================
 
 
@@ -8925,7 +7050,7 @@ def print_final_results_summary(
 
 
 # =============================================================================
-# 4.19 — MAIN EXECUTION
+# 3.19 — MAIN EXECUTION
 # =============================================================================
 #
 # THIS IS THE ONLY PART THAT SHOULD ACTUALLY RUN THE PIPELINE.
