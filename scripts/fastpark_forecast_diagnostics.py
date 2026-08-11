@@ -25,7 +25,7 @@ OUTPUT_DIR = Path("outputs/fastpark_forecast_diagnostics")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 RUN_DATE_STR = datetime.now().strftime("%Y-%m-%d")
-EXCEL_OUTPUT_PATH = OUTPUT_DIR / f"FastPark_Forecast_Diagnostics_{RUN_DATE_STR}.xlsx"
+EXCEL_OUTPUT_PATH = OUTPUT_DIR / f"FastPark_Forecast_Diagnostics_V2{RUN_DATE_STR}.xlsx"
 
 # Set to True if you still want the separate CSVs as well as the Excel workbook
 SAVE_SEPARATE_CSVS = False
@@ -46,7 +46,7 @@ DURATION_ORDER = [
     "Unknown",
 ]
 
-DEFAULT_HORIZONS = range(1, 29)
+DEFAULT_HORIZONS = range(0, 29)
 
 
 # ---------------------------------------------------------------------
@@ -1087,6 +1087,41 @@ def build_visibility_by_horizon_month(bookings_df, horizons=DEFAULT_HORIZONS):
     pivot = pivot.round(2)
 
     return pivot.reset_index()
+
+# ---------------------------------------------------------------------
+# Lead time analysis
+# ---------------------------------------------------------------------
+def build_leadtime_distribution(bookings_df):
+    """
+    Distribution of booking lead times.
+
+    Used to validate booking behaviour against Tableau.
+    """
+
+    df = bookings_df.copy()
+
+    leadtime_distribution = (
+        df.groupby("lead_to_entry_calendar_days")
+        .agg(
+            bookings=("bookingUuid", "nunique")
+        )
+        .reset_index()
+        .sort_values("lead_to_entry_calendar_days")
+    )
+
+    leadtime_distribution["booking_pct"] = (
+        leadtime_distribution["bookings"]
+        / leadtime_distribution["bookings"].sum()
+        * 100
+    )
+
+    leadtime_distribution["cumulative_pct"] = (
+        leadtime_distribution["booking_pct"]
+        .cumsum()
+    )
+
+    return leadtime_distribution
+
 # ---------------------------------------------------------------------
 # Penetration analysis
 # ---------------------------------------------------------------------
@@ -1567,6 +1602,18 @@ def run_fastpark_forecast_diagnostics(
     workbook_sheets = {}
 
     # ---------------------------------------------------------
+    # Lead time validation
+    # ---------------------------------------------------------
+    print_section("LEAD TIME DISTRIBUTION")
+
+    leadtime_distribution = build_leadtime_distribution(bookings)
+
+    print("\nLead time distribution:")
+    print(leadtime_distribution.to_string(index=False))
+
+    workbook_sheets["03_Leadtime_Distribution"] = leadtime_distribution
+
+    # ---------------------------------------------------------
     # Lead-time visibility
     # ---------------------------------------------------------
     print_section("BOOKING VISIBILITY AND RECOMMENDED UPLIFTS")
@@ -1778,6 +1825,7 @@ def run_fastpark_forecast_diagnostics(
     preferred_order = [
         "01_Summary",
         "02_Recommended_Uplifts",
+        "03_Leadtime_Distribution",
         "03_Current_Uplift_Backtest",
         "04_Penetration_Daily",
         "05_Penetration_Weekly",
@@ -1833,7 +1881,7 @@ def run_fastpark_forecast_diagnostics(
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     outputs = run_fastpark_forecast_diagnostics(
-        start="2026-04-01",
-        end="2026-06-30",
+        start="2026-07-21",
+        end="2026-08-10",
         deduplicate=True
     )
