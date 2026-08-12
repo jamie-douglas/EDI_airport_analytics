@@ -6520,6 +6520,7 @@ def run_fastpark_historical_analysis(sql_connection, output_path=None):
     # ----------------------------
 
     print("[13/14] Back-testing Tendency Forecast Methods…")
+    
 
     tendency_backtest_results = run_tendency_window_backtest(
         daily_driver_dataset,

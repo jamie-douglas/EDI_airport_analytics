@@ -2837,7 +2837,7 @@ if __name__ == "__main__":
     outputs = run_fastpark_uplift_analysis(
         start=None,
         end=None,
-        number_of_completed_months=8,
+        number_of_completed_months=13,
         include_partial_window_month=True,
         deduplicate=True,
     )
