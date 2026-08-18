@@ -450,7 +450,10 @@ sep_2026_fp_merged = pd.merge(sep_2026_actuals_df, sep_2026_bookings_df, on="Boo
 
 # ✅ FLIGHTS ADDED
 flights_2025_df = load_flights_as_target_month(2024, 2025, 9)
-flights_2026_df = load_flights_as_target_month(2025, 2026, 9)
+flights_2026_df = pd.concat([
+    load_flights_as_target_month(2025, 2026, 8),
+    load_flights_as_target_month(2025, 2026, 9)
+], ignore_index=True)
 
 
 # ==========================================================
@@ -673,7 +676,7 @@ lane_hourly_clean = drop_source_columns(lane_hourly_df)
 current_system_clean = drop_source_columns(current_system)
 
 
-clean_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol2.xlsx"
+clean_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol3.xlsx"
 
 with pd.ExcelWriter(clean_output_path, engine="openpyxl", mode="w") as writer:
     sep_2025_fp_merged_clean.to_excel(writer, sheet_name="Pseudo Sep2025 actuals+book", index=False)
@@ -687,7 +690,6 @@ with pd.ExcelWriter(clean_output_path, engine="openpyxl", mode="w") as writer:
     # ✅ flights
     drop_source_columns(flights_2025_df).to_excel(writer, sheet_name="Pseudo Sep2025 flights", index=False)
     drop_source_columns(flights_2026_df).to_excel(writer, sheet_name="Pseudo Sep2026 flights", index=False)
-
 
 debug_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol3.xlsx"
 
