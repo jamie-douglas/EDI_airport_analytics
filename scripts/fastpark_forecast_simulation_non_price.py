@@ -15,9 +15,8 @@ New tests
 3. Explicit calendar categories supplied in MANUAL_CALENDAR_PERIODS.
 4. Booking-position demand regimes.
 5. Weekday-specific demand-level trend.
-6. Optional cancellation features if the cleaned booking table contains a
-   cancellation timestamp. This is disabled by default until the exact cleaned
-   column name is confirmed.
+6. As-of cancellation-pattern analysis using cancellations known at each
+ 
 
 Dependencies
 ------------
@@ -34,8 +33,9 @@ Manual inputs
 -------------
 1. Check the three module names in get_non_price_config().
 2. Add holiday and school-holiday date ranges to MANUAL_CALENDAR_PERIODS.
-3. If cancellation testing is required, set enable_cancellation_test=True and
-   set cancellation_timestamp_col to the cleaned cancellation timestamp column.
+3. Confirm the configured booking column names match the cleaned Generation 1
+   booking dataframe.
+
 """
 
 # =============================================================================
@@ -115,11 +115,11 @@ MANUAL_CALENDAR_PERIODS = {
 
     ],
     "easter_period": [
-        ("2026-03-02", "2026-04-06")
+        ("2025-03-17", "2025-03-21"),
+        ("2026-03-02", "2026-03-06")
     ],
     "christmas_ny_period": [
         ("2025-12-19", "2026-01-03"),
-        ("2026-12-20", "2026-01-04")
     ],
     "special_event": [
         ("2025-06-19", "2025-06-22"), #Royal highland show 2025
@@ -188,14 +188,70 @@ def get_non_price_config():
         "trend_factor_min": 0.70,
         "trend_factor_max": 1.30,
 
-        # Optional cancellation test. Enable only after setting the exact
-        # cleaned column name used by Generation 1.
+        # -----------------------------------------------------------------
+        # Cancellation-pattern experiment
+        # -----------------------------------------------------------------
+        #
+        # Generation 1 already excludes cancellations known at the historical
+        # forecast cutoff from the active booking population.
+        #
+        # Generation 2.1 tests whether an unusually high or low recent
+        # cancellation rate contains additional predictive information beyond
+        # the standard booking curve.
+        #
+        # No cancellation after the historical cutoff is used.
+        # -----------------------------------------------------------------
+
         "enable_cancellation_test": True,
+
+        # Cleaned Generation 1 booking columns.
+        "booking_id_col": "bookingId",
+        "booking_created_timestamp_col": "createdAt",
         "cancellation_timestamp_col": "cancelledAt",
+        "booking_entry_date_col": "entryDate",
+        "booking_exit_date_col": "exitDate",
+
+        # Calculate 1-day, 3-day and 7-day cancellation diagnostics.
+        "cancellation_windows_days": [
+            1,
+            3,
+            7,
+        ],
+
+        # Use the seven-day rate in the first cancellation experiment.
+        "primary_cancellation_window_days": 7,
+
+        # Compare each target date with the normal cancellation rate for the
+        # same horizon and weekday in the training period.
+        "cancellation_rate_bins": [
+            -np.inf,
+            -0.50,
+            -0.15,
+            0.15,
+            0.50,
+            np.inf,
+        ],
+
+        "cancellation_rate_labels": [
+            "very_low",
+            "low",
+            "normal",
+            "high",
+            "very_high",
+        ],
+
+        # Minimum training observations needed before a segmented cancellation
+        # adjustment can be applied.
+        "minimum_cancellation_segment_observations": 10,
+
+        # Prevent an unstable cancellation segment from making an extreme
+        # forecast adjustment.
+        "cancellation_adjustment_min": 0.70,
+        "cancellation_adjustment_max": 1.30,
 
         # Runtime controls.
-        "smoke_test": True,
-        "smoke_test_target_count": 21,
+        "smoke_test": False,
+        "smoke_test_target_count": 24,
         "smoke_test_horizons": [0, 7, 28, 56],
         "fail_fast": True,
 
@@ -243,15 +299,65 @@ def build_base_config(base, config):
 
 
 def create_test_dates(config):
+    """
+    Create all target dates for the full run.
+
+    In smoke-test mode, select three dates from each of the first eight
+    simulation months. This provides enough distinct months to create at least
+    one six-month training, one-month validation, and one-month test fold.
+    """
+
     dates = pd.date_range(
-        config["simulation_start"],
-        config["simulation_end"],
+        start=config["simulation_start"],
+        end=config["simulation_end"],
         freq="D",
     )
-    if config["smoke_test"]:
-        dates = dates[: config["smoke_test_target_count"]]
-    return pd.DataFrame({"target_date": dates.normalize()})
 
+    if not config["smoke_test"]:
+        return pd.DataFrame(
+            {
+                "target_date": dates.normalize()
+            }
+        )
+
+    smoke_dates = []
+
+    month_starts = pd.date_range(
+        start=pd.Timestamp(config["simulation_start"])
+        .to_period("M")
+        .to_timestamp(),
+        end=pd.Timestamp(config["simulation_end"])
+        .to_period("M")
+        .to_timestamp(),
+        freq="MS",
+    )
+
+    for month_start in month_starts[:8]:
+        month_end = month_start + pd.offsets.MonthEnd(0)
+
+        for day_number in (1, 8, 15):
+            candidate = month_start + pd.Timedelta(
+                days=day_number - 1
+            )
+
+            if (
+                candidate <= month_end
+                and candidate >= pd.Timestamp(
+                    config["simulation_start"]
+                )
+                and candidate <= pd.Timestamp(
+                    config["simulation_end"]
+                )
+            ):
+                smoke_dates.append(candidate.normalize())
+
+    return pd.DataFrame(
+        {
+            "target_date": sorted(
+                set(smoke_dates)
+            )
+        }
+    )
 
 # =============================================================================
 # 4. GENERAL HELPERS
@@ -299,41 +405,104 @@ def nearest_earlier_horizon(horizon, available_horizons, minimum_gap=1):
 # =============================================================================
 
 def build_calendar_table(start_date, end_date, periods):
+    """
+    Create independent calendar flags.
+
+    Start and end dates are inclusive. Overlapping calendar periods are
+    retained rather than overwriting one another.
+    """
+
     calendar = pd.DataFrame(
-        {"target_date": pd.date_range(start_date, end_date, freq="D")}
+        {
+            "target_date": pd.date_range(
+                start=start_date,
+                end=end_date,
+                freq="D",
+            )
+        }
     )
-    calendar["target_date"] = calendar["target_date"].dt.normalize()
-    calendar["calendar_type"] = "normal"
+
+    calendar["target_date"] = (
+        pd.to_datetime(calendar["target_date"])
+        .dt.normalize()
+    )
+
+    calendar_flags = []
 
     for category, ranges in periods.items():
+        flag_column = f"is_{category}"
+        calendar[flag_column] = False
+        calendar_flags.append(flag_column)
+
         for start, end in ranges:
             start = pd.Timestamp(start).normalize()
             end = pd.Timestamp(end).normalize()
-            mask = calendar["target_date"].between(start, end)
-            calendar.loc[mask, "calendar_type"] = category
 
-    holiday_dates = set(
+            if end < start:
+                raise ValueError(
+                    f"Calendar range end is before start: "
+                    f"{category}, {start.date()} to {end.date()}"
+                )
+
+            mask = calendar["target_date"].between(
+                start,
+                end,
+                inclusive="both",
+            )
+
+            calendar.loc[mask, flag_column] = True
+
+    calendar["is_any_special_period"] = (
+        calendar[calendar_flags].any(axis=1)
+        if calendar_flags
+        else False
+    )
+
+    special_dates = set(
         calendar.loc[
-            calendar["calendar_type"].ne("normal"), "target_date"
+            calendar["is_any_special_period"],
+            "target_date",
         ]
     )
-    calendar["is_day_before_special"] = calendar["target_date"].map(
-        lambda d: d + pd.Timedelta(days=1) in holiday_dates
-    )
-    calendar["is_day_after_special"] = calendar["target_date"].map(
-        lambda d: d - pd.Timedelta(days=1) in holiday_dates
+
+    calendar["is_day_before_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date + pd.Timedelta(days=1)
+            ) in special_dates
+        )
     )
 
-    calendar.loc[
-        calendar["calendar_type"].eq("normal")
-        & calendar["is_day_before_special"],
-        "calendar_type",
-    ] = "day_before_special"
-    calendar.loc[
-        calendar["calendar_type"].eq("normal")
-        & calendar["is_day_after_special"],
-        "calendar_type",
-    ] = "day_after_special"
+    calendar["is_day_after_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date - pd.Timedelta(days=1)
+            ) in special_dates
+        )
+    )
+
+    def combine_calendar_types(row):
+        active_categories = []
+
+        for category in periods:
+            if row[f"is_{category}"]:
+                active_categories.append(category)
+
+        if active_categories:
+            return "|".join(active_categories)
+
+        if row["is_day_before_special"]:
+            return "day_before_special"
+
+        if row["is_day_after_special"]:
+            return "day_after_special"
+
+        return "normal"
+
+    calendar["calendar_type"] = calendar.apply(
+        combine_calendar_types,
+        axis=1,
+    )
 
     return calendar
 
@@ -644,20 +813,574 @@ def add_weekday_trend_features(component_table, daily_actuals, config):
 # 10. OPTIONAL CANCELLATION FEATURE VALIDATION
 # =============================================================================
 
-def validate_cancellation_configuration(bookings, config):
+def validate_cancellation_configuration(
+    bookings,
+    config,
+):
+    """
+    Validate all cleaned booking columns required for the as-of
+    cancellation-pattern experiment.
+    """
+
     if not config["enable_cancellation_test"]:
+        print(
+            "Cancellation-pattern experiment disabled."
+        )
         return
-    column = config["cancellation_timestamp_col"]
-    if not column:
-        raise ValueError(
-            "Cancellation testing is enabled but cancellation_timestamp_col "
-            "has not been set in get_non_price_config()."
-        )
-    if column not in bookings.columns:
+
+    configured_columns = {
+        "booking_id_col":
+            config["booking_id_col"],
+
+        "booking_created_timestamp_col":
+            config["booking_created_timestamp_col"],
+
+        "cancellation_timestamp_col":
+            config["cancellation_timestamp_col"],
+
+        "booking_entry_date_col":
+            config["booking_entry_date_col"],
+
+        "booking_exit_date_col":
+            config["booking_exit_date_col"],
+    }
+
+    missing = []
+
+    for config_name, column_name in configured_columns.items():
+
+        if not column_name:
+
+            missing.append(
+                f"{config_name}=None"
+            )
+
+        elif column_name not in bookings.columns:
+
+            missing.append(
+                f"{config_name}={column_name!r}"
+            )
+
+    if missing:
+
         raise KeyError(
-            f"Configured cancellation column {column!r} is not present. "
-            f"Available columns: {list(bookings.columns)}"
+            "Cancellation analysis cannot run because the following "
+            "configured booking columns were not found:\n\n"
+            +
+            "\n".join(
+                f"    {item}"
+                for item in missing
+            )
+            +
+            "\n\nAvailable cleaned booking columns:\n\n"
+            +
+            "\n".join(
+                f"    {column}"
+                for column in bookings.columns
+            )
         )
+
+    print()
+    print("Cancellation configuration validated:")
+
+    print(
+        f"    Booking ID: "
+        f"{config['booking_id_col']}"
+    )
+
+    print(
+        f"    Created timestamp: "
+        f"{config['booking_created_timestamp_col']}"
+    )
+
+    print(
+        f"    Cancellation timestamp: "
+        f"{config['cancellation_timestamp_col']}"
+    )
+
+    print(
+        f"    Entry target: "
+        f"{config['booking_entry_date_col']}"
+    )
+
+    print(
+        f"    Exit target: "
+        f"{config['booking_exit_date_col']}"
+    )
+
+# =============================================================================
+# 10A. AS-OF CANCELLATION-PATTERN FEATURES
+# =============================================================================
+
+def prepare_cancellation_booking_data(
+    bookings,
+    config,
+):
+    """
+    Prepare a cancellation-specific copy of the cleaned booking data.
+
+    This does not alter the Generation 1 bookings dataframe.
+    """
+
+    output = bookings.copy()
+
+    created_col = config[
+        "booking_created_timestamp_col"
+    ]
+
+    cancelled_col = config[
+        "cancellation_timestamp_col"
+    ]
+
+    entry_col = config[
+        "booking_entry_date_col"
+    ]
+
+    exit_col = config[
+        "booking_exit_date_col"
+    ]
+
+    output[created_col] = pd.to_datetime(
+        output[created_col],
+        errors="coerce",
+    )
+
+    output[cancelled_col] = pd.to_datetime(
+        output[cancelled_col],
+        errors="coerce",
+    )
+
+    output[entry_col] = pd.to_datetime(
+        output[entry_col],
+        errors="coerce",
+    ).dt.normalize()
+
+    output[exit_col] = pd.to_datetime(
+        output[exit_col],
+        errors="coerce",
+    ).dt.normalize()
+
+    return output
+
+
+def build_cancellation_features_for_flow(
+    component_table,
+    cancellation_bookings,
+    flow,
+    config,
+):
+    """
+    Build as-of cancellation metrics for ENTRY or EXIT snapshots.
+
+    A cancellation is counted only when:
+
+        createdAt <= cutoff_timestamp
+        cancelledAt <= cutoff_timestamp
+        planned entry/exit date == target_date
+
+    Therefore no future cancellation information is used.
+    """
+
+    created_col = config[
+        "booking_created_timestamp_col"
+    ]
+
+    cancelled_col = config[
+        "cancellation_timestamp_col"
+    ]
+
+    booking_id_col = config[
+        "booking_id_col"
+    ]
+
+    if flow == "entry":
+
+        target_col = config[
+            "booking_entry_date_col"
+        ]
+
+    else:
+
+        target_col = config[
+            "booking_exit_date_col"
+        ]
+
+    snapshots = component_table[
+        [
+            "target_date",
+            "horizon_days",
+            "cutoff_timestamp",
+        ]
+    ].drop_duplicates().copy()
+
+    snapshots["target_date"] = pd.to_datetime(
+        snapshots["target_date"],
+        errors="coerce",
+    ).dt.normalize()
+
+    snapshots["cutoff_timestamp"] = pd.to_datetime(
+        snapshots["cutoff_timestamp"],
+        errors="coerce",
+    )
+
+    booking_subset = cancellation_bookings[
+        [
+            booking_id_col,
+            created_col,
+            cancelled_col,
+            target_col,
+        ]
+    ].copy()
+
+    booking_subset = booking_subset.rename(
+        columns={
+            target_col: "target_date",
+        }
+    )
+
+    booking_subset["target_date"] = pd.to_datetime(
+        booking_subset["target_date"],
+        errors="coerce",
+    ).dt.normalize()
+
+    # Match each target-date booking with every forecast horizon tested
+    # for that same target date.
+    expanded = snapshots.merge(
+        booking_subset,
+        on="target_date",
+        how="left",
+    )
+
+    # The booking must have existed by the historical cutoff.
+    expanded["created_by_cutoff"] = (
+        expanded[created_col].notna()
+        &
+        expanded[created_col].le(
+            expanded["cutoff_timestamp"]
+        )
+    )
+
+    # The cancellation must also have been known by the cutoff.
+    expanded["cancelled_by_cutoff"] = (
+        expanded["created_by_cutoff"]
+        &
+        expanded[cancelled_col].notna()
+        &
+        expanded[cancelled_col].le(
+            expanded["cutoff_timestamp"]
+        )
+    )
+
+    for window_days in config[
+        "cancellation_windows_days"
+    ]:
+
+        window_start = (
+            expanded["cutoff_timestamp"]
+            -
+            pd.Timedelta(
+                days=window_days
+            )
+        )
+
+        expanded[
+            f"cancelled_last_{window_days}d"
+        ] = (
+            expanded["cancelled_by_cutoff"]
+            &
+            expanded[cancelled_col].gt(
+                window_start
+            )
+        )
+
+    aggregation = {
+        "created_by_cutoff": "sum",
+        "cancelled_by_cutoff": "sum",
+    }
+
+    for window_days in config[
+        "cancellation_windows_days"
+    ]:
+
+        aggregation[
+            f"cancelled_last_{window_days}d"
+        ] = "sum"
+
+    summary = (
+        expanded
+        .groupby(
+            [
+                "target_date",
+                "horizon_days",
+            ],
+            as_index=False,
+        )
+        .agg(aggregation)
+    )
+
+    summary = summary.rename(
+        columns={
+            "created_by_cutoff":
+                f"{flow}_gross_created_by_cutoff",
+
+            "cancelled_by_cutoff":
+                f"{flow}_cancelled_by_cutoff",
+        }
+    )
+
+    gross_col = (
+        f"{flow}_gross_created_by_cutoff"
+    )
+
+    cumulative_cancelled_col = (
+        f"{flow}_cancelled_by_cutoff"
+    )
+
+    summary[
+        f"{flow}_cumulative_cancellation_rate"
+    ] = (
+        summary[cumulative_cancelled_col]
+        /
+        summary[gross_col].replace(
+            0,
+            np.nan,
+        )
+    ).fillna(0.0)
+
+    for window_days in config[
+        "cancellation_windows_days"
+    ]:
+
+        source_col = (
+            f"cancelled_last_{window_days}d"
+        )
+
+        count_col = (
+            f"{flow}_cancellations_last_"
+            f"{window_days}d"
+        )
+
+        rate_col = (
+            f"{flow}_cancellation_rate_last_"
+            f"{window_days}d"
+        )
+
+        summary = summary.rename(
+            columns={
+                source_col: count_col,
+            }
+        )
+
+        summary[rate_col] = (
+            summary[count_col]
+            /
+            summary[gross_col].replace(
+                0,
+                np.nan,
+            )
+        ).fillna(0.0)
+
+    return summary
+
+
+def add_cancellation_features(
+    component_table,
+    bookings,
+    config,
+):
+    """
+    Add ENTRY and EXIT as-of cancellation features.
+
+    These are contextual features. They do not replace Generation 1's
+    established active-booking logic.
+    """
+
+    if not config["enable_cancellation_test"]:
+
+        return component_table.copy()
+
+    print()
+    print(
+        "Building as-of cancellation-pattern features..."
+    )
+
+    start_time = time.perf_counter()
+
+    cancellation_bookings = (
+        prepare_cancellation_booking_data(
+            bookings=bookings,
+            config=config,
+        )
+    )
+
+    entry_features = (
+        build_cancellation_features_for_flow(
+            component_table=component_table,
+            cancellation_bookings=(
+                cancellation_bookings
+            ),
+            flow="entry",
+            config=config,
+        )
+    )
+
+    exit_features = (
+        build_cancellation_features_for_flow(
+            component_table=component_table,
+            cancellation_bookings=(
+                cancellation_bookings
+            ),
+            flow="exit",
+            config=config,
+        )
+    )
+
+    output = component_table.merge(
+        entry_features,
+        on=[
+            "target_date",
+            "horizon_days",
+        ],
+        how="left",
+        validate="one_to_one",
+    )
+
+    output = output.merge(
+        exit_features,
+        on=[
+            "target_date",
+            "horizon_days",
+        ],
+        how="left",
+        validate="one_to_one",
+    )
+
+    cancellation_columns = [
+        column
+        for column in output.columns
+        if (
+            "cancellation" in column
+            or "cancelled_by_cutoff" in column
+            or "gross_created_by_cutoff" in column
+        )
+    ]
+
+    output[cancellation_columns] = (
+        output[cancellation_columns]
+        .fillna(0.0)
+    )
+
+    print(
+        "Completed as-of cancellation features "
+        f"[{time.perf_counter() - start_time:.2f}s]"
+    )
+
+    return output
+
+
+def apply_training_cancellation_bands(
+    training,
+    validation,
+    test,
+    flow,
+    config,
+):
+    """
+    Classify cancellation activity relative to training-period behaviour.
+
+    Training-period medians are used for training, validation, and test.
+    Validation and test dates do not contribute to their own band definitions.
+    """
+
+    window_days = config[
+        "primary_cancellation_window_days"
+    ]
+
+    cancellation_rate_col = (
+        f"{flow}_cancellation_rate_last_"
+        f"{window_days}d"
+    )
+
+    relative_col = (
+        f"{flow}_cancellation_rate_relative"
+    )
+
+    band_col = (
+        f"{flow}_cancellation_band"
+    )
+
+    training_medians = (
+        training
+        .groupby(
+            [
+                "horizon_days",
+                "weekday",
+            ],
+            dropna=False,
+        )[cancellation_rate_col]
+        .median()
+        .rename(
+            "training_cancellation_median"
+        )
+        .reset_index()
+    )
+
+    outputs = []
+
+    for frame in (
+        training,
+        validation,
+        test,
+    ):
+
+        item = frame.merge(
+            training_medians,
+            on=[
+                "horizon_days",
+                "weekday",
+            ],
+            how="left",
+            validate="many_to_one",
+        )
+
+        denominator = item[
+            "training_cancellation_median"
+        ].abs().clip(
+            lower=0.0001
+        )
+
+        item[relative_col] = (
+            item[cancellation_rate_col]
+            -
+            item[
+                "training_cancellation_median"
+            ]
+        ) / denominator
+
+        item[band_col] = pd.cut(
+            item[relative_col],
+            bins=config[
+                "cancellation_rate_bins"
+            ],
+            labels=config[
+                "cancellation_rate_labels"
+            ],
+            include_lowest=True,
+        ).astype(
+            "object"
+        ).fillna(
+            "unknown"
+        )
+
+        item = item.drop(
+            columns=[
+                "training_cancellation_median"
+            ]
+        )
+
+        outputs.append(item)
+
+    return tuple(outputs)
 
 
 # =============================================================================
@@ -690,6 +1413,21 @@ def get_experiments():
             "exit": [
                 "exit_booking_shrunk",
                 "exit_booking_pace_adjusted",
+                "exit_duration",
+                "exit_weekday_selected",
+            ],
+        },
+        "ADD_CANCELLATION": {
+            "entry": [
+                "entry_booking_shrunk",
+                "entry_booking_cancellation_adjusted",
+                "entry_weekday_selected",
+                "entry_month",
+            ],
+
+            "exit": [
+                "exit_booking_shrunk",
+                "exit_booking_cancellation_adjusted",
                 "exit_duration",
                 "exit_weekday_selected",
             ],
@@ -786,6 +1524,18 @@ def prepare_fold_candidates(
         config=config,
     )
 
+    if config["enable_cancellation_test"]:
+
+        training, validation, test = (
+            apply_training_cancellation_bands(
+                training=training,
+                validation=validation,
+                test=test,
+                flow=flow,
+                config=config,
+            )
+        )
+
     # Pace adjustment learned only from training data.
     pace_adjustments = fit_segment_adjustments(
         training=training,
@@ -809,7 +1559,93 @@ def prepare_fold_candidates(
                 output_col=f"{flow}_booking_pace_adjusted",
             )
         )
+
     training, validation, test = prepared
+
+    # -----------------------------------------------------------------
+    # Cancellation-pattern adjustment
+    # -----------------------------------------------------------------
+
+    if config["enable_cancellation_test"]:
+
+        cancellation_band_col = (
+            f"{flow}_cancellation_band"
+        )
+
+        cancellation_adjustments = (
+            fit_segment_adjustments(
+                training=training,
+                base_forecast_col=booking_col,
+                actual_col=actual_col,
+                segment_cols=[
+                    "horizon_days",
+                    "weekday",
+                    cancellation_band_col,
+                ],
+                minimum_observations=config[
+                    "minimum_cancellation_segment_observations"
+                ],
+                lower=config[
+                    "cancellation_adjustment_min"
+                ],
+                upper=config[
+                    "cancellation_adjustment_max"
+                ],
+            )
+        )
+
+        prepared = []
+
+        for frame in (
+            training,
+            validation,
+            test,
+        ):
+
+            prepared.append(
+                apply_segment_adjustment(
+                    frame=frame,
+                    base_forecast_col=booking_col,
+                    adjustment_table=(
+                        cancellation_adjustments
+                    ),
+                    segment_cols=[
+                        "horizon_days",
+                        "weekday",
+                        cancellation_band_col,
+                    ],
+                    output_col=(
+                        f"{flow}_booking_"
+                        f"cancellation_adjusted"
+                    ),
+                )
+            )
+
+        training, validation, test = prepared
+
+    else:
+
+        prepared = []
+
+        for frame in (
+            training,
+            validation,
+            test,
+        ):
+
+            item = frame.copy()
+
+            item[
+                f"{flow}_booking_"
+                f"cancellation_adjusted"
+            ] = item[booking_col]
+
+            prepared.append(item)
+
+        training, validation, test = prepared
+
+
+
 
     # Calendar adjustment learned only from training data.
     calendar_base = f"{flow}_month"
@@ -1157,18 +1993,18 @@ def export_results(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        performance.to_excel(writer, "Experiment Performance", index=False)
-        incremental.to_excel(writer, "Incremental Benefit", index=False)
-        fold_win_rate.to_excel(writer, "Fold Win Rate", index=False)
-        selected_weights.to_excel(writer, "Selected Weights", index=False)
+        performance.to_excel(excel_writer = writer, sheet_name= "Experiment Performance", index=False)
+        incremental.to_excel(excel_writer = writer, sheet_name= "Incremental Benefit", index=False)
+        fold_win_rate.to_excel(excel_writer = writer, sheet_name= "Fold Win Rate", index=False)
+        selected_weights.to_excel(excel_writer = writer, sheet_name= "Selected Weights", index=False)
         historical_diagnostics.to_excel(
-            writer, "Historical Window Tests", index=False
+            excel_writer = writer, sheet_name= "Historical Window Tests", index=False
         )
-        folds.to_excel(writer, "Rolling Folds", index=False)
-        predictions.to_excel(writer, "Out of Sample Forecasts", index=False)
-        component_table.to_excel(writer, "Extended Components", index=False)
+        folds.to_excel(excel_writer = writer, sheet_name= "Rolling Folds", index=False)
+        predictions.to_excel(excel_writer = writer, sheet_name= "Out of Sample Forecasts", index=False)
+        component_table.to_excel(excel_writer = writer, sheet_name= "Extended Components", index=False)
         if not all_weight_tests.empty:
-            all_weight_tests.to_excel(writer, "All Weight Tests", index=False)
+            all_weight_tests.to_excel(excel_writer = writer, sheet_name= "All Weight Tests", index=False)
         format_workbook(writer.book)
     return path
 
@@ -1232,6 +2068,19 @@ if __name__ == "__main__":
 
     component_table = add_booking_pace_features(component_table, config)
     timer = step(timer, "Added booking-pace features")
+
+    if config["enable_cancellation_test"]:
+
+        component_table = add_cancellation_features(
+            component_table=component_table,
+            bookings=model_data["bookings"],
+            config=config,
+        )
+
+        timer = step(
+            timer,
+            "Added as-of cancellation-pattern features",
+        )
 
     calendar = build_calendar_table(
         config["simulation_start"],

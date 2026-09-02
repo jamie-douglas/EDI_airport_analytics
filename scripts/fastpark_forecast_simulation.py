@@ -17,7 +17,6 @@ eventually occurred.
 
 This is therefore a HISTORICAL FORECAST BACKTEST / MODEL TOURNAMENT.
 
-It is not a Monte Carlo simulation.
 
 ----------------------------------------------------------------------
 TEST PERIOD
