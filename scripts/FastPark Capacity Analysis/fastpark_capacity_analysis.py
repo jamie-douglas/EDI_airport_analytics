@@ -314,6 +314,7 @@ def load_full_year_profile_data(engine):
         "ExpectedArrivalDate" >= DATEADD(year, -1, GETDATE())
         AND "ExpectedArrivalDate" < GETDATE()
         AND "CheckInStarted" IS NOT NULL
+        AND "ActualCheckedOutDate" IS NOT NULL
     """
     profile_raw = pd.read_sql(profile_sql, con=engine)
     profile_raw["CheckInStarted"] = pd.to_datetime(profile_raw["CheckInStarted"])
@@ -404,8 +405,8 @@ def get_future_demand_data(source_option="A", profile_counts=None, engine=None):
         
     elif source_option == "B":
         print("\n--- Reading Monthly Transaction Forecast from Excel ---")
-        excel_path = SCRIPT_DIR / "transaction_forecast.xlsx"
-        monthly_df = pd.read_excel(excel_path)
+        excel_path = r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv"
+        monthly_df = pd.read_csv(excel_path)
         monthly_df["ParsedDate"] = pd.to_datetime(monthly_df["Month"], format="%y-%b")
         return monthly_df
     
@@ -448,7 +449,9 @@ def disaggregate_monthly_to_timestamps(monthly_df, profile_counts, historical_df
             if len(matching_dates) == 0:
                 continue
                 
-            count_per_date = max(1, p_row["allocated_count"] // len(matching_dates))
+            count_per_date = int(
+                max(1, p_row["allocated_count"] // len(matching_dates))
+            )
             
             for d in matching_dates:
                 timestamp = d.replace(hour=int(p_row["hour"]), minute=int(p_row["minute"]))
@@ -472,7 +475,7 @@ def disaggregate_monthly_to_timestamps(monthly_df, profile_counts, historical_df
 # =========================================================
 
 # Choose Data Option: 'A' (Database Hourly Forecast) or 'B' (Excel Monthly Transactions)
-FORECAST_SOURCE_OPTION = "B" 
+FORECAST_SOURCE_OPTION = "A" 
 
 # 1. Load full year of historical data for accurate profiling and trip sampling
 full_year_history_df = load_full_year_profile_data(engine=engine)
