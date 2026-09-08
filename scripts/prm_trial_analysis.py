@@ -34,12 +34,15 @@ from modules.domain.prm.efficiency import (
 # CONFIGURATION
 # ============================================================
 
-ANALYSIS_START = "2026-07-20"
+ANALYSIS_START = "2025-08-26"
 
 OPERATING_START = "14:00"
 OPERATING_END = "18:00"
 
-WEEKDAY_NUMBERS = [0, 1, 2, 3, 4]
+TRIAL_START = "2026-08-25"
+TRIAL_END = "2026-08-29"
+
+WEEKDAY_NUMBERS = [ 1, 2, 3, 4]
 # Monday = 0
 # Tuesday = 1
 # Wednesday = 2
@@ -474,6 +477,110 @@ def operating_window_vehicle_utilisation(
         rolling_window_df,
     )
 
+def build_kpi_summary(df, weeks):
+
+
+    metrics = {}
+
+    metrics["PRM Jobs Per Week"] = (
+        len(df) / weeks
+    )
+
+    metrics["Unique Passengers Per Week"] = (
+        df["Passenger ID"].nunique()
+        / weeks
+    )
+
+    metrics["Average Service Time (mins)"] = (
+        df["Service Minutes"].mean()
+    )
+
+    metrics["Average Agent Service Time (mins)"] = (
+        df.groupby("Employee")["Service Minutes"]
+        .mean()
+        .mean()
+    )
+
+    minibus = (
+        df["Vehicle Type"] == "Mini Bus"
+    )
+
+    ambulift = (
+        df["Vehicle Type"] == "Ambulift"
+    )
+
+    metrics["Minibus Journeys"] = minibus.sum() / weeks
+
+    metrics["Minibus Passengers Per Week"] = (
+        df.loc[minibus, "Passenger ID"]
+        .nunique()
+        / weeks
+    )
+
+    metrics["Passengers Per Minibus Journey Per Week"] = (
+        metrics["Minibus Passengers Per Week"]
+        / max(metrics["Minibus Journeys"], 1)
+    )
+
+    metrics["Ambulift Jobs Per Week"] = ambulift.sum() / weeks
+
+    metrics["Ambulift Hours Per Week"] = (
+        df.loc[ambulift, "Service Minutes"]
+        .sum()
+        / 60
+        /weeks
+    )
+
+    metrics["WCHR Ambulift Jobs Per Week"] = (
+        len(
+            df.loc[
+                ambulift
+                & (df["SSR Code"] == "WCHR")
+            ]
+        ) 
+        / weeks
+    )
+
+    wchr_jobs = len(
+        df.loc[
+            df["SSR Code"] == "WCHR"
+        ]
+    )
+
+    metrics["WCHR Using Ambulift %"] = (
+        len(
+            df.loc[
+                (df["SSR Code"] == "WCHR")
+                & (df["Vehicle Type"] == "Ambulift")
+            ]
+        )
+        / max(wchr_jobs, 1)
+        * 100
+    )
+
+    arrivals = (
+        df["A/D"] == "A"
+    )
+
+    arrival_df = df.loc[arrivals].copy()
+
+    if len(arrival_df):
+
+        arrival_df["Arrival Gap"] = (
+            arrival_df["Job Start Time"]
+            - arrival_df["Scheduled Flight Time"]
+        ).dt.total_seconds() / 60
+
+        for target in [5,10,15,20,30]:
+
+            metrics[f"ECAC <= {target} mins %"] = (
+                arrival_df["Arrival Gap"]
+                .between(0, target)
+                .mean()
+                * 100
+            )
+
+    return metrics
 
 # ============================================================
 # MAIN ANALYSIS
@@ -541,6 +648,74 @@ if __name__ == "__main__":
         end_time=OPERATING_END,
     )
 
+    trial_mask = (
+        (operation_df["Analysis Date"] >= pd.Timestamp(TRIAL_START))
+        & (operation_df["Analysis Date"] < pd.Timestamp(TRIAL_END))
+    )
+
+    trial_df = operation_df.loc[trial_mask].copy()
+
+    baseline_df = operation_df.loc[
+        ~trial_mask
+    ].copy()
+
+    for df in [baseline_df, trial_df]:
+
+        df["Service Minutes"] = (
+            df["Job End Time"]
+            - df["Job Start Time"]
+        ).dt.total_seconds() / 60
+
+    baseline_metrics = build_kpi_summary(
+        baseline_df,
+        weeks=52
+    )
+
+    trial_metrics = build_kpi_summary(
+        trial_df,
+        weeks=1
+    )
+
+    comparison_df = pd.DataFrame({
+        "Metric": baseline_metrics.keys(),
+        "Baseline": baseline_metrics.values(),
+    })
+
+
+
+    comparison_df["Trial"] = (
+        comparison_df["Metric"]
+        .map(trial_metrics)
+    )
+
+    comparison_df["Difference"] = (
+        comparison_df["Trial"]
+        - comparison_df["Baseline"]
+    )
+
+    comparison_df["Difference %"] = (
+        comparison_df["Difference"]
+        / comparison_df["Baseline"]
+        * 100
+    )
+
+    ambulift_release = (
+            baseline_metrics["Ambulift Hours Per Week"]
+            - trial_metrics["Ambulift Hours Per Week"]
+        )
+
+    comparison_df.loc[len(comparison_df)] = [
+        "Ambulift Hours Released Per Week",
+        baseline_metrics["Ambulift Hours Per Week"],
+        trial_metrics["Ambulift Hours Per Week"],
+        ambulift_release,
+        (
+            ambulift_release
+            / baseline_metrics["Ambulift Hours Per Week"]
+            * 100
+        )
+    ]
+
     t2 = step(
         t1,
         (
@@ -598,28 +773,50 @@ if __name__ == "__main__":
         "and utilisation..."
     )
 
-    vehicle_service_times = vehicle_job_service_time(
-        operation_df
+    baseline_vehicle_service_times = (
+        vehicle_job_service_time(
+            baseline_df
+        )
+    )
+
+    trial_vehicle_service_times = (
+        vehicle_job_service_time(
+            trial_df
+        )
     )
 
     t4 = step(
         t3,
         (
             "Vehicle Type Service Times Calculated:\n"
-            f"{vehicle_service_times.to_string(index=False)}"
+            f"{baseline_vehicle_service_times.to_string(index=False)}"
         ),
     )
 
     (
-        utilisation_by_time,
-        utilisation_by_time_pivot,
-        average_rolling_hour_usage,
-        peak_rolling_hours,
-        vehicle_utilisation,
-        rolling_hour_statistics,
-        rolling_window_detail,
+        baseline_utilisation_by_time,
+        baseline_utilisation_by_time_pivot,
+        baseline_average_rolling_hour_usage,
+        baseline_peak_rolling_hours,
+        baseline_vehicle_utilisation,
+        baseline_rolling_hour_statistics,
+        baseline_rolling_window_detail,
     ) = operating_window_vehicle_utilisation(
-        operation_df,
+        baseline_df,
+        start_time=OPERATING_START,
+        end_time=OPERATING_END,
+    )
+
+    (
+        trial_utilisation_by_time,
+        trial_utilisation_by_time_pivot,
+        trial_average_rolling_hour_usage,
+        trial_peak_rolling_hours,
+        trial_vehicle_utilisation,
+        trial_rolling_hour_statistics,
+        trial_rolling_window_detail,
+    ) = operating_window_vehicle_utilisation(
+        trial_df,
         start_time=OPERATING_START,
         end_time=OPERATING_END,
     )
@@ -628,7 +825,7 @@ if __name__ == "__main__":
         t4,
         (
             "Vehicle Utilisation Calculated:\n"
-            f"{vehicle_utilisation.to_string(index=False)}"
+            f"{baseline_vehicle_utilisation.to_string(index=False)}"
         ),
     )
 
@@ -638,7 +835,7 @@ if __name__ == "__main__":
     )
 
     print(
-        utilisation_by_time_pivot.to_string(
+        baseline_utilisation_by_time_pivot.to_string(
             index=False
         )
     )
@@ -649,7 +846,7 @@ if __name__ == "__main__":
     )
 
     print(
-        average_rolling_hour_usage.to_string(
+        baseline_average_rolling_hour_usage.to_string(
             index=False
         )
     )
@@ -660,7 +857,7 @@ if __name__ == "__main__":
     )
 
     print(
-        peak_rolling_hours.to_string(
+        baseline_peak_rolling_hours.to_string(
             index=False
         )
     )
@@ -670,7 +867,7 @@ if __name__ == "__main__":
     )
 
     print(
-        vehicle_utilisation.to_string(
+        baseline_vehicle_utilisation.to_string(
             index=False
         )
     )
@@ -681,7 +878,7 @@ if __name__ == "__main__":
     )
 
     print(
-        rolling_hour_statistics.to_string(
+        baseline_rolling_hour_statistics.to_string(
             index=False
         )
     )
@@ -695,15 +892,23 @@ if __name__ == "__main__":
         "by vehicle type..."
     )
 
-    ssr_vehicle_usage = ssr_usage_by_vehicle_type(
-        operation_df
+    baseline_ssr_vehicle_usage = (
+        ssr_usage_by_vehicle_type(
+            baseline_df
+        )
+    )
+
+    trial_ssr_vehicle_usage = (
+        ssr_usage_by_vehicle_type(
+            trial_df
+        )
     )
 
     t6 = step(
         t5,
         (
             "SSR Use by Vehicle Type Calculated:\n"
-            f"{ssr_vehicle_usage.to_string(index=False)}"
+            f"{baseline_ssr_vehicle_usage.to_string(index=False)}"
         ),
     )
 
@@ -713,7 +918,7 @@ if __name__ == "__main__":
         "============================================================\n"
     )
 
-    for vehicle_type, subset in ssr_vehicle_usage.groupby(
+    for vehicle_type, subset in baseline_ssr_vehicle_usage.groupby(
         "Vehicle Type",
         sort=True,
     ):
@@ -811,45 +1016,93 @@ if __name__ == "__main__":
             index=False
         )
 
-        vehicle_service_times.to_excel(
+        baseline_vehicle_service_times.to_excel(
             writer,
-            sheet_name="Vehicle Service Times",
+            sheet_name="Vehicle Service Baseline",
             index=False
         )
 
-        vehicle_utilisation.to_excel(
+        trial_vehicle_service_times.to_excel(
             writer,
-            sheet_name="Vehicle Utilisation",
+            sheet_name="Vehicle Service Trial",
             index=False
         )
 
-        rolling_hour_statistics.to_excel(
+        baseline_vehicle_utilisation.to_excel(
             writer,
-            sheet_name="Rolling Hour Stats",
+            sheet_name="Vehicle Utilisation Baseline",
             index=False
         )
 
-        average_rolling_hour_usage.to_excel(
+        trial_vehicle_utilisation.to_excel(
             writer,
-            sheet_name="Avg Rolling Hour Usage",
+            sheet_name="Vehicle Utilisation Trial",
             index=False
         )
 
-        utilisation_by_time_pivot.to_excel(
+        baseline_rolling_hour_statistics.to_excel(
             writer,
-            sheet_name="Rolling Hour Profile",
+            sheet_name="Rolling Hour Stats Baseline",
             index=False
         )
 
-        peak_rolling_hours.to_excel(
+        trial_rolling_hour_statistics.to_excel(
             writer,
-            sheet_name="Peak Rolling Hours",
+            sheet_name="Rolling Hour Stats Trial",
             index=False
         )
 
-        ssr_vehicle_usage.to_excel(
+        baseline_average_rolling_hour_usage.to_excel(
             writer,
-            sheet_name="SSR by Vehicle",
+            sheet_name="Avg Rolling Hour Usage Baseline",
+            index=False
+        )
+
+        trial_average_rolling_hour_usage.to_excel(
+            writer,
+            sheet_name="Avg Rolling Hour Usage Trial",
+            index=False
+        )
+
+        baseline_utilisation_by_time_pivot.to_excel(
+            writer,
+            sheet_name="Rolling Hour Profile Baseline",
+            index=False
+        )
+
+        trial_utilisation_by_time_pivot.to_excel(
+            writer,
+            sheet_name="Rolling Hour Profile Trial",
+            index=False
+        )
+
+        baseline_peak_rolling_hours.to_excel(
+            writer,
+            sheet_name="Peak Rolling Hours Baseline",
+            index=False
+        )
+
+        trial_peak_rolling_hours.to_excel(
+            writer,
+            sheet_name="Peak Rolling Hours Trial",
+            index=False
+        )
+
+        baseline_ssr_vehicle_usage.to_excel(
+            writer,
+            sheet_name="SSR by Vehicle Baseline",
+            index=False
+        )
+
+        trial_ssr_vehicle_usage.to_excel(
+            writer,
+            sheet_name="SSR by Vehicle Trial",
+            index=False
+        )
+
+        comparison_df.to_excel(
+            writer,
+            sheet_name="Trial KPI Comparison",
             index=False
         )
 
