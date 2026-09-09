@@ -365,10 +365,118 @@ def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, pb_capaci
 
 
 # =========================================================
-# 4. KEY LOCKER DWELL, SENSITIVITY & MONTHLY BREACH AGGREGATOR
+# 4. ORIGINAL PHOTOBOOTH QUEUE & KIOSK SOLVER ANALYSIS
+# =========================================================
+def analyze_photobooth_queues(forecast_list, kiosk_sec, dwell_mins, iterations=10):
+    for label, arr_df, ext_df in forecast_list:
+        print("\n" + "=" * 70)
+        print(f"🚘 PHOTOBOOTH QUEUE & TRAFFIC NETWORK RISK: {label}")
+        print("=" * 70)
+        configs = [
+            ("Current Photobooths (2 Lanes - Barriered 37s)", 37.0, 2),
+            ("New Single Photobooth (1 Lane - 5s Clearance Headway)", 5.0, 1)
+        ]
+        for p_label, p_sec, p_cap in configs:
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=p_sec, 
+                    pb_capacity=p_cap, 
+                    kiosk_sec=kiosk_sec, 
+                    num_kiosks=5, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
+            jam_risk = np.mean([r['pb_jam'] for r in runs]) * 100
+            avg_pb_q = np.mean([r['max_pb_q'] for r in runs])
+            avg_hall = np.mean([r['max_hall_pop'] for r in runs])
+            hall_breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
+            print(f"  [{p_label}]")
+            print(f"    • Peak Photobooth Queue : {avg_pb_q:.1f} cars")
+            print(f"    • Road Network Jam Risk  : {jam_risk:.1f}% (Queue >= 10 cars)")
+            print(f"    • Downstream Hall Peak   : {avg_hall:.1f} people | Hall Breach Risk (>60): {hall_breach_risk:.1f}%\n")
+
+def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=10, hall_capacity=60):
+    for label, arr_df, ext_df in forecast_list:
+        print("\n" + "=" * 70)
+        print(f"🛠️ KIOSK HALL MITIGATION SOLVER: {label}")
+        print("=" * 70)
+        base_runs = [
+            run_monte_carlo_iteration(
+                arr_df, ext_df, 
+                pb_cust_sec=5.0, 
+                pb_capacity=1, 
+                kiosk_sec=base_kiosk_sec, 
+                num_kiosks=5, 
+                dwell_mins=dwell_mins
+            ) for _ in range(iterations)
+        ]
+        base_breach_risk = np.mean([r['hall_breach'] for r in base_runs]) * 100
+        base_avg_hall = np.mean([r['max_hall_pop'] for r in base_runs])
+
+        print(f"  [Baseline Check: 5 Kiosks @ {base_kiosk_sec:.1f}s]")
+        print(f"    • Peak Hall Pop : {base_avg_hall:.1f} / {hall_capacity} people")
+        print(f"    • Hall Breach Risk: {base_breach_risk:.1f}%")
+
+        if base_breach_risk == 0:
+            print(f"  ✅ NO BREACH DETECTED: System operates within capacity limit ({hall_capacity} people). Mitigation solver skipped.\n")
+            continue
+
+        print(f"\n  ⚠️ CAPACITY BREACH DETECTED ({base_breach_risk:.1f}% Risk): Evaluating Mitigations...\n")
+        
+        # Option A: Hardware Scaling
+        print("Option 1: Add Kiosk Hardware (holding average speed at 36s)...")
+        required_kiosks = 5
+        for k_count in range(6, 12):
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=5.0, 
+                    pb_capacity=1, 
+                    kiosk_sec=base_kiosk_sec, 
+                    num_kiosks=k_count, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
+            breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
+            avg_hall = np.mean([r['max_hall_pop'] for r in runs])
+            print(f"  • {k_count} Kiosks @ {base_kiosk_sec:.1f}s: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
+            if breach_risk == 0 and required_kiosks == 5:
+                required_kiosks = k_count
+                break
+
+        # Option B: Process Speed Optimization
+        print("\nOption 2: Optimize Transaction Speed (holding hardware at 5 Kiosks)...")
+        target_speed = base_kiosk_sec
+        for test_sec in range(int(base_kiosk_sec) - 2, 5, -2):
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=5.0, 
+                    pb_capacity=1, 
+                    kiosk_sec=test_sec, 
+                    num_kiosks=5, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
+            breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
+            avg_hall = np.mean([r['max_hall_pop'] for r in runs])
+            print(f"  • 5 Kiosks @ {test_sec}s avg: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
+            if breach_risk == 0:
+                target_speed = test_sec
+                break
+
+        print("\n" + "-" * 70)
+        print(f"💡 MITIGATION SUMMARY FOR {label}:")
+        print(f"    1. Hardware Solution : Increase kiosks from 5 to {required_kiosks}.")
+        print(f"    2. Process Solution  : Reduce check-in duration from {base_kiosk_sec:.1f}s to {target_speed}s.")
+        print("-" * 70)
+
+
+# =========================================================
+# 5. KEY LOCKER SENSITIVITY & NEW MONTHLY BREACH REPORT
 # =========================================================
 def extract_return_delay_distribution(actuals_df):
-    """Calculates return delay delta (mins) between actual checkout and expected return."""
     valid = actuals_df.dropna(subset=['ExpectedReturnDate', 'ActualCheckedOutDate']).copy()
     valid['delay_mins'] = (
         pd.to_datetime(valid['ActualCheckedOutDate']) - pd.to_datetime(valid['ExpectedReturnDate'])
@@ -376,7 +484,6 @@ def extract_return_delay_distribution(actuals_df):
     return valid['delay_mins'].clip(lower=-720, upper=2880).values
 
 def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mins=45):
-    """Calculates 1-minute key locker occupancy using sampled empirical return delays."""
     if ext_df.empty:
         return pd.DataFrame()
         
@@ -398,7 +505,6 @@ def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mi
     return pd.DataFrame({'timestamp': time_grid, 'lockers_occupied': occupied}).set_index('timestamp')
 
 def analyze_dual_key_locker_sensitivity(forecast_list, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297):
-    """Evaluates how key locker occupancy scales across different staff lead times."""
     delays = extract_return_delay_distribution(actuals_df)
     
     for label, _, ext_df in forecast_list:
@@ -429,37 +535,31 @@ def analyze_dual_key_locker_sensitivity(forecast_list, actuals_df, lead_time_opt
         print("=" * 70)
 
 def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, actuals_df, lead_time_mins=45):
-    """Evaluates 1-min instantaneous peaks vs hourly volumes to report monthly breach hours."""
     print("\n" + "=" * 80)
     print(f"📊 MONTHLY OPERATIONAL BREACH REPORT: {forecast_label}")
     print("=" * 80)
 
-    # 1. Hourly Volumes (Transaction Rates)
     hourly_arrivals = arr_df.set_index('arrival_time').resample('1h').size().to_frame('arr_tx_per_hr')
     
-    # 2. Key Locker Occupancy (1-min Grid -> Peak per hour)
     delays = extract_return_delay_distribution(actuals_df)
     locker_min = calculate_1min_key_locker_occupancy(ext_df, delays, lead_time_mins=lead_time_mins)
     locker_hourly = locker_min.resample('1h').max() if not locker_min.empty else pd.DataFrame()
 
-    # 3. Queue & Hall Simulation Logs (1-min Grid -> Peak per hour)
     if sim_logs:
         sim_df = pd.DataFrame(sim_logs).set_index('timestamp').resample('1min').max().resample('1h').max()
     else:
         sim_df = pd.DataFrame()
 
-    # 4. Join all metrics on 1-hour grid
     combined = hourly_arrivals.join(sim_df, how='outer').join(locker_hourly, how='outer').fillna(0)
     combined['Month'] = combined.index.to_period('M')
 
-    # 5. Aggregate Breach Hours (Instantaneous vs Throughput)
     monthly_summary = combined.groupby('Month').agg(
         Monitored_Hours=('arr_tx_per_hr', 'count'),
-        PB_Queue_Breach_Hrs=('pb_queue', lambda x: (x > 10).sum()),             # Instantaneous Queue (>10 cars)
-        PB_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 195).sum()),    # Hourly Throughput (>195 cars/hr)
-        Hall_Pop_Breach_Hrs=('hall_pop', lambda x: (x > 60).sum()),            # Instantaneous Population (>60 people)
-        Kiosk_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 670).sum()), # Hourly Throughput (>670 tx/hr)
-        Locker_Breach_Hrs=('lockers_occupied', lambda x: (x > 297).sum()),     # Instantaneous Occupancy (>297 lockers)
+        PB_Queue_Breach_Hrs=('pb_queue', lambda x: (x > 10).sum()),
+        PB_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 195).sum()),
+        Hall_Pop_Breach_Hrs=('hall_pop', lambda x: (x > 60).sum()),
+        Kiosk_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 670).sum()),
+        Locker_Breach_Hrs=('lockers_occupied', lambda x: (x > 297).sum()),
         Peak_Lockers_Needed=('lockers_occupied', 'max')
     ).reset_index()
 
@@ -469,15 +569,21 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
 
 
 # =========================================================
-# 5. SCRIPT EXECUTION
+# 6. SCRIPT EXECUTION (OLD OUTPUT + NEW MONTHLY REPORT)
 # =========================================================
 if __name__ == "__main__":
     ITERATIONS = 10 
-    
+
+    # 1. Run the Old Outputs First (Photobooth Queue & Kiosk Mitigation Solver)
+    analyze_photobooth_queues(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
+    run_dual_kiosk_solver(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
+    analyze_dual_key_locker_sensitivity(analysis_datasets, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297)
+
+    # 2. Run the New Monthly Breach Report Outputs Next
     for label, arr_df, ext_df in analysis_datasets:
         if not arr_df.empty:
             print("\n" + "=" * 80)
-            print(f"🎲 RUNNING MONTE CARLO SIMULATION ({ITERATIONS} ITERATIONS): {label}")
+            print(f"🎲 RUNNING MONTE CARLO SIMULATION & MONTHLY REPORT ({ITERATIONS} ITERATIONS): {label}")
             print("=" * 80)
             
             mc_results = []
@@ -495,13 +601,11 @@ if __name__ == "__main__":
                 )
                 mc_results.append(sim_res)
                 
-                # Retain representative simulation log with highest combined peak intensity
                 combined_peak = sim_res['max_pb_q'] + sim_res['max_hall_pop']
                 if combined_peak > max_combined_peak:
                     max_combined_peak = combined_peak
                     best_log_run = sim_res
 
-            # Aggregate Monte Carlo statistics across iterations
             jam_count = sum(1 for r in mc_results if r['pb_jam'])
             breach_count = sum(1 for r in mc_results if r['hall_breach'])
             avg_pb_q = np.mean([r['max_pb_q'] for r in mc_results])
@@ -512,9 +616,5 @@ if __name__ == "__main__":
             print(f"Mean Max Photobooth Queue: {avg_pb_q:.2f} vehicles")
             print(f"Mean Max Reception Hall Population: {avg_hall_pop:.2f} people")
 
-            # Generate downstream monthly operational breach report using peak iteration logs
             selected_logs = best_log_run['logs'] if best_log_run else []
             generate_monthly_breach_report(label, arr_df, ext_df, selected_logs, actuals_df)
-
-    # Key Locker Lead Time Sensitivity Analysis across all datasets
-    analyze_dual_key_locker_sensitivity(analysis_datasets, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297)
