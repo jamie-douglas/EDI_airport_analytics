@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 photobooth_path = SCRIPT_DIR / "Photobooth Inputs"
+forecast_b_csv_path = r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv"
 
 from modules.utils.db import get_engine
 
@@ -81,7 +82,7 @@ master_df = pd.merge(
 # Calculate Dynamic Baseline Metrics
 master_df["kiosk_duration_seconds"] = (master_df["CheckInEnded"] - master_df["CheckInStarted"]).dt.total_seconds()
 valid_kiosks = master_df[master_df["kiosk_duration_seconds"] > 0]["kiosk_duration_seconds"]
-mean_kiosk_sec = valid_kiosks.mean() if len(valid_kiosks) > 0 else 36.0
+mean_kiosk_sec = float(valid_kiosks.mean()) if len(valid_kiosks) > 0 else 36.0
 
 master_df["ferry_to_kiosk_dwell_mins"] = (master_df["CheckInStarted"] - master_df["customer_arrival_photobooth"]).dt.total_seconds() / 60.0
 valid_dwells = master_df[master_df["ferry_to_kiosk_dwell_mins"].between(0, 60)]["ferry_to_kiosk_dwell_mins"]
@@ -95,9 +96,8 @@ print(f"Dynamic Park & Walk Dwell Lag: {dynamic_dwell_mins:.1f} minutes\n")
 
 
 # =========================================================
-# 2. HISTORICAL DATASET & DUAL FORECAST DISAGGREGATION
+# 2. PROFILING & FORECAST DISAGGREGATION
 # =========================================================
-# Build Historical Actuals Dataframe
 historic_arrivals = pd.DataFrame({"arrival_time": actuals_df["CheckInStarted"].dropna()}).sort_values("arrival_time").reset_index(drop=True)
 historic_exits = pd.DataFrame({"exit_time": actuals_df["ActualCheckedOutDate"].dropna()}).sort_values("exit_time").reset_index(drop=True)
 
@@ -128,7 +128,6 @@ full_year_history_df = load_full_year_profile_data(engine)
 arrival_profile = build_profile(full_year_history_df, "CheckInStarted")
 exit_profile = build_profile(full_year_history_df, "ActualCheckedOutDate")
 
-# Forecast A Engine: 2-Month Daily/Hourly View
 def build_forecast_A(engine, arrival_profile, exit_profile):
     sql = """
     SELECT "IntervalStartDateTimeLocal", "Entries", "Exits"
@@ -169,66 +168,100 @@ def build_forecast_A(engine, arrival_profile, exit_profile):
 
     return pd.DataFrame({"arrival_time": arr_records}), pd.DataFrame({"exit_time": ext_records})
 
-# Forecast B Engine: Long-Term Monthly View
-def build_forecast_B(engine, arrival_profile, exit_profile):
-    sql = """
-    SELECT "Year", "Month", "Entries", "Exits"
-    FROM FastPark.v_ForecastMonthlyEntryandExits
-    WHERE ("Year" > YEAR(GETDATE())) OR ("Year" = YEAR(GETDATE()) AND "Month" >= MONTH(GETDATE()))
-    """
-    try:
-        df = pd.read_sql(sql, con=engine)
-    except Exception:
-        sql = "SELECT \"IntervalStartDateTimeLocal\", \"Entries\", \"Exits\" FROM FastPark.v_ForecastMonthlyEntryandExits"
-        df_raw = pd.read_sql(sql, con=engine)
-        df_raw["ts"] = pd.to_datetime(df_raw["IntervalStartDateTimeLocal"])
-        df = df_raw.groupby([df_raw["ts"].dt.year.rename("Year"), df_raw["ts"].dt.month.rename("Month")]).agg(
-            Entries=("Entries", "sum"), Exits=("Exits", "sum")
-        ).reset_index()
+def build_nested_profiles(history_df, time_col):
+    working = history_df.dropna(subset=[time_col]).copy()
+    working["month"] = working[time_col].dt.to_period("M")
+    working["day_of_month"] = working[time_col].dt.day
+    working["weekday"] = working[time_col].dt.dayofweek
+    working["hour"] = working[time_col].dt.hour
+    working["min15"] = (working[time_col].dt.minute // 15) * 15
+
+    dom_counts = working.groupby(["month", "day_of_month"]).size().reset_index(name="count")
+    dom_monthly_totals = dom_counts.groupby("month")["count"].transform("sum")
+    dom_counts["dom_prob"] = dom_counts["count"] / dom_monthly_totals
+    dom_profile = dom_counts.groupby("day_of_month")["dom_prob"].mean().reset_index()
+    dom_profile["dom_prob"] /= dom_profile["dom_prob"].sum()
+
+    m15_profile = working.groupby(["weekday", "hour", "min15"]).size().reset_index(name="count")
+    dow_totals = m15_profile.groupby("weekday")["count"].transform("sum")
+    m15_profile["m15_prob"] = m15_profile["count"] / dow_totals
+
+    return dom_profile, m15_profile
+
+def disaggregate_volume_to_1min(total_volume, day_date, m15_profile):
+    weekday = day_date.dayofweek
+    dow_p = m15_profile[m15_profile["weekday"] == weekday].copy()
+    
+    if dow_p.empty:
+        dow_p = m15_profile.groupby(["hour", "min15"])["m15_prob"].mean().reset_index()
+
+    dow_p["w"] = dow_p["m15_prob"] / dow_p["m15_prob"].sum()
+    raw_counts = total_volume * dow_p["w"]
+    int_counts = np.floor(raw_counts).astype(int)
+    remainder = int(total_volume - int_counts.sum())
+    
+    if remainder > 0:
+        top_indices = np.argsort((raw_counts - int_counts).values)[::-1][:remainder]
+        int_counts.iloc[top_indices] += 1
+
+    records = []
+    for (_, row), cnt in zip(dow_p.iterrows(), int_counts):
+        if cnt > 0:
+            block_start = day_date + pd.Timedelta(hours=int(row["hour"]), minutes=int(row["min15"]))
+            minute_offsets = np.random.randint(0, 15, size=cnt)
+            records.extend([block_start + pd.Timedelta(minutes=int(m)) for m in minute_offsets])
+
+    return records
+
+def build_forecast_B(csv_path, history_df):
+    if str(csv_path).endswith(('.xlsx', '.xls')):
+        monthly_df = pd.read_excel(csv_path)
+    else:
+        monthly_df = pd.read_csv(csv_path)
+
+    monthly_df["Month"] = pd.to_datetime(monthly_df["Month"], format="%y-%b")
+    
+    dom_arr_prof, m15_arr_prof = build_nested_profiles(history_df, "CheckInStarted")
+    dom_ext_prof, m15_ext_prof = build_nested_profiles(history_df, "ActualCheckedOutDate")
 
     arr_records, ext_records = [], []
-    for _, row in df.iterrows():
-        yr, mth = int(row["Year"]), int(row["Month"])
-        total_entries, total_exits = int(row["Entries"]), int(row["Exits"])
 
-        start_date = pd.Timestamp(year=yr, month=mth, day=1)
-        end_date = start_date + pd.offsets.MonthEnd(1) + pd.Timedelta(hours=23, minutes=59)
+    for _, row in monthly_df.iterrows():
+        total_tx = int(row["Transactions"])
+        m_start = row["Month"].replace(day=1)
+        days_in_month = pd.date_range(m_start, m_start + pd.offsets.MonthEnd(0), freq="D")
+        num_days = len(days_in_month)
 
-        time_grid = pd.date_range(start=start_date, end=end_date, freq="1min")
-        m_df = pd.DataFrame({"timestamp": time_grid})
-        m_df["week_of_month"] = (m_df["timestamp"].dt.day - 1) // 7 + 1
-        m_df["weekday"] = m_df["timestamp"].dt.dayofweek
-        m_df["hour"] = m_df["timestamp"].dt.hour
-        m_df["minute"] = m_df["timestamp"].dt.minute
+        valid_dom_arr = dom_arr_prof[dom_arr_prof["day_of_month"] <= num_days].copy()
+        valid_dom_arr["w"] = valid_dom_arr["dom_prob"] / valid_dom_arr["dom_prob"].sum()
+        daily_arr_volumes = np.floor(total_tx * valid_dom_arr["w"]).astype(int)
 
-        # Arrivals
-        m_arr = m_df.merge(arrival_profile, on=["week_of_month", "weekday", "hour", "minute"], how="left").fillna({"prob": 0.0})
-        if m_arr["prob"].sum() > 0:
-            weights = m_arr["prob"] / m_arr["prob"].sum()
-            counts = np.floor(total_entries * weights).astype(int)
-            diff = total_entries - counts.sum()
-            if diff > 0: counts.iloc[np.argsort(weights.values)[::-1][:diff]] += 1
-            arr_records.extend(m_arr["timestamp"].repeat(counts))
+        valid_dom_ext = dom_ext_prof[dom_ext_prof["day_of_month"] <= num_days].copy()
+        valid_dom_ext["w"] = valid_dom_ext["dom_prob"] / valid_dom_ext["dom_prob"].sum()
+        daily_ext_volumes = np.floor(total_tx * valid_dom_ext["w"]).astype(int)
 
-        # Exits
-        m_ext = m_df.merge(exit_profile, on=["week_of_month", "weekday", "hour", "minute"], how="left").fillna({"prob": 0.0})
-        if m_ext["prob"].sum() > 0:
-            weights = m_ext["prob"] / m_ext["prob"].sum()
-            counts = np.floor(total_exits * weights).astype(int)
-            diff = total_exits - counts.sum()
-            if diff > 0: counts.iloc[np.argsort(weights.values)[::-1][:diff]] += 1
-            ext_records.extend(m_ext["timestamp"].repeat(counts))
+        for idx, day in enumerate(days_in_month):
+            v_arr = daily_arr_volumes.iloc[idx] if idx < len(daily_arr_volumes) else 0
+            v_ext = daily_ext_volumes.iloc[idx] if idx < len(daily_ext_volumes) else 0
 
-    return pd.DataFrame({"arrival_time": arr_records}), pd.DataFrame({"exit_time": ext_records})
+            if v_arr > 0:
+                arr_records.extend(disaggregate_volume_to_1min(v_arr, day, m15_arr_prof))
+            if v_ext > 0:
+                ext_records.extend(disaggregate_volume_to_1min(v_ext, day, m15_ext_prof))
+
+    df_arr = pd.DataFrame({"arrival_time": arr_records}).sort_values("arrival_time").reset_index(drop=True)
+    df_ext = pd.DataFrame({"exit_time": ext_records}).sort_values("exit_time").reset_index(drop=True)
+
+    return df_arr, df_ext
 
 print("Loading Historical Actuals...")
-print("Disaggregating Forecast A (Short-Term 2-Month Daily)...")
+print("Disaggregating Forecast A (Short-Term Hourly View via SQL)...")
 future_arrivals_A, future_exits_A = build_forecast_A(engine, arrival_profile, exit_profile)
 
-print("Disaggregating Forecast B (Long-Term Monthly)...")
-future_arrivals_B, future_exits_B = build_forecast_B(engine, arrival_profile, exit_profile)
+print("Disaggregating Forecast B (Long-Term Monthly File)...")
+# FIX: Pass full_year_history_df instead of profile DataFrames
+future_arrivals_B, future_exits_B = build_forecast_B(forecast_b_csv_path, full_year_history_df)
 
-# Master Analysis Datasets (Historics + Forecast A + Forecast B)
 analysis_datasets = [
     ("Historical Actuals (Peak Periods)", historic_arrivals, historic_exits),
     ("Forecast A (Short-Term 2-Month Daily)", future_arrivals_A, future_exits_A),
@@ -283,7 +316,7 @@ def run_pipeline_day(env, events_df, photobooths, kiosks, pb_cust_sec, kiosk_sec
             
         previous_time = row['sim_seconds']
 
-def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, kiosk_sec=36.0, num_kiosks=5, dwell_mins=5.0):
+def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, pb_capacity=2, kiosk_sec=36.0, num_kiosks=5, dwell_mins=5.0):
     df_cust = arrivals_df.copy()
     df_cust.rename(columns={'arrival_time': 'timestamp'}, inplace=True)
     df_cust['service_sec'] = pb_cust_sec
@@ -295,14 +328,15 @@ def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, kiosk_sec
     df_staff['is_staff'] = True
     
     offsets = np.random.randint(60, 120, size=len(df_staff))
-    df_staff['timestamp'] = df_staff['timestamp'] - pd.to_timedelta(offsets, unit='m')
+    # FIX: Updated unit='m' to unit='min'
+    df_staff['timestamp'] = df_staff['timestamp'] - pd.to_timedelta(offsets, unit='min')
 
     sim_events = pd.concat([df_cust, df_staff]).sort_values('timestamp').reset_index(drop=True)
     start_time = sim_events['timestamp'].min()
     sim_events['sim_seconds'] = (sim_events['timestamp'] - start_time).dt.total_seconds()
 
     env = simpy.Environment()
-    photobooths = simpy.Resource(env, capacity=2)
+    photobooths = simpy.Resource(env, capacity=pb_capacity)
     kiosks = simpy.Resource(env, capacity=num_kiosks)
     logs = {'pb_queue': [], 'kiosk_queue': [], 'hall_pop': []}
     
@@ -325,12 +359,21 @@ def analyze_photobooth_queues(forecast_list, kiosk_sec, dwell_mins, iterations=1
         print("=" * 70)
 
         configs = [
-            ("Old/Current Photobooths (Barriered - 37s)", 37.0),
-            ("Zero-Barrier Photobooths (Free-Flow - 0s)", 0.0)
+            ("Current Photobooths (2 Lanes - Barriered 37s)", 37.0, 2),
+            ("New Single Photobooth (1 Lane - 5s Clearance Headway)", 5.0, 1)
         ]
 
-        for p_label, p_sec in configs:
-            runs = [run_monte_carlo_iteration(arr_df, ext_df, pb_cust_sec=p_sec, kiosk_sec=kiosk_sec, num_kiosks=5, dwell_mins=dwell_mins) for _ in range(iterations)]
+        for p_label, p_sec, p_cap in configs:
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=p_sec, 
+                    pb_capacity=p_cap, 
+                    kiosk_sec=kiosk_sec, 
+                    num_kiosks=5, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
             jam_risk = np.mean([r['pb_jam'] for r in runs]) * 100
             avg_pb_q = np.mean([r['max_pb_q'] for r in runs])
             avg_hall = np.mean([r['max_hall_pop'] for r in runs])
@@ -341,34 +384,75 @@ def analyze_photobooth_queues(forecast_list, kiosk_sec, dwell_mins, iterations=1
             print(f"    • Road Network Jam Risk  : {jam_risk:.1f}% (Queue >= 10 cars)")
             print(f"    • Downstream Hall Peak   : {avg_hall:.1f} people | Hall Breach Risk (>60): {hall_breach_risk:.1f}%\n")
 
-analyze_photobooth_queues(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins)
-
 
 # =========================================================
 # 5. KIOSK MITIGATION SOLVER (ZERO-BARRIER SETUP)
 # =========================================================
-def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=100):
+def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=100, hall_capacity=60):
     for label, arr_df, ext_df in forecast_list:
         print("\n" + "=" * 70)
-        print(f"🛠️ KIOSK HALL MITIGATION SOLVER (ZERO-BARRIER): {label}")
+        print(f"🛠️ KIOSK HALL MITIGATION SOLVER: {label}")
         print("=" * 70)
 
-        # 1. Hardware Scaling
+        base_runs = [
+            run_monte_carlo_iteration(
+                arr_df, ext_df, 
+                pb_cust_sec=5.0, 
+                pb_capacity=1, 
+                kiosk_sec=base_kiosk_sec, 
+                num_kiosks=5, 
+                dwell_mins=dwell_mins
+            ) for _ in range(iterations)
+        ]
+        
+        base_breach_risk = np.mean([r['hall_breach'] for r in base_runs]) * 100
+        base_avg_hall = np.mean([r['max_hall_pop'] for r in base_runs])
+
+        print(f"  [Baseline Check: 5 Kiosks @ {base_kiosk_sec:.1f}s]")
+        print(f"    • Peak Hall Pop : {base_avg_hall:.1f} / {hall_capacity} people")
+        print(f"    • Hall Breach Risk: {base_breach_risk:.1f}%")
+
+        if base_breach_risk == 0:
+            print(f"  ✅ NO BREACH DETECTED: System operates within capacity limit ({hall_capacity} people). Mitigation solver skipped.\n")
+            continue
+
+        print(f"\n  ⚠️ CAPACITY BREACH DETECTED ({base_breach_risk:.1f}% Risk): Evaluating Mitigations...\n")
+
+        # Option A: Hardware Scaling
         print("Option 1: Add Kiosk Hardware (holding average speed at 36s)...")
         required_kiosks = 5
-        for k_count in range(5, 12):
-            runs = [run_monte_carlo_iteration(arr_df, ext_df, pb_cust_sec=0.0, kiosk_sec=base_kiosk_sec, num_kiosks=k_count, dwell_mins=dwell_mins) for _ in range(iterations)]
+        for k_count in range(6, 12):
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=5.0, 
+                    pb_capacity=1, 
+                    kiosk_sec=base_kiosk_sec, 
+                    num_kiosks=k_count, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
             breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
             avg_hall = np.mean([r['max_hall_pop'] for r in runs])
             print(f"  • {k_count} Kiosks @ {base_kiosk_sec:.1f}s: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
             if breach_risk == 0 and required_kiosks == 5:
                 required_kiosks = k_count
+                break
 
-        # 2. Speed Optimization
+        # Option B: Process Speed Optimization
         print("\nOption 2: Optimize Transaction Speed (holding hardware at 5 Kiosks)...")
         target_speed = base_kiosk_sec
-        for test_sec in range(int(base_kiosk_sec), 5, -5):
-            runs = [run_monte_carlo_iteration(arr_df, ext_df, pb_cust_sec=0.0, kiosk_sec=test_sec, num_kiosks=5, dwell_mins=dwell_mins) for _ in range(iterations)]
+        for test_sec in range(int(base_kiosk_sec) - 2, 5, -2):
+            runs = [
+                run_monte_carlo_iteration(
+                    arr_df, ext_df, 
+                    pb_cust_sec=5.0, 
+                    pb_capacity=1, 
+                    kiosk_sec=test_sec, 
+                    num_kiosks=5, 
+                    dwell_mins=dwell_mins
+                ) for _ in range(iterations)
+            ]
             breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
             avg_hall = np.mean([r['max_hall_pop'] for r in runs])
             print(f"  • 5 Kiosks @ {test_sec}s avg: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
@@ -378,11 +462,9 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
 
         print("\n" + "-" * 70)
         print(f"💡 MITIGATION SUMMARY FOR {label}:")
-        print(f"   1. Hardware Solution : Add kiosks (increase from 5 to {required_kiosks}).")
-        print(f"   2. Process Solution  : Reduce check-in duration from {base_kiosk_sec:.1f}s down to {target_speed}s.")
+        print(f"    1. Hardware Solution : Increase kiosks from 5 to {required_kiosks}.")
+        print(f"    2. Process Solution  : Reduce check-in duration from {base_kiosk_sec:.1f}s to {target_speed}s.")
         print("-" * 70)
-
-run_dual_kiosk_solver(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins)
 
 
 # =========================================================
@@ -418,4 +500,14 @@ def analyze_dual_key_locker_sensitivity(forecast_list, lead_time_options=[15, 30
         print(pd.DataFrame(results).to_string(index=False))
         print("=" * 70)
 
-analyze_dual_key_locker_sensitivity(analysis_datasets)
+
+# =========================================================
+# 7. SCRIPT EXECUTION
+# =========================================================
+if __name__ == "__main__":
+    # Lower iteration count for quick testing, increase to 100 for production
+    ITERATIONS = 10 
+    
+    analyze_photobooth_queues(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
+    run_dual_kiosk_solver(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
+    analyze_dual_key_locker_sensitivity(analysis_datasets)
