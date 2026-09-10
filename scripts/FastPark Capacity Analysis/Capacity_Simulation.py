@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import simpy
+from functools import lru_cache, cache
 
 # Script directory setup
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -476,18 +477,30 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
 # =========================================================
 # 5. KEY LOCKER SENSITIVITY & NEW MONTHLY BREACH REPORT
 # =========================================================
-def extract_return_delay_distribution(actuals_df):
-    valid = actuals_df.dropna(subset=['ExpectedReturnDate', 'ActualCheckedOutDate']).copy()
+@lru_cache(maxsize=32)
+def _cached_return_delay_distribution(actuals_tuple):
+    valid = pd.DataFrame(actuals_tuple)
     valid['delay_mins'] = (
         pd.to_datetime(valid['ActualCheckedOutDate']) - pd.to_datetime(valid['ExpectedReturnDate'])
     ).dt.total_seconds() / 60.0
     return valid['delay_mins'].clip(lower=-720, upper=2880).values
 
-def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mins=45):
-    if ext_df.empty:
+def extract_return_delay_distribution(actuals_df):
+    valid_subset = actuals_df.dropna(subset=['ExpectedReturnDate', 'ActualCheckedOutDate'])[['ExpectedReturnDate', 'ActualCheckedOutDate']].copy()
+    valid_subset['ExpectedReturnDate'] = valid_subset['ExpectedReturnDate'].astype(str)
+    valid_subset['ActualCheckedOutDate'] = valid_subset['ActualCheckedOutDate'].astype(str)
+    tuples_repr = tuple(tuple(x) for x in valid_subset.to_records(index=False))
+    return _cached_return_delay_distribution(tuples_repr)
+
+@lru_cache(maxsize=128)
+def _cached_key_locker_occupancy(ext_tuple, delays_tuple, lead_time_mins):
+    if not ext_tuple:
         return pd.DataFrame()
         
-    df = ext_df.copy()
+    df = pd.DataFrame(ext_tuple, columns=['exit_time'])
+    df['exit_time'] = pd.to_datetime(df['exit_time'])
+    delay_distribution = np.array(delays_tuple)
+    
     sampled_delays = np.random.choice(delay_distribution, size=len(df)) if len(delay_distribution) > 0 else 0
     
     df['locker_start'] = df['exit_time'] - pd.Timedelta(minutes=lead_time_mins)
@@ -503,6 +516,13 @@ def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mi
     occupied = np.searchsorted(starts, time_grid.values, side='right') - np.searchsorted(ends, time_grid.values, side='right')
 
     return pd.DataFrame({'timestamp': time_grid, 'lockers_occupied': occupied}).set_index('timestamp')
+
+def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mins=45):
+    if ext_df.empty:
+        return pd.DataFrame()
+    ext_tuple = tuple(ext_df['exit_time'].astype(str).values)
+    delays_tuple = tuple(delay_distribution)
+    return _cached_key_locker_occupancy(ext_tuple, delays_tuple, lead_time_mins)
 
 def analyze_dual_key_locker_sensitivity(forecast_list, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297):
     delays = extract_return_delay_distribution(actuals_df)
@@ -539,14 +559,15 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
     print(f"📊 MONTHLY OPERATIONAL BREACH REPORT: {forecast_label}")
     print("=" * 80)
 
-    hourly_arrivals = arr_df.set_index('arrival_time').resample('1h').size().to_frame('arr_tx_per_hr')
+    # Rolling 15-minute window application for airport traffic standards
+    hourly_arrivals = arr_df.set_index('arrival_time').resample('1min').size().rolling('15min', min_periods=1).max().resample('1h').max().to_frame('arr_tx_per_hr')
     
     delays = extract_return_delay_distribution(actuals_df)
     locker_min = calculate_1min_key_locker_occupancy(ext_df, delays, lead_time_mins=lead_time_mins)
-    locker_hourly = locker_min.resample('1h').max() if not locker_min.empty else pd.DataFrame()
+    locker_hourly = locker_min.resample('15min').max().resample('1h').max() if not locker_min.empty else pd.DataFrame()
 
     if sim_logs:
-        sim_df = pd.DataFrame(sim_logs).set_index('timestamp').resample('1min').max().resample('1h').max()
+        sim_df = pd.DataFrame(sim_logs).set_index('timestamp').resample('1min').max().rolling('15min', min_periods=1).max().resample('1h').max()
     else:
         sim_df = pd.DataFrame()
 
