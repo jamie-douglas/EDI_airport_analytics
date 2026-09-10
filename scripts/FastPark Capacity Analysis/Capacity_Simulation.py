@@ -15,12 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 PHOTOBOOTH_PATH = SCRIPT_DIR / "Photobooth Inputs"
-FORECAST_B_CSV_PATH = Path(r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv")
+FORECAST_B_CSV_PATH = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\transaction_forecast.xlsx"
 
 from modules.utils.db import get_engine
 
 # =========================================================
-# 1. DATA INGESTION & METRICS (WRAPPED IN A FUNCTION)
+# 1. DATA INGESTION & METRICS
 # =========================================================
 def load_and_calculate_metrics():
     dsn = 'AzureConnection'
@@ -103,7 +103,7 @@ def load_and_calculate_metrics():
 
 
 # =========================================================
-# 2. PROFILING & SIMULATION HELPERS (FUNCTIONS ONLY)
+# 2. PROFILING & SIMULATION HELPERS
 # =========================================================
 @lru_cache(maxsize=1)
 def load_full_year_profile_data_cached(dsn_name, username):
@@ -207,8 +207,19 @@ def disaggregate_volume_to_1min(total_volume, day_date, m15_profile):
     for (_, row), cnt in zip(dow_p.iterrows(), int_counts):
         if cnt > 0:
             block_start = day_date + pd.Timedelta(hours=int(row["hour"]), minutes=int(row["min15"]))
-            minute_offsets = np.random.randint(0, 15, size=cnt)
-            records.extend([block_start + pd.Timedelta(minutes=int(m)) for m in minute_offsets])
+            
+            # POISSON / EXPONENTIAL ARRIVALS: Simulates real burstiness instead of uniform spacing
+            # Mean inter-arrival time in seconds for this 15-min block
+            mean_inter_arrival = (15 * 60) / cnt
+            inter_arrivals = np.random.exponential(scale=mean_inter_arrival, size=cnt)
+            arrival_offsets_sec = np.cumsum(inter_arrivals)
+            
+            # Scale to fit within the 15-minute (900s) window
+            if arrival_offsets_sec[-1] > 0:
+                arrival_offsets_sec = (arrival_offsets_sec / arrival_offsets_sec[-1]) * 899.0
+
+            for sec_offset in arrival_offsets_sec:
+                records.append(block_start + pd.Timedelta(seconds=float(sec_offset)))
 
     return records
 
@@ -258,7 +269,6 @@ def build_forecast_B(csv_path, history_df):
 
     return df_arr, df_ext
 
-# SimPy & Solver logic remain unchanged...
 def get_seasonal_multiplier(dt):
     month, day = dt.month, dt.day
     if month in [6, 7, 8] or (month == 12 and day >= 15) or (month == 1 and day <= 5):
@@ -570,35 +580,79 @@ def analyze_dual_key_locker_sensitivity(forecast_list, actuals_df, lead_time_opt
         print(pd.DataFrame(results).to_string(index=False))
         print("=" * 70)
 
-def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, actuals_df, lead_time_mins=45):
+def generate_monthly_breach_report(
+    forecast_label, arr_df, ext_df, sim_logs, actuals_df, 
+    lead_time_mins=45, pb_cust_sec=37.0, pb_capacity=2, 
+    mean_kiosk_sec=36.0, num_kiosks=5, hall_capacity=60, 
+    pb_queue_limit=10, locker_capacity=297
+):
     print("\n" + "=" * 80)
     print(f"📊 MONTHLY OPERATIONAL BREACH REPORT: {forecast_label}")
     print("=" * 80)
 
-    hourly_arrivals = arr_df.set_index('arrival_time').resample('1min').size().rolling('15min', min_periods=1).max().resample('1h').max().to_frame('arr_tx_per_hr')
-    
+    if arr_df.empty:
+        print("No arrival data available.")
+        return pd.DataFrame()
+
+    # Dynamic Hourly Throughput Capacities
+    pb_hourly_cap = (3600.0 / pb_cust_sec) * pb_capacity if pb_cust_sec > 0 else 0
+    kiosk_hourly_cap = (3600.0 / mean_kiosk_sec) * num_kiosks if mean_kiosk_sec > 0 else 0
+
+    start_time = arr_df['arrival_time'].min().floor('1h')
+    end_time = arr_df['arrival_time'].max().ceil('1h')
+    hourly_index = pd.date_range(start=start_time, end=end_time, freq='1h')
+
+    # 1. THROUGHPUT METRICS
+    hourly_arr = arr_df.set_index('arrival_time').resample('1h').size().reindex(hourly_index, fill_value=0)
+
+    # 2. INSTANTANEOUS STATE METRICS (CONTINUOUS 1-MIN GRID WITH FFILL + HOURLY PEAK)
     delays = extract_return_delay_distribution(actuals_df)
     locker_min = calculate_1min_key_locker_occupancy(ext_df, delays, lead_time_mins=lead_time_mins)
-    locker_hourly = locker_min.resample('15min').max().resample('1h').max() if not locker_min.empty else pd.DataFrame()
 
     if sim_logs:
-        sim_df = pd.DataFrame(sim_logs).set_index('timestamp').resample('1min').max().rolling('15min', min_periods=1).max().resample('1h').max()
+        sim_df = pd.DataFrame(sim_logs).set_index('timestamp').resample('1min').max()
     else:
-        sim_df = pd.DataFrame()
+        sim_df = pd.DataFrame(columns=['pb_queue', 'hall_pop'])
 
-    combined = hourly_arrivals.join(sim_df, how='outer').join(locker_hourly, how='outer').fillna(0)
-    combined['Month'] = combined.index.to_period('M')
+    # Continuous 1-minute time grid to prevent data loss during idle gaps
+    min_timeline = pd.date_range(start=start_time, end=end_time, freq='1min')
+    min_grid = pd.DataFrame(index=min_timeline)
 
-    monthly_summary = combined.groupby('Month').agg(
-        Monitored_Hours=('arr_tx_per_hr', 'count'),
-        PB_Queue_Breach_Hrs=('pb_queue', lambda x: (x > 10).sum()),
-        PB_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 195).sum()),
-        Hall_Pop_Breach_Hrs=('hall_pop', lambda x: (x > 60).sum()),
-        Kiosk_Tx_Rate_Breach_Hrs=('arr_tx_per_hr', lambda x: (x > 670).sum()),
-        Locker_Breach_Hrs=('lockers_occupied', lambda x: (x > 297).sum()),
-        Peak_Lockers_Needed=('lockers_occupied', 'max')
+    # Forward-fill state so idle minutes preserve the current queue/hall state
+    min_grid = min_grid.join(sim_df[['pb_queue', 'hall_pop']], how='left').ffill().fillna(0)
+    
+    if not locker_min.empty:
+        min_grid = min_grid.join(locker_min['lockers_occupied'], how='left').ffill().fillna(0)
+    else:
+        min_grid['lockers_occupied'] = 0
+
+    # Resample to hourly peaks
+    hourly_peaks = min_grid.resample('1h').max().reindex(hourly_index, fill_value=0)
+
+    # 3. HOURLY BINARY EVALUATION
+    hourly_report = pd.DataFrame(index=hourly_index)
+    hourly_report['Month'] = hourly_report.index.to_period('M')
+
+    # Flow Breaches
+    hourly_report['pb_rate_breach'] = (hourly_arr > pb_hourly_cap).astype(int)
+    hourly_report['kiosk_rate_breach'] = (hourly_arr > kiosk_hourly_cap).astype(int)
+
+    # State Breaches
+    hourly_report['pb_q_breach'] = (hourly_peaks['pb_queue'] > pb_queue_limit).astype(int)
+    hourly_report['hall_pop_breach'] = (hourly_peaks['hall_pop'] > hall_capacity).astype(int)
+    hourly_report['locker_breach'] = (hourly_peaks['lockers_occupied'] > locker_capacity).astype(int)
+
+    # 4. MONTHLY SUMMARY
+    monthly_summary = hourly_report.groupby('Month').agg(
+        Total_Monitored_Hours=('pb_rate_breach', 'count'),
+        PB_Tx_Rate_Breach_Hrs=('pb_rate_breach', 'sum'),
+        PB_Queue_Breach_Hrs=('pb_q_breach', 'sum'),
+        Kiosk_Tx_Rate_Breach_Hrs=('kiosk_rate_breach', 'sum'),
+        Hall_Pop_Breach_Hrs=('hall_pop_breach', 'sum'),
+        Locker_Breach_Hrs=('locker_breach', 'sum')
     ).reset_index()
 
+    print(f"ℹ️ Calculated Dynamic Capacities -> Photobooth ({pb_capacity} lanes @ {pb_cust_sec:.1f}s): {pb_hourly_cap:.1f} cars/hr | Kiosks ({num_kiosks} units @ {mean_kiosk_sec:.1f}s): {kiosk_hourly_cap:.1f} check-ins/hr")
     print(monthly_summary.to_string(index=False))
     print("=" * 80)
     return monthly_summary
@@ -608,7 +662,7 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
 # 3. SCRIPT EXECUTION ENTRYPOINT
 # =========================================================
 if __name__ == "__main__":
-    ITERATIONS = 10 
+    ITERATIONS = 50
 
     # 1. Load Data & Calculate Dynamic Metrics ONCE in Main Process
     engine, actuals_df, mean_kiosk_sec, dynamic_dwell_mins = load_and_calculate_metrics()
@@ -660,4 +714,18 @@ if __name__ == "__main__":
             print(f"Mean Max Photobooth Queue: {avg_pb_q:.2f} vehicles")
             print(f"Mean Max Reception Hall Population: {avg_hall_pop:.2f} people")
 
-            generate_monthly_breach_report(label, arr_df, ext_df, detailed_run['logs'], actuals_df)
+            generate_monthly_breach_report(
+                forecast_label=label, 
+                arr_df=arr_df, 
+                ext_df=ext_df, 
+                sim_logs=detailed_run['logs'], 
+                actuals_df=actuals_df,
+                lead_time_mins=45,
+                pb_cust_sec=37.0,
+                pb_capacity=2,
+                mean_kiosk_sec=mean_kiosk_sec,
+                num_kiosks=5,
+                hall_capacity=60,
+                pb_queue_limit=10,
+                locker_capacity=297
+            )
