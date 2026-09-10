@@ -1,6 +1,8 @@
 import sys
+import os
 import pathlib
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 import simpy
@@ -98,21 +100,26 @@ print(f"Dynamic Park & Walk Dwell Lag: {dynamic_dwell_mins:.1f} minutes\n")
 
 
 # =========================================================
-# 2. PROFILING & FORECAST DISAGGREGATION
+# 2. PROFILING & FORECAST DISAGGREGATION (WITH QUERY CACHING)
 # =========================================================
 historic_arrivals = pd.DataFrame({"arrival_time": actuals_df["CheckInStarted"].dropna()}).sort_values("arrival_time").reset_index(drop=True)
 historic_exits = pd.DataFrame({"exit_time": actuals_df["ActualCheckedOutDate"].dropna()}).sort_values("exit_time").reset_index(drop=True)
 
-def load_full_year_profile_data(engine):
+@lru_cache(maxsize=1)
+def load_full_year_profile_data_cached(dsn_name, username):
     sql = """
     SELECT "BookingReference", "CheckInStarted", "ActualCheckedOutDate"
     FROM FastPark.v_EntryAndExits
     WHERE "CheckInStarted" IS NOT NULL AND "CheckInStarted" >= DATEADD(year,-1,GETDATE())
     """
-    df = pd.read_sql(sql, con=engine)
+    eng = get_engine(dsn=dsn_name, username=username)
+    df = pd.read_sql(sql, con=eng)
     df["CheckInStarted"] = pd.to_datetime(df["CheckInStarted"])
     df["ActualCheckedOutDate"] = pd.to_datetime(df["ActualCheckedOutDate"], errors="coerce")
     return df
+
+def load_full_year_profile_data(engine):
+    return load_full_year_profile_data_cached(dsn, user)
 
 def build_profile(df, time_col):
     working = df.dropna(subset=[time_col]).copy()
@@ -273,7 +280,7 @@ analysis_datasets = [
 
 
 # =========================================================
-# 3. SIMPY ENGINE & INSTANTANEOUS METRIC TRACKING
+# 3. SIMPY ENGINE & PARALLEL/LIGHTWEIGHT LOGGING ENGINE
 # =========================================================
 def get_seasonal_multiplier(dt):
     month, day = dt.month, dt.day
@@ -283,41 +290,71 @@ def get_seasonal_multiplier(dt):
         return 1.2
     return 1.35
 
-def customer_process(env, photobooths, kiosks, pb_service_mean, kiosk_service_mean, dwell_sec, logs, arrival_dt, start_time):
+def _mc_worker_unpack(args_tuple):
+    """Unpacks arguments and calls the Monte Carlo iteration function."""
+    return run_monte_carlo_iteration(*args_tuple)
+
+def run_monte_carlo_parallel(params_tuple, iterations=10, max_workers=None):
+    """Runs Monte Carlo iterations concurrently across multiple CPU cores."""
+    if max_workers is None:
+        max_workers = max(1, (os.cpu_count() or 2) - 1)
+
+    args_list = [params_tuple for _ in range(iterations)]
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_mc_worker_unpack, args_list))
+
+    return results
+
+def customer_process(env, photobooths, kiosks, pb_st, kiosk_st, dwell_sec, logs, arrival_dt, start_time, metrics_state, full_logs):
     curr_time = start_time + pd.Timedelta(seconds=env.now)
     
-    if pb_service_mean > 0:
-        logs.append({'timestamp': curr_time, 'pb_queue': len(photobooths.queue), 'hall_pop': 0})
+    if pb_st > 0:
+        curr_pb_q = len(photobooths.queue)
+        if curr_pb_q > metrics_state['max_pb_q']:
+            metrics_state['max_pb_q'] = curr_pb_q
+        if full_logs and logs is not None:
+            logs.append({'timestamp': curr_time, 'pb_queue': curr_pb_q, 'hall_pop': 0})
+            
         with photobooths.request() as req:
             yield req
-            st = max(1.0, np.random.normal(pb_service_mean, 4.0))
-            yield env.timeout(st)
+            yield env.timeout(pb_st)
 
-    actual_dwell = max(30.0, np.random.normal(dwell_sec, 60.0))
-    yield env.timeout(actual_dwell)
+    yield env.timeout(dwell_sec)
 
     curr_time = start_time + pd.Timedelta(seconds=env.now)
     multiplier = get_seasonal_multiplier(arrival_dt)
     vehicles_in_hall = len(kiosks.queue) + kiosks.count + 1
     current_hall_pop = int(vehicles_in_hall * multiplier)
     
-    logs.append({'timestamp': curr_time, 'pb_queue': len(photobooths.queue), 'hall_pop': current_hall_pop})
+    curr_pb_q = len(photobooths.queue)
+    if curr_pb_q > metrics_state['max_pb_q']:
+        metrics_state['max_pb_q'] = curr_pb_q
+    if current_hall_pop > metrics_state['max_hall_pop']:
+        metrics_state['max_hall_pop'] = current_hall_pop
+    if current_hall_pop > 60:
+        metrics_state['breach_count'] += 1
+
+    if full_logs and logs is not None:
+        logs.append({'timestamp': curr_time, 'pb_queue': curr_pb_q, 'hall_pop': current_hall_pop})
 
     with kiosks.request() as req:
         yield req
-        k_st = max(5.0, np.random.normal(kiosk_service_mean, 8.0))
-        yield env.timeout(k_st)
+        yield env.timeout(kiosk_st)
 
-def staff_process(env, photobooths, pb_service_mean, logs, start_time):
-    if pb_service_mean > 0:
+def staff_process(env, photobooths, pb_st, logs, start_time, metrics_state, full_logs):
+    if pb_st > 0:
         curr_time = start_time + pd.Timedelta(seconds=env.now)
-        logs.append({'timestamp': curr_time, 'pb_queue': len(photobooths.queue), 'hall_pop': 0})
+        curr_pb_q = len(photobooths.queue)
+        if curr_pb_q > metrics_state['max_pb_q']:
+            metrics_state['max_pb_q'] = curr_pb_q
+        if full_logs and logs is not None:
+            logs.append({'timestamp': curr_time, 'pb_queue': curr_pb_q, 'hall_pop': 0})
         with photobooths.request() as req:
             yield req
-            st = max(1.0, np.random.normal(pb_service_mean, 3.0))
-            yield env.timeout(st)
+            yield env.timeout(pb_st)
 
-def run_pipeline_day(env, events_df, photobooths, kiosks, pb_cust_sec, kiosk_sec, dwell_sec, logs, start_time):
+def run_pipeline_day(env, events_df, photobooths, kiosks, logs, start_time, metrics_state, full_logs):
     previous_time = 0.0
     for _, row in events_df.iterrows():
         time_until_arrival = row['sim_seconds'] - previous_time
@@ -325,27 +362,39 @@ def run_pipeline_day(env, events_df, photobooths, kiosks, pb_cust_sec, kiosk_sec
             yield env.timeout(time_until_arrival)
             
         if row['is_staff']:
-            env.process(staff_process(env, photobooths, row['service_sec'], logs, start_time))
+            env.process(staff_process(env, photobooths, row['pb_st'], logs, start_time, metrics_state, full_logs))
         else:
-            env.process(customer_process(env, photobooths, kiosks, row['service_sec'], kiosk_sec, dwell_sec, logs, row['timestamp'], start_time))
+            env.process(customer_process(env, photobooths, kiosks, row['pb_st'], row['kiosk_st'], row['dwell_sec'], logs, row['timestamp'], start_time, metrics_state, full_logs))
             
         previous_time = row['sim_seconds']
 
-def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, pb_capacity=2, kiosk_sec=36.0, num_kiosks=5, dwell_mins=5.0):
-    df_cust = arrivals_df.copy().rename(columns={'arrival_time': 'timestamp'})
+def run_monte_carlo_iteration(
+    arr_df, ext_df, pb_cust_sec=37.0, pb_capacity=2, kiosk_sec=36.0, num_kiosks=5, dwell_mins=5.0, full_logs=False
+):
+    df_cust = arr_df.copy().rename(columns={'arrival_time': 'timestamp'})
     df_cust['service_sec'] = pb_cust_sec
     df_cust['is_staff'] = False
+    
+    n_cust = len(df_cust)
+    df_cust['pb_st'] = np.maximum(1.0, np.random.normal(pb_cust_sec, 4.0, size=n_cust)) if pb_cust_sec > 0 else 0.0
+    df_cust['dwell_sec'] = np.maximum(30.0, np.random.normal(dwell_mins * 60.0, 60.0, size=n_cust))
+    df_cust['kiosk_st'] = np.maximum(5.0, np.random.normal(kiosk_sec, 8.0, size=n_cust))
 
-    df_staff = exits_df.copy().rename(columns={'exit_time': 'timestamp'})
+    df_staff = ext_df.copy().rename(columns={'exit_time': 'timestamp'})
     df_staff['service_sec'] = 12.0 if pb_cust_sec > 0 else 0.0
     df_staff['is_staff'] = True
+    
+    n_staff = len(df_staff)
+    df_staff['pb_st'] = np.maximum(1.0, np.random.normal(12.0 if pb_cust_sec > 0 else 0.0, 3.0, size=n_staff)) if pb_cust_sec > 0 else 0.0
+    df_staff['dwell_sec'] = 0.0
+    df_staff['kiosk_st'] = 0.0
     
     offsets = np.random.randint(60, 120, size=len(df_staff))
     df_staff['timestamp'] = df_staff['timestamp'] - pd.to_timedelta(offsets, unit='min')
 
     sim_events = pd.concat([df_cust, df_staff]).sort_values('timestamp').reset_index(drop=True)
     if sim_events.empty:
-        return {'pb_jam': False, 'max_pb_q': 0, 'max_hall_pop': 0, 'hall_breach': False, 'logs': []}
+        return {'pb_jam': False, 'max_pb_q': 0, 'max_hall_pop': 0, 'hall_breach': False, 'breach_count': 0, 'logs': []}
 
     start_time = sim_events['timestamp'].min()
     sim_events['sim_seconds'] = (sim_events['timestamp'] - start_time).dt.total_seconds()
@@ -353,21 +402,64 @@ def run_monte_carlo_iteration(arrivals_df, exits_df, pb_cust_sec=37.0, pb_capaci
     env = simpy.Environment()
     photobooths = simpy.Resource(env, capacity=pb_capacity)
     kiosks = simpy.Resource(env, capacity=num_kiosks)
-    logs = []
     
-    env.process(run_pipeline_day(env, sim_events, photobooths, kiosks, pb_cust_sec, kiosk_sec, dwell_mins * 60.0, logs, start_time))
+    logs = [] if full_logs else None
+    metrics_state = {'max_pb_q': 0, 'max_hall_pop': 0, 'breach_count': 0}
+    
+    env.process(run_pipeline_day(env, sim_events, photobooths, kiosks, logs, start_time, metrics_state, full_logs))
     env.run()
 
-    df_logs = pd.DataFrame(logs)
-    max_pb_q = df_logs['pb_queue'].max() if not df_logs.empty else 0
-    max_hall_pop = df_logs['hall_pop'].max() if not df_logs.empty else 0
+    max_pb_q = metrics_state['max_pb_q']
+    max_hall_pop = metrics_state['max_hall_pop']
+    breach_count = metrics_state['breach_count']
 
-    return {'pb_jam': max_pb_q >= 10, 'max_pb_q': max_pb_q, 'max_hall_pop': max_hall_pop, 'hall_breach': max_hall_pop > 60, 'logs': logs}
+    return {
+        'pb_jam': max_pb_q >= 10,
+        'max_pb_q': max_pb_q,
+        'max_hall_pop': max_hall_pop,
+        'hall_breach': max_hall_pop > 60,
+        'breach_count': breach_count,
+        'logs': logs if full_logs else []
+    }
 
 
 # =========================================================
-# 4. ORIGINAL PHOTOBOOTH QUEUE & KIOSK SOLVER ANALYSIS
+# 4. BINARY SEARCH SOLVER & ANALYSIS LOOPS
 # =========================================================
+def solve_min_kiosks(
+    arr_df, ext_df, p_sec, p_cap, kiosk_sec, dwell_mins,
+    min_kiosks=4, max_kiosks=16, iterations=10, max_allowed_breaches=0
+):
+    """Finds the minimum required kiosks using Binary Search and Early Stopping."""
+    low = min_kiosks
+    high = max_kiosks
+    best_k = max_kiosks
+
+    while low <= high:
+        mid_kiosks = (low + high) // 2
+        params = (arr_df, ext_df, p_sec, p_cap, kiosk_sec, mid_kiosks, dwell_mins, False)
+
+        total_breaches = 0
+        failed = False
+
+        # Run iterations with Early Stopping
+        for i in range(iterations):
+            res = run_monte_carlo_iteration(*params)
+            total_breaches += res.get('breach_count', 1 if res['hall_breach'] else 0)
+
+            # EARLY STOPPING: Exceeded limit, no need to finish remaining iterations
+            if total_breaches > max_allowed_breaches:
+                failed = True
+                break
+
+        if not failed:
+            best_k = mid_kiosks
+            high = mid_kiosks - 1  # Try to find a smaller kiosk count that works
+        else:
+            low = mid_kiosks + 1   # Failed, need more kiosks
+
+    return best_k
+
 def analyze_photobooth_queues(forecast_list, kiosk_sec, dwell_mins, iterations=10):
     for label, arr_df, ext_df in forecast_list:
         print("\n" + "=" * 70)
@@ -378,16 +470,9 @@ def analyze_photobooth_queues(forecast_list, kiosk_sec, dwell_mins, iterations=1
             ("New Single Photobooth (1 Lane - 5s Clearance Headway)", 5.0, 1)
         ]
         for p_label, p_sec, p_cap in configs:
-            runs = [
-                run_monte_carlo_iteration(
-                    arr_df, ext_df, 
-                    pb_cust_sec=p_sec, 
-                    pb_capacity=p_cap, 
-                    kiosk_sec=kiosk_sec, 
-                    num_kiosks=5, 
-                    dwell_mins=dwell_mins
-                ) for _ in range(iterations)
-            ]
+            params = (arr_df, ext_df, p_sec, p_cap, kiosk_sec, 5, dwell_mins, False)
+            runs = run_monte_carlo_parallel(params, iterations=iterations)
+            
             jam_risk = np.mean([r['pb_jam'] for r in runs]) * 100
             avg_pb_q = np.mean([r['max_pb_q'] for r in runs])
             avg_hall = np.mean([r['max_hall_pop'] for r in runs])
@@ -402,16 +487,9 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
         print("\n" + "=" * 70)
         print(f"🛠️ KIOSK HALL MITIGATION SOLVER: {label}")
         print("=" * 70)
-        base_runs = [
-            run_monte_carlo_iteration(
-                arr_df, ext_df, 
-                pb_cust_sec=5.0, 
-                pb_capacity=1, 
-                kiosk_sec=base_kiosk_sec, 
-                num_kiosks=5, 
-                dwell_mins=dwell_mins
-            ) for _ in range(iterations)
-        ]
+        
+        base_params = (arr_df, ext_df, 5.0, 1, base_kiosk_sec, 5, dwell_mins, False)
+        base_runs = run_monte_carlo_parallel(base_params, iterations=iterations)
         base_breach_risk = np.mean([r['hall_breach'] for r in base_runs]) * 100
         base_avg_hall = np.mean([r['max_hall_pop'] for r in base_runs])
 
@@ -425,41 +503,20 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
 
         print(f"\n  ⚠️ CAPACITY BREACH DETECTED ({base_breach_risk:.1f}% Risk): Evaluating Mitigations...\n")
         
-        # Option A: Hardware Scaling
+        # Option A: Fast Hardware Scaling with Binary Search + Early Stopping
         print("Option 1: Add Kiosk Hardware (holding average speed at 36s)...")
-        required_kiosks = 5
-        for k_count in range(6, 12):
-            runs = [
-                run_monte_carlo_iteration(
-                    arr_df, ext_df, 
-                    pb_cust_sec=5.0, 
-                    pb_capacity=1, 
-                    kiosk_sec=base_kiosk_sec, 
-                    num_kiosks=k_count, 
-                    dwell_mins=dwell_mins
-                ) for _ in range(iterations)
-            ]
-            breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
-            avg_hall = np.mean([r['max_hall_pop'] for r in runs])
-            print(f"  • {k_count} Kiosks @ {base_kiosk_sec:.1f}s: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
-            if breach_risk == 0 and required_kiosks == 5:
-                required_kiosks = k_count
-                break
+        required_kiosks = solve_min_kiosks(
+            arr_df, ext_df, p_sec=5.0, p_cap=1, kiosk_sec=base_kiosk_sec, 
+            dwell_mins=dwell_mins, min_kiosks=6, max_kiosks=15, iterations=iterations, max_allowed_breaches=0
+        )
+        print(f"  • Required Hardware: Increase kiosks from 5 to {required_kiosks}.")
 
         # Option B: Process Speed Optimization
         print("\nOption 2: Optimize Transaction Speed (holding hardware at 5 Kiosks)...")
         target_speed = base_kiosk_sec
         for test_sec in range(int(base_kiosk_sec) - 2, 5, -2):
-            runs = [
-                run_monte_carlo_iteration(
-                    arr_df, ext_df, 
-                    pb_cust_sec=5.0, 
-                    pb_capacity=1, 
-                    kiosk_sec=test_sec, 
-                    num_kiosks=5, 
-                    dwell_mins=dwell_mins
-                ) for _ in range(iterations)
-            ]
+            params = (arr_df, ext_df, 5.0, 1, test_sec, 5, dwell_mins, False)
+            runs = run_monte_carlo_parallel(params, iterations=iterations)
             breach_risk = np.mean([r['hall_breach'] for r in runs]) * 100
             avg_hall = np.mean([r['max_hall_pop'] for r in runs])
             print(f"  • 5 Kiosks @ {test_sec}s avg: Peak Hall = {avg_hall:.1f} people | Hall Breach Risk = {breach_risk:.1f}%")
@@ -475,30 +532,27 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
 
 
 # =========================================================
-# 5. KEY LOCKER SENSITIVITY & NEW MONTHLY BREACH REPORT
+# 5. KEY LOCKER SENSITIVITY & FAST TUPLE HASHING
 # =========================================================
 @lru_cache(maxsize=32)
-def _cached_return_delay_distribution(actuals_tuple):
-    valid = pd.DataFrame(actuals_tuple)
-    valid['delay_mins'] = (
-        pd.to_datetime(valid['ActualCheckedOutDate']) - pd.to_datetime(valid['ExpectedReturnDate'])
-    ).dt.total_seconds() / 60.0
-    return valid['delay_mins'].clip(lower=-720, upper=2880).values
+def _cached_return_delay_distribution(exp_ret_tuple, act_chk_tuple):
+    exp_ret = pd.to_datetime(np.array(exp_ret_tuple))
+    act_chk = pd.to_datetime(np.array(act_chk_tuple))
+    delays = (act_chk - exp_ret).total_seconds() / 60.0
+    return np.clip(delays, -720, 2880)
 
 def extract_return_delay_distribution(actuals_df):
-    valid_subset = actuals_df.dropna(subset=['ExpectedReturnDate', 'ActualCheckedOutDate'])[['ExpectedReturnDate', 'ActualCheckedOutDate']].copy()
-    valid_subset['ExpectedReturnDate'] = valid_subset['ExpectedReturnDate'].astype(str)
-    valid_subset['ActualCheckedOutDate'] = valid_subset['ActualCheckedOutDate'].astype(str)
-    tuples_repr = tuple(tuple(x) for x in valid_subset.to_records(index=False))
-    return _cached_return_delay_distribution(tuples_repr)
+    valid_subset = actuals_df.dropna(subset=['ExpectedReturnDate', 'ActualCheckedOutDate'])
+    exp_ret_tuple = tuple(valid_subset['ExpectedReturnDate'].astype('int64').values)
+    act_chk_tuple = tuple(valid_subset['ActualCheckedOutDate'].astype('int64').values)
+    return _cached_return_delay_distribution(exp_ret_tuple, act_chk_tuple)
 
 @lru_cache(maxsize=128)
-def _cached_key_locker_occupancy(ext_tuple, delays_tuple, lead_time_mins):
-    if not ext_tuple:
+def _cached_key_locker_occupancy(ext_int_tuple, delays_tuple, lead_time_mins):
+    if not ext_int_tuple:
         return pd.DataFrame()
         
-    df = pd.DataFrame(ext_tuple, columns=['exit_time'])
-    df['exit_time'] = pd.to_datetime(df['exit_time'])
+    df = pd.DataFrame({'exit_time': pd.to_datetime(np.array(ext_int_tuple))})
     delay_distribution = np.array(delays_tuple)
     
     sampled_delays = np.random.choice(delay_distribution, size=len(df)) if len(delay_distribution) > 0 else 0
@@ -520,9 +574,9 @@ def _cached_key_locker_occupancy(ext_tuple, delays_tuple, lead_time_mins):
 def calculate_1min_key_locker_occupancy(ext_df, delay_distribution, lead_time_mins=45):
     if ext_df.empty:
         return pd.DataFrame()
-    ext_tuple = tuple(ext_df['exit_time'].astype(str).values)
+    ext_int_tuple = tuple(ext_df['exit_time'].astype('int64').values)
     delays_tuple = tuple(delay_distribution)
-    return _cached_key_locker_occupancy(ext_tuple, delays_tuple, lead_time_mins)
+    return _cached_key_locker_occupancy(ext_int_tuple, delays_tuple, lead_time_mins)
 
 def analyze_dual_key_locker_sensitivity(forecast_list, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297):
     delays = extract_return_delay_distribution(actuals_df)
@@ -559,7 +613,6 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
     print(f"📊 MONTHLY OPERATIONAL BREACH REPORT: {forecast_label}")
     print("=" * 80)
 
-    # Rolling 15-minute window application for airport traffic standards
     hourly_arrivals = arr_df.set_index('arrival_time').resample('1min').size().rolling('15min', min_periods=1).max().resample('1h').max().to_frame('arr_tx_per_hr')
     
     delays = extract_return_delay_distribution(actuals_df)
@@ -590,42 +643,31 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
 
 
 # =========================================================
-# 6. SCRIPT EXECUTION (OLD OUTPUT + NEW MONTHLY REPORT)
+# 6. SCRIPT EXECUTION (PARALLEL & REPORT GENERATION)
 # =========================================================
 if __name__ == "__main__":
     ITERATIONS = 10 
 
-    # 1. Run the Old Outputs First (Photobooth Queue & Kiosk Mitigation Solver)
+    # 1. Run Photobooth Queue & Kiosk Mitigation Solvers
     analyze_photobooth_queues(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
     run_dual_kiosk_solver(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
     analyze_dual_key_locker_sensitivity(analysis_datasets, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297)
 
-    # 2. Run the New Monthly Breach Report Outputs Next
+    # 2. Run Monte Carlo Simulations & Monthly Breach Report
     for label, arr_df, ext_df in analysis_datasets:
         if not arr_df.empty:
             print("\n" + "=" * 80)
-            print(f"🎲 RUNNING MONTE CARLO SIMULATION & MONTHLY REPORT ({ITERATIONS} ITERATIONS): {label}")
+            print(f"🎲 RUNNING PARALLEL MONTE CARLO SIMULATION & MONTHLY REPORT ({ITERATIONS} ITERATIONS): {label}")
             print("=" * 80)
             
-            mc_results = []
-            best_log_run = None
-            max_combined_peak = -1
+            params_fast = (arr_df, ext_df, 37.0, 2, mean_kiosk_sec, 5, dynamic_dwell_mins, False)
+            mc_results = run_monte_carlo_parallel(params_fast, iterations=ITERATIONS)
 
-            for i in range(ITERATIONS):
-                sim_res = run_monte_carlo_iteration(
-                    arr_df, 
-                    ext_df, 
-                    pb_cust_sec=37.0, 
-                    pb_capacity=2, 
-                    kiosk_sec=mean_kiosk_sec, 
-                    dwell_mins=dynamic_dwell_mins
-                )
-                mc_results.append(sim_res)
-                
-                combined_peak = sim_res['max_pb_q'] + sim_res['max_hall_pop']
-                if combined_peak > max_combined_peak:
-                    max_combined_peak = combined_peak
-                    best_log_run = sim_res
+            # Single full-log run to generate detailed monthly report logs
+            detailed_run = run_monte_carlo_iteration(
+                arr_df, ext_df, pb_cust_sec=37.0, pb_capacity=2, 
+                kiosk_sec=mean_kiosk_sec, num_kiosks=5, dwell_mins=dynamic_dwell_mins, full_logs=True
+            )
 
             jam_count = sum(1 for r in mc_results if r['pb_jam'])
             breach_count = sum(1 for r in mc_results if r['hall_breach'])
@@ -637,5 +679,4 @@ if __name__ == "__main__":
             print(f"Mean Max Photobooth Queue: {avg_pb_q:.2f} vehicles")
             print(f"Mean Max Reception Hall Population: {avg_hall_pop:.2f} people")
 
-            selected_logs = best_log_run['logs'] if best_log_run else []
-            generate_monthly_breach_report(label, arr_df, ext_df, selected_logs, actuals_df)
+            generate_monthly_breach_report(label, arr_df, ext_df, detailed_run['logs'], actuals_df)
