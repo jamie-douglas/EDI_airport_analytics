@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 import simpy
-from functools import lru_cache, cache
+from functools import lru_cache
 
 # Script directory setup
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -14,97 +14,97 @@ PROJECT_ROOT = SCRIPT_DIR.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-photobooth_path = SCRIPT_DIR / "Photobooth Inputs"
-forecast_b_csv_path = Path(r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv")
+PHOTOBOOTH_PATH = SCRIPT_DIR / "Photobooth Inputs"
+FORECAST_B_CSV_PATH = Path(r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv")
 
 from modules.utils.db import get_engine
 
 # =========================================================
-# 1. DATA INGESTION & DYNAMIC METRICS
+# 1. DATA INGESTION & METRICS (WRAPPED IN A FUNCTION)
 # =========================================================
-dsn = 'AzureConnection'
-user = 'jamie_douglas'
-engine = get_engine(dsn=dsn, username=user)
+def load_and_calculate_metrics():
+    dsn = 'AzureConnection'
+    user = 'jamie_douglas'
+    engine = get_engine(dsn=dsn, username=user)
 
-# Load Photobooth Scans
-photobooth_files = list(photobooth_path.glob("*.csv")) if photobooth_path.exists() else []
-photobooth_list = []
-for file in photobooth_files:
-    df = pd.read_csv(file)
-    df["Scan Date"] = pd.to_datetime(df["Scan Date"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
-    photobooth_list.append(df)
+    # Load Photobooth Scans
+    photobooth_files = list(PHOTOBOOTH_PATH.glob("*.csv")) if PHOTOBOOTH_PATH.exists() else []
+    photobooth_list = []
+    for file in photobooth_files:
+        df = pd.read_csv(file)
+        df["Scan Date"] = pd.to_datetime(df["Scan Date"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+        photobooth_list.append(df)
 
-raw_scans = pd.concat(photobooth_list, ignore_index=True).drop_duplicates() if photobooth_list else pd.DataFrame()
+    raw_scans = pd.concat(photobooth_list, ignore_index=True).drop_duplicates() if photobooth_list else pd.DataFrame()
 
-if not raw_scans.empty:
-    photobooth_summary = raw_scans.groupby("Booking Ref").agg(
-        customer_arrival_photobooth=("Scan Date", "min"),
-        staff_return_photobooth=("Scan Date", "max"),
-        total_scans_count=("Scan Date", "count")
-    ).reset_index()
+    if not raw_scans.empty:
+        photobooth_summary = raw_scans.groupby("Booking Ref").agg(
+            customer_arrival_photobooth=("Scan Date", "min"),
+            staff_return_photobooth=("Scan Date", "max"),
+            total_scans_count=("Scan Date", "count")
+        ).reset_index()
 
-    photobooth_summary["scan_gap_hours"] = (
-        (photobooth_summary["staff_return_photobooth"] - photobooth_summary["customer_arrival_photobooth"])
-        .dt.total_seconds() / 3600.0
-    )
-    photobooth_summary = photobooth_summary[photobooth_summary["scan_gap_hours"] >= 6]
-else:
-    photobooth_summary = pd.DataFrame(columns=["Booking Ref", "customer_arrival_photobooth", "staff_return_photobooth"])
+        photobooth_summary["scan_gap_hours"] = (
+            (photobooth_summary["staff_return_photobooth"] - photobooth_summary["customer_arrival_photobooth"])
+            .dt.total_seconds() / 3600.0
+        )
+        photobooth_summary = photobooth_summary[photobooth_summary["scan_gap_hours"] >= 6]
+    else:
+        photobooth_summary = pd.DataFrame(columns=["Booking Ref", "customer_arrival_photobooth", "staff_return_photobooth"])
 
-sql_query = """
-SELECT
-    "BookingReference",
-    "CheckInStarted",
-    "CheckInEnded",
-    "ExpectedArrivalDate",
-    "ExpectedReturnDate",
-    "ActualCheckedOutDate"
-FROM FastPark.v_EntryAndExits
-WHERE 
-    (
-        (ExpectedArrivalDate BETWEEN '2025-12-14' AND '2026-01-14')
-        OR (ExpectedArrivalDate BETWEEN '2026-04-27' AND '2026-05-27')
-        OR (ExpectedArrivalDate BETWEEN '2026-08-01' AND '2026-08-27')
-    )
-    AND "ActualCheckedOutDate" IS NOT NULL
-"""
+    sql_query = """
+    SELECT
+        "BookingReference",
+        "CheckInStarted",
+        "CheckInEnded",
+        "ExpectedArrivalDate",
+        "ExpectedReturnDate",
+        "ActualCheckedOutDate"
+    FROM FastPark.v_EntryAndExits
+    WHERE 
+        (
+            (ExpectedArrivalDate BETWEEN '2025-12-14' AND '2026-01-14')
+            OR (ExpectedArrivalDate BETWEEN '2026-04-27' AND '2026-05-27')
+            OR (ExpectedArrivalDate BETWEEN '2026-08-01' AND '2026-08-27')
+        )
+        AND "ActualCheckedOutDate" IS NOT NULL
+    """
 
-actuals_df = pd.read_sql(sql_query, con=engine)
-actuals_df["CheckInStarted"] = pd.to_datetime(actuals_df["CheckInStarted"])
-actuals_df["CheckInEnded"] = pd.to_datetime(actuals_df["CheckInEnded"])
-actuals_df["ExpectedReturnDate"] = pd.to_datetime(actuals_df["ExpectedReturnDate"])
-actuals_df["ActualCheckedOutDate"] = pd.to_datetime(actuals_df["ActualCheckedOutDate"])
+    actuals_df = pd.read_sql(sql_query, con=engine)
+    actuals_df["CheckInStarted"] = pd.to_datetime(actuals_df["CheckInStarted"])
+    actuals_df["CheckInEnded"] = pd.to_datetime(actuals_df["CheckInEnded"])
+    actuals_df["ExpectedReturnDate"] = pd.to_datetime(actuals_df["ExpectedReturnDate"])
+    actuals_df["ActualCheckedOutDate"] = pd.to_datetime(actuals_df["ActualCheckedOutDate"])
 
-master_df = pd.merge(
-    actuals_df,
-    photobooth_summary,
-    left_on="BookingReference",
-    right_on="Booking Ref",
-    how="inner"
-).drop(columns=["Booking Ref"], errors="ignore")
+    master_df = pd.merge(
+        actuals_df,
+        photobooth_summary,
+        left_on="BookingReference",
+        right_on="Booking Ref",
+        how="inner"
+    ).drop(columns=["Booking Ref"], errors="ignore")
 
-# Dynamic Metrics
-master_df["kiosk_duration_seconds"] = (master_df["CheckInEnded"] - master_df["CheckInStarted"]).dt.total_seconds()
-valid_kiosks = master_df[master_df["kiosk_duration_seconds"] > 0]["kiosk_duration_seconds"]
-mean_kiosk_sec = float(valid_kiosks.mean()) if len(valid_kiosks) > 0 else 36.0
+    # Dynamic Metrics
+    master_df["kiosk_duration_seconds"] = (master_df["CheckInEnded"] - master_df["CheckInStarted"]).dt.total_seconds()
+    valid_kiosks = master_df[master_df["kiosk_duration_seconds"] > 0]["kiosk_duration_seconds"]
+    mean_kiosk_sec = float(valid_kiosks.mean()) if len(valid_kiosks) > 0 else 36.0
 
-master_df["ferry_to_kiosk_dwell_mins"] = (master_df["CheckInStarted"] - master_df["customer_arrival_photobooth"]).dt.total_seconds() / 60.0
-valid_dwells = master_df[master_df["ferry_to_kiosk_dwell_mins"].between(0, 60)]["ferry_to_kiosk_dwell_mins"]
-dynamic_dwell_mins = float(valid_dwells.median()) if len(valid_dwells) > 0 else 5.0
+    master_df["ferry_to_kiosk_dwell_mins"] = (master_df["CheckInStarted"] - master_df["customer_arrival_photobooth"]).dt.total_seconds() / 60.0
+    valid_dwells = master_df[master_df["ferry_to_kiosk_dwell_mins"].between(0, 60)]["ferry_to_kiosk_dwell_mins"]
+    dynamic_dwell_mins = float(valid_dwells.median()) if len(valid_dwells) > 0 else 5.0
 
-print("=" * 65)
-print("📌 DYNAMIC HISTORICAL METRICS CALCULATED")
-print("=" * 65)
-print(f"Mean Kiosk Transaction Time: {mean_kiosk_sec:.1f} seconds")
-print(f"Dynamic Park & Walk Dwell Lag: {dynamic_dwell_mins:.1f} minutes\n")
+    print("=" * 65)
+    print("📌 DYNAMIC HISTORICAL METRICS CALCULATED")
+    print("=" * 65)
+    print(f"Mean Kiosk Transaction Time: {mean_kiosk_sec:.1f} seconds")
+    print(f"Dynamic Park & Walk Dwell Lag: {dynamic_dwell_mins:.1f} minutes\n")
+
+    return engine, actuals_df, mean_kiosk_sec, dynamic_dwell_mins
 
 
 # =========================================================
-# 2. PROFILING & FORECAST DISAGGREGATION (WITH QUERY CACHING)
+# 2. PROFILING & SIMULATION HELPERS (FUNCTIONS ONLY)
 # =========================================================
-historic_arrivals = pd.DataFrame({"arrival_time": actuals_df["CheckInStarted"].dropna()}).sort_values("arrival_time").reset_index(drop=True)
-historic_exits = pd.DataFrame({"exit_time": actuals_df["ActualCheckedOutDate"].dropna()}).sort_values("exit_time").reset_index(drop=True)
-
 @lru_cache(maxsize=1)
 def load_full_year_profile_data_cached(dsn_name, username):
     sql = """
@@ -118,9 +118,6 @@ def load_full_year_profile_data_cached(dsn_name, username):
     df["ActualCheckedOutDate"] = pd.to_datetime(df["ActualCheckedOutDate"], errors="coerce")
     return df
 
-def load_full_year_profile_data(engine):
-    return load_full_year_profile_data_cached(dsn, user)
-
 def build_profile(df, time_col):
     working = df.dropna(subset=[time_col]).copy()
     working["week_of_month"] = (working[time_col].dt.day - 1) // 7 + 1
@@ -132,10 +129,6 @@ def build_profile(df, time_col):
     group_totals = profile.groupby(["week_of_month", "weekday"])["count"].transform("sum")
     profile["prob"] = profile["count"] / group_totals
     return profile
-
-full_year_history_df = load_full_year_profile_data(engine)
-arrival_profile = build_profile(full_year_history_df, "CheckInStarted")
-exit_profile = build_profile(full_year_history_df, "ActualCheckedOutDate")
 
 def build_forecast_A(engine, arrival_profile, exit_profile):
     sql = """
@@ -151,7 +144,6 @@ def build_forecast_A(engine, arrival_profile, exit_profile):
         ts = row["IntervalStartDateTimeLocal"]
         wom, weekday, hour = (ts.day - 1) // 7 + 1, ts.dayofweek, ts.hour
 
-        # Arrivals
         a_p = arrival_profile[(arrival_profile["week_of_month"] == wom) & (arrival_profile["weekday"] == weekday) & (arrival_profile["hour"] == hour)]
         if len(a_p) == 0:
             a_p = arrival_profile[(arrival_profile["weekday"] == weekday) & (arrival_profile["hour"] == hour)]
@@ -163,7 +155,6 @@ def build_forecast_A(engine, arrival_profile, exit_profile):
             for (_, p), cnt in zip(a_p.iterrows(), counts):
                 arr_records.extend([ts.floor("h") + pd.Timedelta(minutes=int(p["minute"]))] * int(cnt))
 
-        # Exits
         e_p = exit_profile[(exit_profile["week_of_month"] == wom) & (exit_profile["weekday"] == weekday) & (exit_profile["hour"] == hour)]
         if len(e_p) == 0:
             e_p = exit_profile[(exit_profile["weekday"] == weekday) & (exit_profile["hour"] == hour)]
@@ -239,7 +230,6 @@ def build_forecast_B(csv_path, history_df):
         days_in_month = pd.date_range(m_start, m_start + pd.offsets.MonthEnd(0), freq="D")
         num_days = len(days_in_month)
 
-        # Arrivals
         valid_dom_arr = dom_arr_prof[dom_arr_prof["day_of_month"] <= num_days].copy()
         valid_dom_arr["w"] = valid_dom_arr["dom_prob"] / valid_dom_arr["dom_prob"].sum()
         daily_arr_volumes = np.floor(total_tx * valid_dom_arr["w"]).astype(int)
@@ -247,7 +237,6 @@ def build_forecast_B(csv_path, history_df):
         if rem_arr > 0:
             daily_arr_volumes.iloc[np.argsort((total_tx * valid_dom_arr["w"] - daily_arr_volumes).values)[::-1][:rem_arr]] += 1
 
-        # Exits
         valid_dom_ext = dom_ext_prof[dom_ext_prof["day_of_month"] <= num_days].copy()
         valid_dom_ext["w"] = valid_dom_ext["dom_prob"] / valid_dom_ext["dom_prob"].sum()
         daily_ext_volumes = np.floor(total_tx * valid_dom_ext["w"]).astype(int)
@@ -269,19 +258,7 @@ def build_forecast_B(csv_path, history_df):
 
     return df_arr, df_ext
 
-future_arrivals_A, future_exits_A = build_forecast_A(engine, arrival_profile, exit_profile)
-future_arrivals_B, future_exits_B = build_forecast_B(forecast_b_csv_path, full_year_history_df)
-
-analysis_datasets = [
-    ("Historical Actuals (Peak Periods)", historic_arrivals, historic_exits),
-    ("Forecast A (Short-Term 2-Month Daily)", future_arrivals_A, future_exits_A),
-    ("Forecast B (Long-Term Monthly)", future_arrivals_B, future_exits_B)
-]
-
-
-# =========================================================
-# 3. SIMPY ENGINE & PARALLEL/LIGHTWEIGHT LOGGING ENGINE
-# =========================================================
+# SimPy & Solver logic remain unchanged...
 def get_seasonal_multiplier(dt):
     month, day = dt.month, dt.day
     if month in [6, 7, 8] or (month == 12 and day >= 15) or (month == 1 and day <= 5):
@@ -291,11 +268,9 @@ def get_seasonal_multiplier(dt):
     return 1.35
 
 def _mc_worker_unpack(args_tuple):
-    """Unpacks arguments and calls the Monte Carlo iteration function."""
     return run_monte_carlo_iteration(*args_tuple)
 
 def run_monte_carlo_parallel(params_tuple, iterations=10, max_workers=None):
-    """Runs Monte Carlo iterations concurrently across multiple CPU cores."""
     if max_workers is None:
         max_workers = max(1, (os.cpu_count() or 2) - 1)
 
@@ -422,15 +397,10 @@ def run_monte_carlo_iteration(
         'logs': logs if full_logs else []
     }
 
-
-# =========================================================
-# 4. BINARY SEARCH SOLVER & ANALYSIS LOOPS
-# =========================================================
 def solve_min_kiosks(
     arr_df, ext_df, p_sec, p_cap, kiosk_sec, dwell_mins,
     min_kiosks=4, max_kiosks=16, iterations=10, max_allowed_breaches=0
 ):
-    """Finds the minimum required kiosks using Binary Search and Early Stopping."""
     low = min_kiosks
     high = max_kiosks
     best_k = max_kiosks
@@ -442,21 +412,19 @@ def solve_min_kiosks(
         total_breaches = 0
         failed = False
 
-        # Run iterations with Early Stopping
         for i in range(iterations):
             res = run_monte_carlo_iteration(*params)
             total_breaches += res.get('breach_count', 1 if res['hall_breach'] else 0)
 
-            # EARLY STOPPING: Exceeded limit, no need to finish remaining iterations
             if total_breaches > max_allowed_breaches:
                 failed = True
                 break
 
         if not failed:
             best_k = mid_kiosks
-            high = mid_kiosks - 1  # Try to find a smaller kiosk count that works
+            high = mid_kiosks - 1
         else:
-            low = mid_kiosks + 1   # Failed, need more kiosks
+            low = mid_kiosks + 1
 
     return best_k
 
@@ -503,7 +471,6 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
 
         print(f"\n  ⚠️ CAPACITY BREACH DETECTED ({base_breach_risk:.1f}% Risk): Evaluating Mitigations...\n")
         
-        # Option A: Fast Hardware Scaling with Binary Search + Early Stopping
         print("Option 1: Add Kiosk Hardware (holding average speed at 36s)...")
         required_kiosks = solve_min_kiosks(
             arr_df, ext_df, p_sec=5.0, p_cap=1, kiosk_sec=base_kiosk_sec, 
@@ -511,7 +478,6 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
         )
         print(f"  • Required Hardware: Increase kiosks from 5 to {required_kiosks}.")
 
-        # Option B: Process Speed Optimization
         print("\nOption 2: Optimize Transaction Speed (holding hardware at 5 Kiosks)...")
         target_speed = base_kiosk_sec
         for test_sec in range(int(base_kiosk_sec) - 2, 5, -2):
@@ -530,10 +496,6 @@ def run_dual_kiosk_solver(forecast_list, base_kiosk_sec, dwell_mins, iterations=
         print(f"    2. Process Solution  : Reduce check-in duration from {base_kiosk_sec:.1f}s to {target_speed}s.")
         print("-" * 70)
 
-
-# =========================================================
-# 5. KEY LOCKER SENSITIVITY & FAST TUPLE HASHING
-# =========================================================
 @lru_cache(maxsize=32)
 def _cached_return_delay_distribution(exp_ret_tuple, act_chk_tuple):
     exp_ret = pd.to_datetime(np.array(exp_ret_tuple))
@@ -643,17 +605,37 @@ def generate_monthly_breach_report(forecast_label, arr_df, ext_df, sim_logs, act
 
 
 # =========================================================
-# 6. SCRIPT EXECUTION (PARALLEL & REPORT GENERATION)
+# 3. SCRIPT EXECUTION ENTRYPOINT
 # =========================================================
 if __name__ == "__main__":
     ITERATIONS = 10 
 
-    # 1. Run Photobooth Queue & Kiosk Mitigation Solvers
+    # 1. Load Data & Calculate Dynamic Metrics ONCE in Main Process
+    engine, actuals_df, mean_kiosk_sec, dynamic_dwell_mins = load_and_calculate_metrics()
+
+    # 2. Build Profiles & Forecast Datasets
+    historic_arrivals = pd.DataFrame({"arrival_time": actuals_df["CheckInStarted"].dropna()}).sort_values("arrival_time").reset_index(drop=True)
+    historic_exits = pd.DataFrame({"exit_time": actuals_df["ActualCheckedOutDate"].dropna()}).sort_values("exit_time").reset_index(drop=True)
+
+    full_year_history_df = load_full_year_profile_data_cached('AzureConnection', 'jamie_douglas')
+    arrival_profile = build_profile(full_year_history_df, "CheckInStarted")
+    exit_profile = build_profile(full_year_history_df, "ActualCheckedOutDate")
+
+    future_arrivals_A, future_exits_A = build_forecast_A(engine, arrival_profile, exit_profile)
+    future_arrivals_B, future_exits_B = build_forecast_B(FORECAST_B_CSV_PATH, full_year_history_df)
+
+    analysis_datasets = [
+        ("Historical Actuals (Peak Periods)", historic_arrivals, historic_exits),
+        ("Forecast A (Short-Term 2-Month Daily)", future_arrivals_A, future_exits_A),
+        ("Forecast B (Long-Term Monthly)", future_arrivals_B, future_exits_B)
+    ]
+
+    # 3. Solvers & Analysis Loops
     analyze_photobooth_queues(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
     run_dual_kiosk_solver(analysis_datasets, mean_kiosk_sec, dynamic_dwell_mins, iterations=ITERATIONS)
     analyze_dual_key_locker_sensitivity(analysis_datasets, actuals_df, lead_time_options=[15, 30, 45, 60, 120], capacity_limit=297)
 
-    # 2. Run Monte Carlo Simulations & Monthly Breach Report
+    # 4. Monte Carlo Simulations & Monthly Breach Reports
     for label, arr_df, ext_df in analysis_datasets:
         if not arr_df.empty:
             print("\n" + "=" * 80)
@@ -663,7 +645,6 @@ if __name__ == "__main__":
             params_fast = (arr_df, ext_df, 37.0, 2, mean_kiosk_sec, 5, dynamic_dwell_mins, False)
             mc_results = run_monte_carlo_parallel(params_fast, iterations=ITERATIONS)
 
-            # Single full-log run to generate detailed monthly report logs
             detailed_run = run_monte_carlo_iteration(
                 arr_df, ext_df, pb_cust_sec=37.0, pb_capacity=2, 
                 kiosk_sec=mean_kiosk_sec, num_kiosks=5, dwell_mins=dynamic_dwell_mins, full_logs=True
