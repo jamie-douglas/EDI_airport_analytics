@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 photobooth_path = SCRIPT_DIR / "Photobooth Inputs"
-forecast_b_csv_path = SCRIPT_DIR / "Monthly_Forecast.csv"  # Update filename if needed (.csv or .xlsx)
+forecast_b_csv_path = r"C:\Users\jamie_douglas\Edinburgh Airport Limited\Shared Files - Business Planning\Seasonal Readiness\W26\2. Car Parking\Modelling\transaction_forecast.csv"
 
 from modules.utils.db import get_engine
 
