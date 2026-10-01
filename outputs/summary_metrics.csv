@@ -1,0 +1,9 @@
+metric,value
+average_shift_length_hours,7.66
+median_shift_length_hours,7.75
+average_movements_per_hour,3.53
+median_movements_per_hour,3.19
+average_adjusted_movements_per_hour,3.01
+median_adjusted_movements_per_hour,2.94
+average_difference_mph_vs_adjusted,0.52
+median_difference_mph_vs_adjusted,0.13

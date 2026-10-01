@@ -1,14 +1,12 @@
-import sys
 import pathlib
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timedelta
 
 sys.path.append(
     str(pathlib.Path(__file__).resolve().parents[1])
 )
-
-
-import time
 import pandas as pd
 
 
@@ -34,7 +32,7 @@ from modules.domain.prm.efficiency import (
 # CONFIGURATION
 # ============================================================
 
-ANALYSIS_START = "2025-08-26"
+ANALYSIS_START = "2025-08-28"
 
 OPERATING_START = "14:00"
 OPERATING_END = "18:00"
@@ -42,12 +40,43 @@ OPERATING_END = "18:00"
 TRIAL_START = "2026-08-25"
 TRIAL_END = "2026-08-29"
 
-WEEKDAY_NUMBERS = [ 1, 2, 3, 4]
-# Monday = 0
-# Tuesday = 1
-# Wednesday = 2
-# Thursday = 3
-# Friday = 4
+WEEKDAY_NUMBERS = [1, 2, 3, 4,]
+
+
+def weekday_filter_label() -> str:
+    """Return the configured weekday filter as a human-readable label."""
+
+    weekday_names = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+
+    return ", ".join(
+        weekday_names[weekday]
+        for weekday in WEEKDAY_NUMBERS
+    )
+
+
+def print_table(
+    title: str,
+    df: pd.DataFrame,
+    *,
+    formatters: dict | None = None,
+) -> None:
+    """Print a dataframe with a consistent heading."""
+
+    print(f"\n{title}")
+    print(
+        df.to_string(
+            index=False,
+            formatters=formatters,
+        )
+    )
 
 
 # ============================================================
@@ -477,7 +506,9 @@ def operating_window_vehicle_utilisation(
         rolling_window_df,
     )
 
+
 def build_kpi_summary(df, weeks):
+    """Build the KPI summary used in the trial comparison output."""
 
 
     metrics = {}
@@ -501,6 +532,27 @@ def build_kpi_summary(df, weeks):
         .mean()
     )
 
+    metrics["Average Minibus Service Time (mins)"] = (
+        df.loc[
+            df["Vehicle Type"] == "Mini Bus",
+            "Service Minutes"
+        ].mean()
+    )
+
+    metrics["Average Ambulift Service Time (mins)"] = (
+        df.loc[
+            df["Vehicle Type"] == "Ambulift",
+            "Service Minutes"
+        ].mean()
+    )
+
+    metrics["Average No Vehicle Service Time (mins)"] = (
+        df.loc[
+            df["Vehicle Type"].fillna("No Vehicle") == "No Vehicle",
+            "Service Minutes"
+        ].mean()
+    )
+
     minibus = (
         df["Vehicle Type"] == "Mini Bus"
     )
@@ -509,7 +561,13 @@ def build_kpi_summary(df, weeks):
         df["Vehicle Type"] == "Ambulift"
     )
 
+    agent = (
+        df["Vehicle Type"].isna()
+    )
+
     metrics["Minibus Journeys"] = minibus.sum() / weeks
+
+    metrics["Agent Journeys"] = agent.sum() / weeks
 
     metrics["Minibus Passengers Per Week"] = (
         df.loc[minibus, "Passenger ID"]
@@ -523,6 +581,35 @@ def build_kpi_summary(df, weeks):
     )
 
     metrics["Ambulift Jobs Per Week"] = ambulift.sum() / weeks
+
+    metrics["Minibus Share %"] = (
+    minibus.sum()
+    / max(len(df), 1)
+    * 100
+    )
+
+    metrics["Ambulift Share %"] = (
+        ambulift.sum()
+        / max(len(df), 1)
+        * 100
+    )
+
+    metrics["Minibus Jobs per 100 PRMs"] = (
+        minibus.sum()
+        / max(len(df), 1)
+        * 100
+    )
+
+    metrics["Ambulift Jobs per 100 PRMs"] = (
+        ambulift.sum()
+        / max(len(df), 1)
+        * 100
+    )
+
+    metrics["Minibus : Ambulift Ratio"] = (
+        minibus.sum()
+        / max(ambulift.sum(), 1)
+    )
 
     metrics["Ambulift Hours Per Week"] = (
         df.loc[ambulift, "Service Minutes"]
@@ -557,30 +644,54 @@ def build_kpi_summary(df, weeks):
         / max(wchr_jobs, 1)
         * 100
     )
+    return metrics
 
-    arrivals = (
-        df["A/D"] == "A"
+
+def weekday_vehicle_analysis(df):
+    """Summarise PRM, ambulift and minibus jobs by weekday."""
+
+    result = (
+        df.groupby("Weekday")
+        .agg(
+            PRM_Jobs=("Job ID", "count"),
+            Ambulift_Jobs=(
+                "Vehicle Type",
+                lambda x: (x == "Ambulift").sum()
+            ),
+            Minibus_Jobs=(
+                "Vehicle Type",
+                lambda x: (x == "Mini Bus").sum()
+            )
+        )
+        .reset_index()
     )
 
-    arrival_df = df.loc[arrivals].copy()
+    result["Ambulift Share %"] = (
+        result["Ambulift_Jobs"]
+        / result["PRM_Jobs"]
+        * 100
+    )
 
-    if len(arrival_df):
+    result["Minibus Share %"] = (
+        result["Minibus_Jobs"]
+        / result["PRM_Jobs"]
+        * 100
+    )
 
-        arrival_df["Arrival Gap"] = (
-            arrival_df["Job Start Time"]
-            - arrival_df["Scheduled Flight Time"]
-        ).dt.total_seconds() / 60
+    return result
 
-        for target in [5,10,15,20,30]:
 
-            metrics[f"ECAC <= {target} mins %"] = (
-                arrival_df["Arrival Gap"]
-                .between(0, target)
-                .mean()
-                * 100
-            )
+def ssr_vehicle_mix(df):
+    """Return the vehicle-type mix within each SSR code."""
 
-    return metrics
+    return (
+        pd.crosstab(
+            df["SSR Code"],
+            df["Vehicle Type"],
+            normalize="index"
+        )
+        * 100
+    ).reset_index()
 
 # ============================================================
 # MAIN ANALYSIS
@@ -611,9 +722,9 @@ if __name__ == "__main__":
     )
 
     print(f"Date range: {start} to {today:%Y-%m-%d}")
-    print("Days: Monday to Friday")
+    print(f"Weekday filter: {weekday_filter_label()}")
     print(
-        f"Daily job-start window: "
+        f"Operating window: "
         f"{OPERATING_START} to {OPERATING_END}\n"
     )
 
@@ -634,12 +745,12 @@ if __name__ == "__main__":
     )
 
     # ========================================================
-    # 2. FILTER TO MONDAY-FRIDAY, 14:30-18:00
+    # 2. FILTER TO THE CONFIGURED OPERATING WINDOW
     # ========================================================
 
     print(
-        "[2/5] Filtering to Monday-Friday, "
-        "14:30-18:00..."
+        "[2/5] Filtering to configured weekdays and "
+        "operating window..."
     )
 
     operation_df = filter_operating_window(
@@ -648,18 +759,35 @@ if __name__ == "__main__":
         end_time=OPERATING_END,
     )
 
-    trial_mask = (
-        (operation_df["Analysis Date"] >= pd.Timestamp(TRIAL_START))
-        & (operation_df["Analysis Date"] < pd.Timestamp(TRIAL_END))
+    four_weeks_mask = (
+    (operation_df["Analysis Date"]
+     >= pd.Timestamp(TRIAL_START) - pd.Timedelta(days=40))
+    &
+    (operation_df["Analysis Date"]
+     < (pd.Timestamp(TRIAL_START) - pd.Timedelta(days=33)))
     )
 
-    trial_df = operation_df.loc[trial_mask].copy()
+    trial_mask = (
+        (operation_df["Analysis Date"]
+        >= pd.Timestamp(TRIAL_START))
+        &
+        (operation_df["Analysis Date"]
+        < pd.Timestamp(TRIAL_END))
+    )
 
     baseline_df = operation_df.loc[
-        ~trial_mask
+        ~(four_weeks_mask | trial_mask)
     ].copy()
 
-    for df in [baseline_df, trial_df]:
+    four_weeks_df = operation_df.loc[
+        four_weeks_mask
+    ].copy()
+
+    trial_df = operation_df.loc[
+        trial_mask
+    ].copy()
+
+    for df in [baseline_df,four_weeks_df, trial_df]:
 
         df["Service Minutes"] = (
             df["Job End Time"]
@@ -671,50 +799,112 @@ if __name__ == "__main__":
         weeks=52
     )
 
+    four_weeks_metrics = build_kpi_summary(
+        four_weeks_df,
+        weeks=1
+    )
+
     trial_metrics = build_kpi_summary(
         trial_df,
         weeks=1
     )
 
     comparison_df = pd.DataFrame({
-        "Metric": baseline_metrics.keys(),
-        "Baseline": baseline_metrics.values(),
+    "Metric": baseline_metrics.keys(),
+    "Baseline": baseline_metrics.values(),
     })
 
-
+    comparison_df["4 Weeks Before Trial"] = (
+        comparison_df["Metric"]
+        .map(four_weeks_metrics)
+    )
 
     comparison_df["Trial"] = (
         comparison_df["Metric"]
         .map(trial_metrics)
     )
 
-    comparison_df["Difference"] = (
+    comparison_df["Change vs 4 Weeks Before"] = (
         comparison_df["Trial"]
-        - comparison_df["Baseline"]
+        - comparison_df["4 Weeks Before Trial"]
     )
 
-    comparison_df["Difference %"] = (
-        comparison_df["Difference"]
-        / comparison_df["Baseline"]
+    comparison_df["Change vs 4 Weeks Before %"] = (
+        comparison_df["Change vs 4 Weeks Before"]
+        / comparison_df["4 Weeks Before Trial"]
         * 100
     )
 
-    ambulift_release = (
-            baseline_metrics["Ambulift Hours Per Week"]
-            - trial_metrics["Ambulift Hours Per Week"]
+    expected_ambulift_jobs = (
+        trial_metrics["PRM Jobs Per Week"]
+        *
+        (
+            four_weeks_metrics["Ambulift Jobs Per Week"]
+            /
+            four_weeks_metrics["PRM Jobs Per Week"]
         )
+    )
+
+    ambulift_difference = (
+        trial_metrics["Ambulift Jobs Per Week"]
+        - expected_ambulift_jobs
+    )
 
     comparison_df.loc[len(comparison_df)] = [
-        "Ambulift Hours Released Per Week",
-        baseline_metrics["Ambulift Hours Per Week"],
-        trial_metrics["Ambulift Hours Per Week"],
-        ambulift_release,
+        "Expected Ambulift Jobs",
+        pd.NA,
+        expected_ambulift_jobs,
+        trial_metrics["Ambulift Jobs Per Week"],
+        ambulift_difference,
         (
-            ambulift_release
-            / baseline_metrics["Ambulift Hours Per Week"]
+            ambulift_difference
+            / max(expected_ambulift_jobs, 1)
             * 100
         )
     ]
+
+    baseline_weekday_analysis = (
+        weekday_vehicle_analysis(baseline_df)
+    )
+
+    four_weeks_weekday_analysis = (
+        weekday_vehicle_analysis(four_weeks_df)
+    )
+
+    trial_weekday_analysis = (
+        weekday_vehicle_analysis(trial_df)
+    )
+
+    weekday_comparison = (
+        four_weeks_weekday_analysis
+        .merge(
+            trial_weekday_analysis,
+            on="Weekday",
+            suffixes=("_4W", "_Trial")
+        )
+    )
+
+    weekday_comparison["Minibus Share Change"] = (
+        weekday_comparison["Minibus Share %_Trial"]
+        - weekday_comparison["Minibus Share %_4W"]
+    )
+
+    weekday_comparison["Ambulift Share Change"] = (
+        weekday_comparison["Ambulift Share %_Trial"]
+        - weekday_comparison["Ambulift Share %_4W"]
+    )
+
+    baseline_ssr_mix = ssr_vehicle_mix(
+        baseline_df
+    )
+
+    four_weeks_ssr_mix = ssr_vehicle_mix(
+        four_weeks_df
+    )
+
+    trial_ssr_mix = ssr_vehicle_mix(
+        trial_df
+    )
 
     t2 = step(
         t1,
@@ -726,16 +916,13 @@ if __name__ == "__main__":
 
     if operation_df.empty:
         raise ValueError(
-            "No PRM records were found for Monday-Friday "
+            "No PRM records were found for the configured weekdays "
             f"between {OPERATING_START} and {OPERATING_END} "
             f"from {start} to {today:%Y-%m-%d}."
         )
 
-    print(
-        "\nOperating-window coverage:"
-    )
-
-    print(
+    print_table(
+        "Operating-window coverage:",
         operation_df[
             [
                 "Analysis Date",
@@ -744,7 +931,6 @@ if __name__ == "__main__":
         ]
         .drop_duplicates()
         .sort_values("Analysis Date")
-        .to_string(index=False)
     )
 
     # ========================================================
@@ -785,6 +971,12 @@ if __name__ == "__main__":
         )
     )
 
+    four_weeks_vehicle_service_times = (
+        vehicle_job_service_time(
+            four_weeks_df
+        )
+    )
+
     t4 = step(
         t3,
         (
@@ -821,6 +1013,20 @@ if __name__ == "__main__":
         end_time=OPERATING_END,
     )
 
+    (
+        four_weeks_utilisation_by_time,
+        four_weeks_utilisation_by_time_pivot,
+        four_weeks_average_rolling_hour_usage,
+        four_weeks_peak_rolling_hours,
+        four_weeks_vehicle_utilisation,
+        four_weeks_rolling_hour_statistics,
+        four_weeks_rolling_window_detail,
+    ) = operating_window_vehicle_utilisation(
+        four_weeks_df,
+        start_time=OPERATING_START,
+        end_time=OPERATING_END,
+    )
+
     t5 = step(
         t4,
         (
@@ -829,58 +1035,29 @@ if __name__ == "__main__":
         ),
     )
 
-    print(
-        "\n=== AVERAGE PRMs PER VEHICLE MODEL "
-        "BY ROLLING-HOUR WINDOW ==="
+    print_table(
+        "Average PRMs per vehicle model by rolling-hour window:",
+        baseline_utilisation_by_time_pivot,
     )
 
-    print(
-        baseline_utilisation_by_time_pivot.to_string(
-            index=False
-        )
+    print_table(
+        "Overall average PRMs per vehicle model:",
+        baseline_average_rolling_hour_usage,
     )
 
-    print(
-        "\n=== OVERALL AVERAGE PRMs "
-        "PER VEHICLE MODEL ==="
+    print_table(
+        "Peak rolling hour by vehicle model:",
+        baseline_peak_rolling_hours,
     )
 
-    print(
-        baseline_average_rolling_hour_usage.to_string(
-            index=False
-        )
+    print_table(
+        "Vehicle-model utilisation:",
+        baseline_vehicle_utilisation,
     )
 
-    print(
-        "\n=== PEAK ROLLING HOUR "
-        "BY VEHICLE MODEL ==="
-    )
-
-    print(
-        baseline_peak_rolling_hours.to_string(
-            index=False
-        )
-    )
-
-    print(
-        "\n=== VEHICLE-MODEL UTILISATION ==="
-    )
-
-    print(
-        baseline_vehicle_utilisation.to_string(
-            index=False
-        )
-    )
-
-    print(
-        "\n=== ROLLING-HOUR MEDIAN "
-        "AND STANDARD DEVIATION ==="
-    )
-
-    print(
-        baseline_rolling_hour_statistics.to_string(
-            index=False
-        )
+    print_table(
+        "Rolling-hour median and standard deviation:",
+        baseline_rolling_hour_statistics,
     )
 
     # ========================================================
@@ -923,11 +1100,8 @@ if __name__ == "__main__":
         sort=True,
     ):
 
-        print(
-            f"\n=== {vehicle_type.upper()} ==="
-        )
-
-        print(
+        print_table(
+            f"{vehicle_type.upper()}:",
             subset[
                 [
                     "SSR Code",
@@ -935,14 +1109,12 @@ if __name__ == "__main__":
                     "Vehicle Passenger Total",
                     "SSR Percentage",
                 ]
-            ].to_string(
-                index=False,
-                formatters={
-                    "SSR Percentage": (
-                        lambda value: f"{value:.2f}%"
-                    )
-                },
-            )
+            ],
+            formatters={
+                "SSR Percentage": (
+                    lambda value: f"{value:.2f}%"
+                )
+            },
         )
 
     print(
@@ -966,7 +1138,7 @@ if __name__ == "__main__":
 
     output_file = (
         output_folder /
-        f"trial_KPIs_{run_date}.xlsx"
+        f"trial_KPIs_{run_date}_2.xlsx"
     )
 
     summary_df = pd.DataFrame({
@@ -1088,21 +1260,51 @@ if __name__ == "__main__":
             index=False
         )
 
-        baseline_ssr_vehicle_usage.to_excel(
+        baseline_ssr_mix.to_excel(
             writer,
-            sheet_name="SSR by Vehicle Baseline",
+            sheet_name="SSR Mix Baseline",
             index=False
         )
 
-        trial_ssr_vehicle_usage.to_excel(
+        four_weeks_ssr_mix.to_excel(
             writer,
-            sheet_name="SSR by Vehicle Trial",
+            sheet_name="SSR Mix 4W Pre",
+            index=False
+        )
+
+        trial_ssr_mix.to_excel(
+            writer,
+            sheet_name="SSR Mix Trial",
             index=False
         )
 
         comparison_df.to_excel(
             writer,
             sheet_name="Trial KPI Comparison",
+            index=False
+        )
+
+        baseline_weekday_analysis.to_excel(
+            writer,
+            sheet_name="Weekday Baseline",
+            index=False
+        )
+
+        four_weeks_weekday_analysis.to_excel(
+            writer,
+            sheet_name="Weekday 4W Pre",
+            index=False
+        )
+
+        trial_weekday_analysis.to_excel(
+            writer,
+            sheet_name="Weekday Trial",
+            index=False
+        )
+
+        weekday_comparison.to_excel(
+            writer,
+            sheet_name="Weekday Comparison",
             index=False
         )
 
