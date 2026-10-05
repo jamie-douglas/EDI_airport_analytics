@@ -327,7 +327,13 @@ Six feature groups were evaluated independently against the final Generation 2 b
 *   **Entry Results:** Calendar effects did not provide consistent improvement. For example, at T-0, Baseline and Calendar WAPE were both **1.176%**. At T-2, Calendar WAPE was **5.849%** while Baseline was **5.742%**.
 *   **Exit Results:** Similar mixed results were observed. At T-14, WAPE slightly worsened from **7.78%** to **7.96%**. At T-28, it improved from **10.74%** to **9.79%**.
 *   **Interpretation:** Calendar effects did not provide consistent improvement. Instead, Generation 2's existing `Weekday Structure`, `Month Seasonality`, and `Trend Components` already captured much of the available calendar information.
-*   **Decision:** **Not Adopted.** Calendar adjustments failed to demonstrate consistent incremental forecasting value.
+*   **Decision**: **Partially Adopted**. Calendar effects were not sufficiently strong or consistent to justify becoming a standalone forecasting component within the Generation 2
+ensemble.However, the experiments demonstrated that certain calendar-driven demand
+patterns remained visible at longer forecast horizons, particularly for
+exit demand. Calendar information therefore informed production forecast
+design indirectly through historical window selection, seasonal context,
+and parameter calibration rather than through explicit calendar-based
+forecast weighting.
 
 **Booking Regimes (Hypothesis: Forecasts may behave differently during Low and High Demand Environments):**
 *   **Method:** Demand was categorized into five booking-position bands (Q1 to Q5) using rolling training-period quantiles.
@@ -355,7 +361,7 @@ Six feature groups were evaluated independently against the final Generation 2 b
 | Historical Window Selection | Strong | Adopted |
 | Booking Pace | Strong | Influenced Production |
 | Cancellation Behaviour | Moderate | Influenced Production |
-| Calendar Effects | Weak | Rejected |
+| Calendar Effects | Weak | Indirectly Incorporated |
 | Booking Regimes | Weak | Rejected |
 | Weekday Trend | Weak | Rejected |
 

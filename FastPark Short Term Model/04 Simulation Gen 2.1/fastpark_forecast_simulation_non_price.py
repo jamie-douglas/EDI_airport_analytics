@@ -63,7 +63,15 @@ except ImportError:
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
-for candidate in (SCRIPT_DIR, PROJECT_ROOT):
+GEN1_DIR = PROJECT_ROOT / "02 Simulation Gen 1"
+GEN2_DIR = PROJECT_ROOT / "03 Simulation Gen 2"
+
+for candidate in (
+    SCRIPT_DIR,
+    PROJECT_ROOT,
+    GEN1_DIR,
+    GEN2_DIR,
+):
     if str(candidate) not in sys.path:
         sys.path.append(str(candidate))
 
@@ -131,7 +139,6 @@ MANUAL_CALENDAR_PERIODS = {
     ],
 }
 
-
 # =============================================================================
 # 2. CONFIGURATION
 # =============================================================================
@@ -148,8 +155,10 @@ def get_non_price_config():
         "simulation_start": "2025-07-01",
         "simulation_end": "2026-07-31",
         "forecast_horizons_days": [
-            0, 1, 2, 3, 4, 5, 6, 7,
-            14, 21, 28, 35, 42, 49, 56,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+            14, 15, 16, 17, 18, 19, 20, 21,
+            22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56
         ],
 
         # Rolling-origin setup.
@@ -620,6 +629,7 @@ def apply_training_pace_bands(training, validation, test, flow, config):
     pace_col = f"{flow}_pace_per_day"
     relative_col = f"{flow}_pace_relative"
     band_col = f"{flow}_pace_band"
+    
 
     medians = (
         training.groupby(["horizon_days", "weekday"], dropna=False)[pace_col]
@@ -627,6 +637,7 @@ def apply_training_pace_bands(training, validation, test, flow, config):
         .rename("training_pace_median")
         .reset_index()
     )
+
 
     outputs = []
     for frame in (training, validation, test):
@@ -1720,6 +1731,12 @@ def run_experiments(component_table, refined, config):
     historical_diagnostics = []
     prior_weight_lookup = {}
 
+    pace_parameter_rows = []
+    cancellation_parameter_rows = []
+    calendar_parameter_rows = []
+    regime_parameter_rows = []
+
+
     tasks = len(folds) * 2 * len(horizons) * len(experiments)
     counter = 0
 
@@ -1740,6 +1757,75 @@ def run_experiments(component_table, refined, config):
                 test = horizon_frame[
                     horizon_frame["month_start"].eq(fold["test_month"])
                 ].copy()
+
+                # ------------------------------------------------------------------
+                # EXPORTABLE PACE MEDIANS
+                # ------------------------------------------------------------------
+
+                for pace_flow in ("entry", "exit"):
+
+                    pace_col = f"{pace_flow}_pace_per_day"
+
+                    pace_medians = (
+                        training
+                        .groupby(
+                            ["horizon_days", "weekday"],
+                            dropna=False
+                        )[pace_col]
+                        .median()
+                        .reset_index()
+                        .rename(
+                            columns={
+                                pace_col: "training_pace_median"
+                            }
+                        )
+                    )
+
+                    # ------------------------------------------------------------------
+                    # EXPORTABLE CANCELLATION MEDIANS
+                    # ------------------------------------------------------------------
+
+                    if config["enable_cancellation_test"]:
+
+                        window_days = config[
+                            "primary_cancellation_window_days"
+                        ]
+
+                        for cancel_flow in ("entry", "exit"):
+
+                            rate_col = (
+                                f"{cancel_flow}"
+                                f"_cancellation_rate_last_"
+                                f"{window_days}d"
+                            )
+
+                            cancellation_medians = (
+                                training
+                                .groupby(
+                                    ["horizon_days", "weekday"],
+                                    dropna=False
+                                )[rate_col]
+                                .median()
+                                .reset_index()
+                                .rename(
+                                    columns={
+                                        rate_col:
+                                        "training_cancellation_median"
+                                    }
+                                )
+                            )
+
+                            cancellation_medians["flow"] = cancel_flow
+
+                            cancellation_parameter_rows.append(
+                                cancellation_medians
+                            )
+
+                    pace_medians["flow"] = pace_flow
+
+                    pace_parameter_rows.append(
+                        pace_medians
+                    )
 
                 if training.empty or validation.empty or test.empty:
                     continue
@@ -1853,14 +1939,22 @@ def run_experiments(component_table, refined, config):
 
     print()
     return (
-        pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame(),
+        pd.concat(predictions, ignore_index=True),
         pd.DataFrame(selected_rows),
-        pd.concat(all_tests, ignore_index=True) if all_tests else pd.DataFrame(),
-        pd.concat(historical_diagnostics, ignore_index=True)
-        if historical_diagnostics else pd.DataFrame(),
+        pd.concat(all_tests, ignore_index=True),
+        pd.concat(historical_diagnostics, ignore_index=True),
         pd.DataFrame(folds),
-    )
 
+        pd.concat(
+            pace_parameter_rows,
+            ignore_index=True
+        ),
+
+        pd.concat(
+            cancellation_parameter_rows,
+            ignore_index=True
+        )
+    )
 
 # =============================================================================
 # 14. PERFORMANCE AND INCREMENTAL BENEFIT
@@ -1988,6 +2082,8 @@ def export_results(
     historical_diagnostics,
     folds,
     all_weight_tests,
+    pace_parameters,
+    cancellation_parameters,
 ):
     path = Path(config["output_path"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2005,6 +2101,8 @@ def export_results(
         component_table.to_excel(excel_writer = writer, sheet_name= "Extended Components", index=False)
         if not all_weight_tests.empty:
             all_weight_tests.to_excel(excel_writer = writer, sheet_name= "All Weight Tests", index=False)
+        pace_parameters.to_excel(excel_writer = writer, sheet_name= "Pace Parameters", index=False)
+        cancellation_parameters.to_excel(excel_writer = writer, sheet_name= "Cancellation Parameters", index=False)
         format_workbook(writer.book)
     return path
 
@@ -2104,7 +2202,7 @@ if __name__ == "__main__":
 
     checkpoint(component_table, checkpoint_dir / "02_extended_components.pkl")
 
-    predictions, selected_weights, all_weight_tests, history_diag, folds = (
+    predictions, selected_weights, all_weight_tests, history_diag, folds, pace_parameters, cancellation_parameters = (
         run_experiments(
             component_table=component_table,
             refined=refined,
@@ -2141,6 +2239,8 @@ if __name__ == "__main__":
         historical_diagnostics=history_diag,
         folds=folds,
         all_weight_tests=all_weight_tests,
+        pace_parameters=pace_parameters,
+        cancellation_parameters=cancellation_parameters,
     )
     timer = step(timer, f"Exported {output_path.name}")
 

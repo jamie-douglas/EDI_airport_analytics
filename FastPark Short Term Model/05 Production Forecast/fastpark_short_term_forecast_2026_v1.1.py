@@ -443,96 +443,93 @@ def expected_return_daily_component(
 # BOOKING PACE
 # =============================================================================
 
-def booking_pace_factor(
-    bookings,
+def booking_pace_adjustment(
     target_date,
+    horizon_days,
+    bookings,
     cutoff_timestamp,
 ):
     """
-    Generation 2.1 pace logic.
+    Generation 2.1 Booking Pace.
 
-    Compares:
+    Measures whether booking growth is:
 
-        current booking position
+        Very Low
+        Low
+        Normal
+        High
+        Very High
 
-    against
+    relative to historical booking evolution.
 
-        historical booking position at
-        the same forecast horizon.
+    Returns a pace adjustment factor.
     """
 
-    target_date = pd.Timestamp(
-        target_date
-    ).normalize()
-
-    cutoff_timestamp = pd.Timestamp(
-        cutoff_timestamp
-    )
-
-    horizon_days = (
-        target_date
-        -
-        cutoff_timestamp.normalize()
-    ).days
-
-    current_visible = (
+    visible_bookings = (
         get_bookings_active_as_of(
             bookings,
             cutoff_timestamp,
         )
     )
 
-    current_visible = (
-        current_visible[
-            current_visible["entryDate"]
+    visible_bookings = (
+        visible_bookings[
+            visible_bookings["entryDate"]
             .dt.normalize()
             .eq(target_date)
-        ]["bookingId"]
+        ]
+    )
+
+    current_position = (
+        visible_bookings["bookingId"]
         .nunique()
     )
 
-    if horizon_days <= 0:
-        return 1.0
-
-    historical_positions = []
+    earlier_horizon = horizon_days + 7
 
     history = bookings.copy()
 
-    history = history[
-        history["entryDate"].notna()
-    ]
-
-    for _, booking in history.iterrows():
-
-        lead = (
-            booking["entryDate"]
+    history["lead_days"] = (
+        (
+            history["entryDate"]
             -
-            booking["createdAt"]
-        ).days
-
-        if lead >= horizon_days:
-
-            historical_positions.append(1)
-
-    expected_position = len(
-        historical_positions
+            history["createdAt"]
+        )
+        .dt.days
     )
 
-    if expected_position <= 0:
+    historical_position = (
+        history[
+            history["lead_days"]
+            .ge(earlier_horizon)
+        ]["bookingId"]
+        .count()
+    )
+
+    if historical_position <= 0:
         return 1.0
 
-    pace_factor = (
-        current_visible
-        / expected_position
-    )
+    pace_change = (
+        current_position
+        -
+        historical_position
+    ) / historical_position
 
-    return float(
-        np.clip(
-            pace_factor,
-            0.85,
-            1.15,
-        )
-    )
+    if pace_change <= -0.50:
+        return 0.90
+
+    elif pace_change <= -0.15:
+        return 0.95
+
+    elif pace_change < 0.15:
+        return 1.00
+
+    elif pace_change < 0.50:
+        return 1.05
+
+    else:
+        return 1.10
+
 
 # =============================================================================
 # CANCELLATIONS
@@ -970,17 +967,29 @@ def create_forecast_for_date(
         cutoff_timestamp,
     )
 
-    entry_booking = (
+    entry_visibility_signal = (
         entry_visibility(
             bookings,
             target_date,
             cutoff_timestamp,
         )
-        *
-        pace
-        *
-        cancel
     )
+
+    pace_factor = (
+        booking_pace_adjustment(
+            target_date,
+            horizon_days,
+            bookings,
+            cutoff_timestamp,
+        )
+    )
+
+    entry_booking = (
+        entry_visibility_signal
+        *
+        pace_factor
+    )
+
 
     entry_weekday = (
         same_weekday_forecast(
@@ -1034,10 +1043,11 @@ def create_forecast_for_date(
         )
     )
 
-    expected_return_signal = (
-        expected_return_daily_component(
-            operations,
+    exit_booking = (
+        exit_visibility(
+            bookings,
             target_date,
+            cutoff_timestamp,
         )
     )
 

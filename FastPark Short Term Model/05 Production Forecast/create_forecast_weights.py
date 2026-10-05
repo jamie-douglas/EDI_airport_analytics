@@ -18,7 +18,6 @@ backtests contained in:
 This ensures the operational forecast always reflects the most
 successful combinations discovered during model calibration.
 
-Method
 ------
 For each:
 
@@ -65,7 +64,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 INPUT_FILE = (
     BASE_DIR
-    / "refined_selected_weights_backup.csv"
+    / "refined_selected_weights_backup_all_dates.csv"
 )
 
 OUTPUT_FILE = (
