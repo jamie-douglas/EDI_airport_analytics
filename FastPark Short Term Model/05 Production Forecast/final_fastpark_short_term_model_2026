@@ -1,0 +1,3898 @@
+"""
+FastPark Production Forecast
+===========================
+
+This script builds a forward-looking forecast for FastPark entries and exits.
+It is designed to be run as a production model: it loads the latest booking and
+operations history, applies the learned forecast weights and parameters from the
+earlier simulation work, and produces a forecast for the next 56 days starting
+from the configured run date.
+
+The model follows the same logic as the historical simulation work:
+- it uses only information that would have been known at the forecast cutoff;
+- it applies horizon-specific weights and adjustments;
+- it blends booking visibility, seasonality, trend, and behavioural signals;
+- it then distributes daily totals into hourly profiles.
+
+What needs to be configured
+---------------------------
+Before running this script, review `PRODUCTION_CONFIG` and confirm:
+- the database connection is correct;
+- the forecast start date is set as expected;
+- the output paths for `forecast_weights.csv` and `forecast_parameters.csv` exist;
+- the historical lookback period is long enough for stable learning;
+- any model thresholds or duration bands still match the earlier generated files.
+
+Typical output
+--------------
+The script produces daily and hourly forecast tables for entries and exits across
+`current_run_date` through `current_run_date + forecast_lookahead_days`.
+"""
+
+# =============================================================================
+# 0. IMPORTS
+# =============================================================================
+
+import sys
+import pathlib
+import time
+
+# Standard library imports
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+# External library imports
+import numpy as np
+import pandas as pd
+
+# Allowed utility imports (must be available in modules/utils)
+# Ensure these files (db.py, query.py, progress.py) are accessible in sys.path
+from modules.utils.db import get_engine
+from modules.utils.query import query
+from modules.utils.progress import step
+
+# =============================================================================
+# 1. GLOBAL CONFIGURATION FOR PRODUCTION
+# =============================================================================
+
+# Define the root directory for the project. This is assumed to be two levels
+# up from where this script is located (e.g., if script is in `project/scripts/`,
+# PROJECT_ROOT is `project/`).
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# Add PROJECT_ROOT to sys.path to ensure modules.utils can be found.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+# Define the directory for storing learned parameters and output forecasts.
+# This should be consistent with where your simulation outputs were saved.
+PRODUCTION_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+PRODUCTION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# --- PRODUCTION_CONFIG ---
+# This is the main settings block for the forecast. Review these values before each run.
+# Most settings are safe to leave as-is, but the run date, paths, and duration bands
+# are the key items to check against the current data and the earlier model outputs.
+PRODUCTION_CONFIG = {
+    # --- Database connection ---
+    # The DSN must exist in the environment where this script runs.
+    "db_dsn": "AzureConnection",
+    "db_username": "jamie_douglas",
+
+    # --- Forecast run settings ---
+    # `current_run_date` is the date the forecast is being produced from.
+    # Horizon 0 = today, horizon 1 = tomorrow, etc.
+    # Leave as None to use the actual system date.
+    "current_run_date": None,
+    "forecast_lookahead_days": 56,
+
+    # --- Learned model files ---
+    # These CSV files are the outputs from the earlier simulation work and are used
+    # to apply the optimised weights and parameters for the forecast.
+    "forecast_weights_path": PRODUCTION_OUTPUT_DIR / "forecast_weights.csv",
+    "forecast_parameters_path": PRODUCTION_OUTPUT_DIR / "forecast_parameters.csv",
+
+    # --- Historical lookback ---
+    # Use enough history to make the booking curves, trend components, and weekly
+    # seasonality stable. The script loads all historical data up to the run date.
+    "history_start_date": "2024-01-01",
+
+    # --- FastPark data fields ---
+    "asset_name": "FastPark",
+    "valid_booking_status": "B",
+    "cancelled_status": "CX",
+    "unknown_statuses": ["F"],
+
+    # Duration bands are used for the exit-booking completion model. These must stay
+    # aligned with the historical duration logic used when the weights were trained.
+    "duration_bins_days": [0, 1, 3, 7, 10, 14, 21, 999],
+    "duration_labels": [
+        "0-1 days", "2-3 days", "4-7 days", "8-10 days",
+        "11-14 days", "15-21 days", "22+ days"
+    ],
+
+    # Operational timestamps used to reconcile bookings to actual movements.
+    "actual_entry_timestamp_col": "CheckInEnded",
+    "actual_exit_timestamp_col": "ActualCheckedOutDate",
+
+    # Passenger and flight fields used in the historical context tables.
+    "historical_pax_col": "Passengers",
+    "passenger_flight_flag_col": "IsPassengerFlight",
+    "passenger_flight_flag_value": 1,
+
+    # --- Trend and behavioural controls ---
+    # These values stop extreme trend responses and define the speed at which the
+    # model reacts to booking pace and cancellation behaviour.
+    "trend_factor_min": 0.70,
+    "trend_factor_max": 1.30,
+    "trend_recent_days": 28,
+    "trend_comparison_days": 84,
+    "minimum_curve_observations": 10,
+    "pace_lookback_days": 7,
+    "pace_bins": [-np.inf, -0.50, -0.15, 0.15, 0.50, np.inf],
+    "pace_labels": ["very_low", "low", "normal", "high", "very_high"],
+
+    # --- Cancellation features ---
+    # These are used to adjust the raw booking curve based on recent cancellation
+    # behaviour known at the cutoff. Set to False to disable this adjustment.
+    "enable_cancellation_test": True,
+    "booking_id_col": "bookingId",
+    "booking_created_timestamp_col": "createdAt",
+    "cancellation_timestamp_col": "cancelledAt",
+    "booking_entry_date_col": "entryDate",
+    "booking_exit_date_col": "exitDate",
+    "cancellation_windows_days": [1, 3, 7],
+    "primary_cancellation_window_days": 7,
+    "cancellation_rate_bins": [-np.inf, -0.50, -0.15, 0.15, 0.50, np.inf],
+    "cancellation_rate_labels": ["very_low", "low", "normal", "high", "very_high"],
+
+    # --- Output files ---
+    # These are the final daily and hourly outputs created by the production run.
+    "daily_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_daily_forecast.csv",
+    "hourly_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_hourly_forecast.csv",
+}
+
+
+# =============================================================================
+# 2. UTILITY FUNCTIONS (Copied from Simulation/Analysis Scripts)
+# =============================================================================
+
+# --- General Utilities ---
+
+def clip_forecast(value: float) -> float:
+    """
+    Ensures forecast values are non-negative. Returns NaN for non-finite inputs.
+    (Copied from G1 Simulation)
+    """
+    if value is None or pd.isna(value):
+        return np.nan
+    return max(0.0, float(value))
+
+def safe_mean(values: list | np.ndarray | pd.Series) -> float:
+    """
+    Calculates the mean, safely ignoring NaN and infinite values.
+    Returns NaN if the series is empty after cleaning.
+    (Copied from G1 Simulation)
+    """
+    values = (
+        pd.Series(values, dtype=float)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+    if values.empty:
+        return np.nan
+    return float(values.mean())
+
+def weighted_average(values: list | np.ndarray | pd.Series, weights: list | np.ndarray | pd.Series) -> float:
+    """
+    Calculates a weighted average, automatically re-normalizing weights
+    over only the available (non-NaN) values.
+    (Copied from G2 Simulation)
+    """
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+
+    # Identify valid elements where both value and weight are finite and weight is non-negative
+    valid = np.isfinite(values) & np.isfinite(weights) & (weights >= 0)
+
+    if not valid.any():
+        return np.nan # Return NaN if no valid pairs
+
+    valid_values = values[valid]
+    valid_weights = weights[valid]
+
+    weight_total = valid_weights.sum()
+
+    if weight_total <= 0:
+        return np.nan # Avoid division by zero if all valid weights sum to zero
+
+    # Calculate weighted average and clip to ensure non-negative output
+    return clip_forecast(
+        np.average(
+            valid_values,
+            weights=valid_weights,
+        )
+    )
+
+def safe_ratio(numerator: float, denominator: float, default: float = np.nan) -> float:
+    """
+    Calculates a ratio, handling division by zero or NaN values gracefully.
+    (Copied from G2.1 Simulation)
+    """
+    if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
+        return default
+    return float(numerator) / float(denominator)
+
+
+def nearest_earlier_horizon(horizon: int, available_horizons: List[int], minimum_gap: int = 1) -> int | None:
+    """
+    Return the nearest available horizon that is strictly after the current horizon.
+
+    The historical simulation uses this helper for pace calculations, and the logic is
+    intentionally written in terms of a future horizon rather than a past one. In other
+    words, this is not the 'previous horizon'; it is the nearest later horizon that is
+    sufficiently far enough away to satisfy the minimum gap requirement.
+
+    This keeps the production script aligned with the earlier simulation function names and
+    the actual pace calculation used when estimating booking growth between horizons.
+    """
+    candidates = [
+        h for h in available_horizons
+        if h > horizon and h - horizon >= minimum_gap
+    ]
+    return min(candidates) if candidates else None
+
+# --- Data Loading Functions (from Analysis Script) ---
+
+def get_fastpark_bookings(
+    start: str | None = None,
+    end: str | None = None,
+    statuses: list[str] | None = None,
+    asset_name: str = "FastPark",
+    engine=None,
+):
+    """
+    Queries FastPark booking records from AirportX.v_Bookings.
+    (Copied from Analysis Script)
+
+    Purpose:
+        This table represents booking intent:
+        - when the booking was created
+        - when the customer intends to enter
+        - when the customer intends to exit
+        - booking status
+        - cancellation timestamp
+        - price/product/channel information
+        - declared inbound/outbound flight information
+
+    Date filtering:
+        Uses interval overlap on entryDate and exitDate:
+            entryDate < end
+            AND exitDate >= start
+        This is important because a vehicle may enter before the analysis
+        window but exit inside the analysis window.
+
+    Status logic:
+        B  = valid / booked
+        CX = cancelled
+        F  = unknown, analyse separately until confirmed
+
+    Parameters
+    ----------
+    start : str, optional
+        Inclusive start date.
+    end : str, optional
+        Exclusive end date.
+    statuses : list[str], optional
+        Booking statuses to include. If None, defaults to ["B", "CX", "F"].
+    asset_name : str
+        Asset name to filter to. Default is "FastPark".
+    engine : optional
+        SQLAlchemy engine (obtained via `get_engine`).
+
+    Returns
+    -------
+    pandas.DataFrame
+        FastPark booking records.
+    """
+    if statuses is None:
+        statuses = ["B", "CX", "F"]
+
+    columns = [
+        "bookingUuid", "bookingId", "transactionId", "createdAt", "updatedAt",
+        "cancelledAt", "channel", "productCode", "productGroup", "productName",
+        "productPrice", "productQuantity", "productTotal", "entryDate", "exitDate",
+        "status", "assetCode", "assetName", "bookingTotal", "leadtime", "duration",
+        "nationality", "inboundAirline", "inboundFlight", "inboundRoute",
+        "outboundAirline", "outboundFlight", "outboundRoute", "promoCode",
+    ]
+
+    where = ["assetName = :asset_name"]
+    params = {"asset_name": asset_name}
+
+    if statuses:
+        status_placeholders = []
+        for i, status in enumerate(statuses):
+            key = f"status_{i}"
+            status_placeholders.append(f":{key}")
+            params[key] = status
+        where.append(f"status IN ({', '.join(status_placeholders)})")
+
+    df = query(
+        table="AirportX.v_Bookings",
+        columns=columns,
+        where=where,
+        params=params,
+        date_column="entryDate",
+        end_column="exitDate",
+        start=start,
+        end=end,
+        overlap=True,
+        order_by="entryDate, bookingId",
+        engine=engine,
+    )
+    return df
+
+def get_fastpark_entry_exits(
+    start: str | None = None,
+    end: str | None = None,
+    engine=None,
+):
+    """
+    Queries operational FastPark entry/exit records.
+    (Copied from Analysis Script)
+
+    Purpose:
+        This table represents operational reality:
+        - when the customer started kiosk check-in
+        - when the customer finished kiosk check-in
+        - when the key is available
+        - expected/advised return date
+        - actual checkout date
+        - return flight information
+
+    Operational interpretation:
+        CheckInEnded: Customer finishes the kiosk process. This is when the key
+                      is available and the car can be moved. Use for actual entry demand.
+        ActualCheckedOutDate: Use for actual exit demand.
+
+    Date filtering:
+        A booking can enter before the analysis window and exit inside it.
+        Uses or_events=True so that records are included if either:
+            CheckInEnded is inside the window OR ActualCheckedOutDate is inside the window
+
+    Parameters
+    ----------
+    start : str, optional
+        Inclusive start date.
+    end : str, optional
+        Exclusive end date.
+    engine : optional
+        SQLAlchemy engine (obtained via `get_engine`).
+
+    Returns
+    -------
+    pandas.DataFrame
+        FastPark operational entry/exit records.
+    """
+    columns = [
+        "BookingReference", "CheckInStarted", "CheckInEnded", "VehicleStatus",
+        "CheckInDurationSecs", "ExpectedArrivalDate", "ExpectedReturnDate",
+        "ExpectedReturnDateID", "ExpectedReturnTimeID", "ExpectedReturnZuluDateID",
+        "ExpectedReturnZuluTimeID", "ReturnFlight", "ReturnFlightOperator",
+        "ReturnFlightNumber", "ChromaFlightID", "ChromaDateTime_Local",
+        "ActualCheckedOutDate", "CheckedInBy", "CheckedOutBy", "KeyLockerBox",
+        "SourceFile", "RecordInsertedBy", "RecordInsertedDateTime",
+        "RecordUpdatedBy", "RecordUpdatedDateTime",
+    ]
+
+    df = query(
+        table="FastPark.v_EntryAndExits",
+        columns=columns,
+        where=None,
+        params=None,
+        date_column="CheckInEnded",
+        end_column="ActualCheckedOutDate",
+        start=start,
+        end=end,
+        or_events=True, # Important for capturing events that span the window.
+        order_by="COALESCE(CheckInEnded, ActualCheckedOutDate), BookingReference",
+        engine=engine,
+    )
+    return df
+
+def get_historical_flight_performance(
+    start: str | None = None,
+    end: str | None = None,
+    engine=None,
+):
+    """
+    Queries historical passenger flight data from EAL.FlightPerformance.
+    (Copied from Analysis Script)
+
+    Purpose:
+        This table provides the airport demand context:
+        - arriving passengers, departing passengers, airline mix, country mix,
+          domestic/international split, flight counts, etc.
+
+    Filtering:
+        Uses `IsPassengerFlight = 1` to filter for passenger-carrying flights.
+
+    Parameters
+    ----------
+    start : str, optional
+        Inclusive start date based on ScheduledDateTime_Local.
+    end : str, optional
+        Exclusive end date based on ScheduledDateTime_Local.
+    engine : optional
+        SQLAlchemy engine (obtained via `get_engine`).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Historical passenger flight records.
+    """
+    columns = [
+        "FlightID", "ScheduledDateTime_Local", "ScheduledDateTime_Zulu",
+        "ScheduledDateTime_DateID_Local", "ScheduledDateTime_TimeID_Local",
+        "ActualDateTime_Local", "ArrDeptureCode", "FlightNumber",
+        "TicketedOperator", "AirlineCode_ICAO", "AirlineCode_IATA",
+        "Airline_Description", "FlightTypeCode_ACCORD", "FlightTypeDescription",
+        "AircraftTypeCode_ICAO", "AircraftTypeCode_IATA", "AircraftTypeDescription",
+        "AirportCode_IATA", "AirportCode_ICAO", "AirportDescription",
+        "AirportCountryCode", "CountryName", "AirportEU_NonEU",
+        "ACLSchedule_AircraftMaxPax", "Domestic_International", "Sector",
+        "ScheduleSeason", "FlightStatus", "FlightStatusDescription",
+        "FlightCancelled", "Passengers", "Children", "Infants",
+        "LatestForecast_Pax", "PublishedForecast_Pax", "LatestForecast_LoadFactor",
+        "PublishedForecast_LoadFactor", "IsPassengerFlight", "Pax_MostConfident",
+        "MaxPax_MostConfident", "SeatLoadFactor", "PaxForecastError",
+        "AbsolutePaxForecastError", "TransitPax", "Checkin_Total_Pax",
+        "PenetrationRate_CheckIn", "FirstCheckInAction_Local", "LastCheckInAction_Local",
+        "UniquePax_Boarding", "UniqueBookings_Boarding", "FirstBoardingScan_Local",
+        "LastBoardingScan_Local", "BoardingScanTime_Mins",
+        "BoardingPassScansSecurity", "BoardingPassScansCUPPS", "AOS_Source",
+        "UniqueID", "SlotDateTime_Local",
+    ]
+
+    where = ["IsPassengerFlight = :is_passenger_flight"]
+    params = {"is_passenger_flight": PRODUCTION_CONFIG["passenger_flight_flag_value"]}
+
+    df = query(
+        table="EAL.FlightPerformance",
+        columns=columns,
+        where=where,
+        params=params,
+        date_column="ScheduledDateTime_Local",
+        start=start,
+        end=end,
+        order_by="ScheduledDateTime_Local, FlightID",
+        engine=engine,
+    )
+    return df
+
+# --- Data Cleaning and Reconciliation Functions (from Analysis Script) ---
+
+def clean_bookings(bookings: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Cleans and enriches the raw bookings DataFrame, adding date/time features,
+    status flags, and recalculated metrics.
+    (Copied from Analysis Script)
+
+    Parameters:
+        bookings (pd.DataFrame): Raw DataFrame from `AirportX.v_Bookings`.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: Cleaned bookings DataFrame with derived fields.
+    """
+    df = bookings.copy()
+
+    # Convert datetime columns to proper datetime objects.
+    # `errors='coerce'` will turn unparseable dates into NaT (Not a Time).
+    df["createdAt"] = pd.to_datetime(df["createdAt"], errors="coerce")
+    df["updatedAt"] = pd.to_datetime(df["updatedAt"], errors="coerce")
+    df["cancelledAt"] = pd.to_datetime(df["cancelledAt"], errors="coerce")
+    df["entryDate"] = pd.to_datetime(df["entryDate"], errors="coerce")
+    df["exitDate"] = pd.to_datetime(df["exitDate"], errors="coerce")
+
+    # Create boolean flags for booking statuses based on configuration.
+    df["is_valid_booking"] = df["status"].eq(config["valid_booking_status"])
+    df["is_cancelled"] = df["status"].eq(config["cancelled_status"])
+    df["is_unknown_status"] = df["status"].isin(config["unknown_statuses"])
+
+    # Extract date and hour components for easier grouping and analysis.
+    df["booking_created_date"] = df["createdAt"].dt.date
+    df["booking_created_hour"] = df["createdAt"].dt.hour
+    df["planned_entry_date"] = df["entryDate"].dt.date
+    df["planned_entry_hour"] = df["entryDate"].dt.hour
+    df["planned_exit_date"] = df["exitDate"].dt.date
+    df["planned_exit_hour"] = df["exitDate"].dt.hour
+
+    # Recalculate lead time (days from booking creation to entry) and
+    # planned duration (days from entry to exit) to ensure consistency.
+    # Total seconds / 86400 converts timedelta to days.
+    df["lead_time_days_calc"] = (df["entryDate"] - df["createdAt"]).dt.total_seconds() / 86400
+    df["planned_duration_days_calc"] = (df["exitDate"] - df["entryDate"]).dt.total_seconds() / 86400
+
+    # Add calendar features (weekday, month, year, week number) for seasonality.
+    df["entry_weekday"] = df["entryDate"].dt.day_name()
+    df["entry_weekday_num"] = df["entryDate"].dt.weekday
+    df["entry_month"] = df["entryDate"].dt.month
+    df["entry_year"] = df["entryDate"].dt.year
+    df["entry_week"] = df["entryDate"].dt.isocalendar().week
+    df["exit_weekday"] = df["exitDate"].dt.day_name()
+    df["exit_month"] = df["exitDate"].dt.month
+
+    # Categorize planned duration into predefined bands for segmented analysis.
+    # `right=True` means bins are `(bin_start, bin_end]`. `include_lowest=True` includes the first bin.
+    df["planned_duration_band"] = pd.cut(
+        df["planned_duration_days_calc"],
+        bins=config["duration_bins_days"],
+        labels=config["duration_labels"],
+        right=True,
+        include_lowest=True
+    ).astype(str) # Convert to string to avoid categorical issues in merges/groupbys
+
+    # --- Price Metrics ---
+    # These are derived for potential future price-driven forecast components
+    # or for diagnostic analysis. Not directly used in the current ensemble.
+    # `replace(0, np.nan)` prevents division by zero.
+    df["booking_total_per_quantity"] = (
+        df["bookingTotal"] / df["productQuantity"].replace(0, np.nan)
+    )
+    df["booking_total_per_planned_day"] = (
+        df["bookingTotal"] / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+    df["booking_total_per_quantity_per_day"] = (
+        df["booking_total_per_quantity"] / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+    df["product_price_per_planned_day"] = (
+        df["productPrice"] / df["planned_duration_days_calc"].replace(0, np.nan)
+    )
+
+    return df
+
+
+def clean_operations(operations: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Cleans and enriches the operational entry/exit DataFrame.
+    (Copied from Analysis Script)
+
+    Parameters:
+        operations (pd.DataFrame): Raw DataFrame from `FastPark.v_EntryAndExits`.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: Cleaned operations DataFrame with derived fields.
+    """
+    df = operations.copy()
+
+    # Convert datetime columns to proper datetime objects.
+    df["CheckInStarted"] = pd.to_datetime(df["CheckInStarted"], errors="coerce")
+    df["CheckInEnded"] = pd.to_datetime(df["CheckInEnded"], errors="coerce")
+    df["ExpectedArrivalDate"] = pd.to_datetime(df["ExpectedArrivalDate"], errors="coerce")
+    df["ExpectedReturnDate"] = pd.to_datetime(df["ExpectedReturnDate"], errors="coerce")
+    df["ActualCheckedOutDate"] = pd.to_datetime(df["ActualCheckedOutDate"], errors="coerce")
+    df["ChromaDateTime_Local"] = pd.to_datetime(df["ChromaDateTime_Local"], errors="coerce")
+
+    # Define the primary actual entry and exit timestamps based on config.
+    df["actual_entry_ts"] = df[config["actual_entry_timestamp_col"]]
+    df["actual_exit_ts"] = df[config["actual_exit_timestamp_col"]]
+
+    # Extract date and hour components for operational events.
+    df["actual_entry_date"] = df["actual_entry_ts"].dt.date
+    df["actual_entry_hour"] = df["actual_entry_ts"].dt.hour
+    df["actual_exit_date"] = df["actual_exit_ts"].dt.date
+    df["actual_exit_hour"] = df["actual_exit_ts"].dt.hour
+
+    # Extract date and hour for expected return.
+    df["expected_return_date"] = df["ExpectedReturnDate"].dt.date
+    df["expected_return_hour"] = df["ExpectedReturnDate"].dt.hour
+
+    # Calculate the duration of the check-in process.
+    df["checkin_duration_secs_calc"] = (
+        df["CheckInEnded"] - df["CheckInStarted"]
+    ).dt.total_seconds()
+
+    # Create boolean flags for presence of actual check-in/out.
+    df["has_actual_checkin"] = df["actual_entry_ts"].notna()
+    df["has_actual_checkout"] = df["actual_exit_ts"].notna()
+
+    return df
+
+
+def clean_flights(flights: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Cleans and enriches the flight performance DataFrame.
+    (Copied from Analysis Script)
+
+    Parameters:
+        flights (pd.DataFrame): Raw DataFrame from `EAL.FlightPerformance`.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: Cleaned flights DataFrame with derived fields.
+    """
+    df = flights.copy()
+
+    # Convert datetime fields to proper datetime objects.
+    df["ScheduledDateTime_Local"] = pd.to_datetime(df["ScheduledDateTime_Local"], errors="coerce")
+    df["ActualDateTime_Local"] = pd.to_datetime(df["ActualDateTime_Local"], errors="coerce")
+
+    # Extract date and hour components for scheduled flights.
+    df["flight_date"] = df["ScheduledDateTime_Local"].dt.date
+    df["flight_hour"] = df["ScheduledDateTime_Local"].dt.hour
+    df["flight_weekday"] = df["ScheduledDateTime_Local"].dt.day_name()
+    df["flight_month"] = df["ScheduledDateTime_Local"].dt.month
+    df["flight_year"] = df["ScheduledDateTime_Local"].dt.year
+
+    # Define the passenger column to be used for analysis based on config.
+    df["analysis_pax"] = df[config["historical_pax_col"]]
+
+    # Create boolean flags for flight direction (Arrival/Departure).
+    df["is_departure"] = df["ArrDeptureCode"].eq("D")
+    df["is_arrival"] = df["ArrDeptureCode"].eq("A")
+
+    # Create boolean flags for domestic/international flights.
+    df["is_domestic"] = df["Domestic_International"].eq("Domestic")
+    df["is_international"] = df["Domestic_International"].eq("International")
+
+    return df
+
+
+def reconcile_bookings_to_operations(bookings_clean: pd.DataFrame, operations_clean: pd.DataFrame) -> pd.DataFrame:
+    """
+    Joins cleaned bookings to operational entry/exit records to create a master
+    booking-operation fact table.
+    (Copied from Analysis Script)
+
+    Join Key: `operations_clean.BookingReference` = `bookings_clean.bookingId`.
+
+    If multiple operational records exist for a single booking, it prioritizes
+    records with a `ActualCheckedOutDate` (meaning a completed stay) and then
+    the latest `ActualCheckedOutDate`.
+
+    Parameters:
+        bookings_clean (pd.DataFrame): Cleaned bookings DataFrame.
+        operations_clean (pd.DataFrame): Cleaned operations DataFrame.
+
+    Returns:
+        pd.DataFrame: Master DataFrame with one row per booking/operation record where possible.
+    """
+    ops = operations_clean.copy()
+
+    # Create a flag to prioritize operational records with actual checkouts.
+    ops["has_checkout"] = ops["ActualCheckedOutDate"].notna().astype(int)
+
+    # Sort and deduplicate operational records to get the latest/most complete
+    # record per BookingReference.
+    operations_latest = (
+        ops.sort_values(
+            ["BookingReference", "has_checkout", "ActualCheckedOutDate"],
+            ascending=[True, True, True] # Prioritize has_checkout=1, then latest checkout.
+        )
+        .drop_duplicates(
+            subset=["BookingReference"],
+            keep="last" # Keep the latest/most complete record.
+        )
+    )
+
+    # Merge the cleaned bookings with the latest operational records.
+    master = bookings_clean.merge(
+        operations_latest,
+        how="left", # Keep all bookings, add operational data if available.
+        left_on="bookingId",
+        right_on="BookingReference",
+        suffixes=("_booking", "_ops") # Differentiate columns from original tables.
+    )
+
+    return master
+
+
+# --- Core Data Preparation Functions (from G1 Simulation) ---
+
+def create_daily_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregates master data to create actual daily entry, exit, and movement volumes.
+    (Copied from G1 Simulation)
+
+    Entry definition: `actual_entry_ts` (from config["actual_entry_timestamp_col"])
+    Exit definition: `actual_exit_ts` (from config["actual_exit_timestamp_col"])
+
+    Parameters:
+        master (pd.DataFrame): Master booking-operation DataFrame.
+
+    Returns:
+        pd.DataFrame: Daily actuals table with `date`, `entries`, `exits`,
+                      `movements`, and `net_flow`.
+    """
+    # Count unique booking IDs for entries by their actual entry date.
+    daily_entries = (
+        master.dropna(subset=["actual_entry_ts"])
+        .groupby("actual_entry_date")
+        .agg(entries=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"actual_entry_date": "date"})
+    )
+
+    # Count unique booking IDs for exits by their actual exit date.
+    daily_exits = (
+        master.dropna(subset=["actual_exit_ts"])
+        .groupby("actual_exit_date")
+        .agg(exits=("bookingId", "nunique"))
+        .reset_index()
+        .rename(columns={"actual_exit_date": "date"})
+    )
+
+    # Combine entries and exits on date, filling missing counts with 0.
+    daily = daily_entries.merge(daily_exits, on="date", how="outer").fillna(0)
+
+    # Ensure 'date' is a datetime object and sort the DataFrame.
+    daily["date"] = pd.to_datetime(daily["date"])
+    daily = daily.sort_values("date").reset_index(drop=True)
+
+    # Calculate total movements and net flow (entries - exits).
+    daily["movements"] = daily["entries"] + daily["exits"]
+    daily["net_flow"] = daily["entries"] - daily["exits"]
+
+    # Calculate a running sum of net flow, representing relative occupancy change.
+    daily["relative_occupancy"] = daily["net_flow"].cumsum()
+
+    return daily
+
+
+def create_hourly_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregates master data to create actual hourly entry, exit, and movement volumes.
+    (Copied from G1 Simulation)
+
+    This is essential for hourly forecasting and FTE planning.
+
+    Parameters:
+        master (pd.DataFrame): Master booking-operation DataFrame.
+
+    Returns:
+        pd.DataFrame: Hourly actuals table with `datetime_hour`, `date`, `hour`,
+                      `entries`, `exits`, `movements`, and `net_flow`.
+    """
+    # Group entries by the hour of their actual entry timestamp.
+    entries_hourly = (
+        master.dropna(subset=["actual_entry_ts"])
+        .assign(datetime_hour=lambda x: x["actual_entry_ts"].dt.floor("h"))
+        .groupby("datetime_hour")
+        .agg(entries=("bookingId", "nunique"))
+        .reset_index()
+    )
+
+    # Group exits by the hour of their actual exit timestamp.
+    exits_hourly = (
+        master.dropna(subset=["actual_exit_ts"])
+        .assign(datetime_hour=lambda x: x["actual_exit_ts"].dt.floor("h"))
+        .groupby("datetime_hour")
+        .agg(exits=("bookingId", "nunique"))
+        .reset_index()
+    )
+
+    # Combine hourly entries and exits, filling missing counts with 0.
+    hourly = entries_hourly.merge(exits_hourly, on="datetime_hour", how="outer").fillna(0)
+
+    # Calculate total movements and net flow.
+    hourly["movements"] = hourly["entries"] + hourly["exits"]
+    hourly["net_flow"] = hourly["entries"] - hourly["exits"]
+
+    # Extract date, hour, weekday, and month components from the hourly timestamp.
+    hourly["date"] = hourly["datetime_hour"].dt.normalize()
+    hourly["hour"] = hourly["datetime_hour"].dt.hour
+    hourly["weekday"] = hourly["datetime_hour"].dt.day_name()
+    hourly["weekday_num"] = hourly["datetime_hour"].dt.weekday
+    hourly["month"] = hourly["datetime_hour"].dt.month
+
+    return hourly
+
+
+def create_daily_passenger_summary(flights_clean: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Aggregates flight performance data to daily passenger context.
+    (Copied from Analysis Script)
+
+    Purpose:
+        Creates a daily summary of airport passenger movements (departing, arriving)
+        which can be used for historical context or to derive trends.
+        As discussed, *future forecast* passenger data is NOT needed for this script.
+        Only historical passenger data up to `current_run_date` is used to
+        calculate historical trends and patterns for the `entry_trend_month`
+        and `exit_trend_month` components.
+
+    Parameters:
+        flights_clean (pd.DataFrame): Cleaned flight performance DataFrame.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: Daily passenger summary with various passenger counts.
+    """
+    # Aggregate departing passengers and flights by flight date.
+    daily_departures = (
+        flights_clean[flights_clean["is_departure"]]
+        .groupby("flight_date")
+        .agg(
+            departing_pax=("analysis_pax", "sum"),
+            departing_flights=("FlightID", "nunique")
+        )
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+
+    # Aggregate arriving passengers and flights by flight date.
+    daily_arrivals = (
+        flights_clean[flights_clean["is_arrival"]]
+        .groupby("flight_date")
+        .agg(
+            arriving_pax=("analysis_pax", "sum"),
+            arriving_flights=("FlightID", "nunique")
+        )
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+
+    # Merge departures and arrivals to create a combined daily passenger summary.
+    daily_pax = daily_departures.merge(daily_arrivals, on="date", how="outer").fillna(0)
+    daily_pax["total_pax"] = daily_pax["departing_pax"] + daily_pax["arriving_pax"]
+
+    # Aggregate domestic and international departing passengers.
+    daily_domestic_departing = (
+        flights_clean[flights_clean["is_departure"] & flights_clean["is_domestic"]]
+        .groupby("flight_date")
+        .agg(domestic_departing_pax=("analysis_pax", "sum"))
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+    daily_international_departing = (
+        flights_clean[flights_clean["is_departure"] & flights_clean["is_international"]]
+        .groupby("flight_date")
+        .agg(international_departing_pax=("analysis_pax", "sum"))
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+
+    # Aggregate domestic and international arriving passengers.
+    daily_domestic_arriving = (
+        flights_clean[flights_clean["is_arrival"] & flights_clean["is_domestic"]]
+        .groupby("flight_date")
+        .agg(domestic_arriving_pax=("analysis_pax", "sum"))
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+    daily_international_arriving = (
+        flights_clean[flights_clean["is_arrival"] & flights_clean["is_international"]]
+        .groupby("flight_date")
+        .agg(international_arriving_pax=("analysis_pax", "sum"))
+        .reset_index()
+        .rename(columns={"flight_date": "date"})
+    )
+
+    # Merge all domestic/international passenger counts into the daily_pax DataFrame.
+    daily_pax = daily_pax.merge(daily_domestic_departing, on="date", how="left").fillna(0)
+    daily_pax = daily_pax.merge(daily_international_departing, on="date", how="left").fillna(0)
+    daily_pax = daily_pax.merge(daily_domestic_arriving, on="date", how="left").fillna(0)
+    daily_pax = daily_pax.merge(daily_international_arriving, on="date", how="left").fillna(0)
+
+    return daily_pax
+
+
+def create_daily_passenger_context(flights: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates historical daily passenger context.
+    (Copied from G1 Simulation, adapted to use `flights` directly)
+
+    Entry demand is linked primarily to departing passengers.
+    Exit demand is linked primarily to arriving passengers.
+    Also preserves domestic/international volume and share.
+
+    Parameters:
+        flights (pd.DataFrame): Cleaned flight performance DataFrame.
+
+    Returns:
+        pd.DataFrame: Daily passenger context DataFrame.
+    """
+    df = flights.copy()
+
+    df["ScheduledDateTime_Local"] = pd.to_datetime(
+        df["ScheduledDateTime_Local"],
+        errors="coerce",
+    )
+    df["date"] = (
+        df["ScheduledDateTime_Local"]
+        .dt.normalize()
+    )
+
+    # Departure / arrival flags (already created in clean_flights, but re-added for clarity)
+    df["is_departure"] = (
+        df["ArrDeptureCode"]
+        .eq("D")
+    )
+    df["is_arrival"] = (
+        df["ArrDeptureCode"]
+        .eq("A")
+    )
+    df["is_domestic"] = (
+        df["Domestic_International"]
+        .eq("Domestic")
+    )
+    df["is_international"] = (
+        df["Domestic_International"]
+        .eq("International")
+    )
+
+    # Build separate components first.
+    departure = df[df["is_departure"]].copy()
+    arrival = df[df["is_arrival"]].copy()
+
+    # DEPARTURES aggregation.
+    departing = (
+        departure
+        .groupby("date")
+        .agg(
+            departing_pax=("analysis_pax", "sum"),
+            domestic_departing_pax=(
+                "analysis_pax",
+                lambda x: x[
+                    departure.loc[
+                        x.index,
+                        "is_domestic"
+                    ]
+                ].sum()
+            ),
+            international_departing_pax=(
+                "analysis_pax",
+                lambda x: x[
+                    departure.loc[
+                        x.index,
+                        "is_international"
+                    ]
+                ].sum()
+            ),
+            departing_flights=(
+                "FlightID",
+                "nunique",
+            ),
+        )
+        .reset_index()
+    )
+
+    # ARRIVALS aggregation.
+    arriving = (
+        arrival
+        .groupby("date")
+        .agg(
+            arriving_pax=(
+                "analysis_pax",
+                "sum",
+            ),
+            domestic_arriving_pax=(
+                "analysis_pax",
+                lambda x: x[
+                    arrival.loc[
+                        x.index,
+                        "is_domestic"
+                    ]
+                ].sum()
+            ),
+            international_arriving_pax=(
+                "analysis_pax",
+                lambda x: x[
+                    arrival.loc[
+                        x.index,
+                        "is_international"
+                    ]
+                ].sum()
+            ),
+            arriving_flights=(
+                "FlightID",
+                "nunique",
+            ),
+        )
+        .reset_index()
+    )
+
+    # Combine departing and arriving passenger data.
+    daily = departing.merge(
+        arriving,
+        on="date",
+        how="outer",
+    )
+
+    # Ensure all numeric columns are present and filled with 0 if missing.
+    numeric_cols = [
+        "departing_pax", "domestic_departing_pax", "international_departing_pax",
+        "departing_flights", "arriving_pax", "domestic_arriving_pax",
+        "international_arriving_pax", "arriving_flights",
+    ]
+    for col in numeric_cols:
+        if col not in daily.columns:
+            daily[col] = 0
+        daily[col] = daily[col].fillna(0)
+
+    # Calculate international passenger share.
+    daily["international_departing_share"] = (
+        daily["international_departing_pax"]
+        /
+        daily["departing_pax"].replace(0, np.nan)
+    )
+    daily["international_arriving_share"] = (
+        daily["international_arriving_pax"]
+        /
+        daily["arriving_pax"].replace(0, np.nan)
+    )
+
+    # Add calendar features.
+    daily["weekday"] = daily["date"].dt.day_name()
+    daily["weekday_num"] = daily["date"].dt.weekday
+    daily["month"] = daily["date"].dt.month
+    daily["year"] = daily["date"].dt.year
+
+    return daily.sort_values("date").reset_index(drop=True)
+
+
+# --- Booking Curve Related Functions (from G1 Simulation) ---
+
+def get_bookings_active_as_of(
+    bookings: pd.DataFrame,
+    cutoff_timestamp: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Filters bookings to return only those active at a specific historical cutoff timestamp.
+    (Copied from G1 Simulation)
+
+    A booking is considered active if:
+    - `createdAt` is less than or equal to the `cutoff_timestamp`
+    - AND (`cancelledAt` is null OR `cancelledAt` is greater than the `cutoff_timestamp`)
+    - AND `status` is not 'F' (unknown status)
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time.
+
+    Returns:
+        pd.DataFrame: A DataFrame of bookings active at the cutoff.
+    """
+    cutoff_timestamp = pd.to_datetime(cutoff_timestamp)
+
+    active_mask = (
+        bookings["createdAt"].le(cutoff_timestamp)
+        &
+        (
+            bookings["cancelledAt"].isna()
+            |
+            bookings["cancelledAt"].gt(cutoff_timestamp)
+        )
+        &
+        bookings["status"].ne("F")
+    )
+    return bookings.loc[active_mask].copy()
+
+
+def get_known_target_bookings(
+    bookings: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    demand_type: str,
+) -> pd.DataFrame:
+    """
+    Returns bookings visible at the forecast cutoff for a specific target date.
+    (Copied from G1 Simulation)
+
+    For 'entry' demand, it filters on `entryDate == target_date`.
+    For 'exit' demand, it filters on `exitDate == target_date`.
+    This function uses the AS-OF booking population.
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time.
+        demand_type (str): "entry" or "exit".
+
+    Returns:
+        pd.DataFrame: Bookings known for the target date at the cutoff.
+    """
+    active = get_bookings_active_as_of(
+        bookings=bookings,
+        cutoff_timestamp=cutoff_timestamp,
+    )
+
+    if demand_type == "entry":
+        entry_dates = pd.to_datetime(active["entryDate"], errors="coerce").dt.normalize()
+        return active.loc[entry_dates.eq(target_date.normalize())].copy()
+    elif demand_type == "exit":
+        exit_dates = pd.to_datetime(active["exitDate"], errors="coerce").dt.normalize()
+        return active.loc[exit_dates.eq(target_date.normalize())].copy()
+    else:
+        raise ValueError(f"Unknown demand_type: {demand_type}")
+
+
+def build_historical_booking_curve(
+    bookings: pd.DataFrame,
+    master: pd.DataFrame,
+    target_field: str,
+    actual_field: str,
+    cutoff_days: List[int],
+) -> pd.DataFrame:
+    """
+    Builds the historical booking visibility curve efficiently.
+    (Copied from G1 Simulation)
+
+    For each forecast horizon, this function evaluates all historical
+    target dates together rather than scanning the full booking table
+    separately for every target date. This is crucial for performance.
+
+    Historical as-of logic:
+    - `createdAt <= cutoff`
+    - AND (`cancelledAt` is null OR `cancelledAt > cutoff`)
+    - AND `status != "F"`
+
+    This means a booking whose final status is CX remains included at a
+    historical cutoff if its cancellation happened after that cutoff.
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        master (pd.DataFrame): Master booking-operation DataFrame.
+        target_field (str): The booking date field representing the target (e.g., "entryDate", "exitDate").
+        actual_field (str): The operational timestamp field for actuals (e.g., "actual_entry_ts", "actual_exit_ts").
+        cutoff_days (List[int]): A list of lead times (in days) to calculate visibility for.
+
+    Returns:
+        pd.DataFrame: A DataFrame representing the historical booking curve.
+    """
+    # Use only the booking columns needed for this calculation.
+    booking_df = bookings[
+        ["bookingId", "createdAt", "cancelledAt", "status", target_field]
+    ].copy()
+
+    # Convert relevant columns to datetime objects.
+    for column in ["createdAt", "cancelledAt", target_field]:
+        booking_df[column] = pd.to_datetime(booking_df[column], errors="coerce")
+
+    booking_df["booking_target_date"] = booking_df[target_field].dt.normalize()
+
+    # Filter out invalid or incomplete booking records.
+    booking_df = booking_df[
+        booking_df["bookingId"].notna()
+        & booking_df["createdAt"].notna()
+        & booking_df["booking_target_date"].notna()
+        & booking_df["status"].ne("F")
+    ].copy()
+
+    # --- Final Actual Operational Demand ---
+    # This represents the ground truth that the booking curve aims to predict.
+    # Group by the normalized actual movement date and count unique bookings.
+    actual_df = master[["bookingId", actual_field]].copy()
+    actual_df[actual_field] = pd.to_datetime(actual_df[actual_field], errors="coerce")
+    actual_df["target_date"] = actual_df[actual_field].dt.normalize()
+
+    actual_demand = (
+        actual_df.dropna(subset=["bookingId", "target_date"])
+        .groupby("target_date", as_index=False)
+        .agg(actual_demand=("bookingId", "nunique"))
+    )
+
+    if actual_demand.empty:
+        return pd.DataFrame(columns=["target_date", "lead_days", "bookings_known", "actual_demand", "completion_ratio"])
+
+    historical_target_dates = set(actual_demand["target_date"])
+
+    # Retain only bookings for target dates that have actual operational validation.
+    booking_df = booking_df[
+        booking_df["booking_target_date"].isin(
+            historical_target_dates
+        )
+    ].copy()
+
+    rows = []
+
+    # --- Optimize by processing all dates for each lead_days checkpoint ---
+    # This loop processes each lead time checkpoint once across all relevant
+    # historical target dates, which is more efficient than iterating
+    # target_date x lead_time.
+    for lead_days in cutoff_days:
+
+        # Calculate the cutoff timestamp for each booking based on its target date
+        # and the current lead time. Adding 7 hours is a common practice to
+        # ensure the cutoff is within the day, typically morning.
+        cutoff_by_booking = (
+            booking_df["booking_target_date"]
+            - pd.Timedelta(days=lead_days)
+            + pd.Timedelta(hours=7)
+        )
+
+        # Create a mask for bookings that were active at this specific cutoff.
+        # A booking is active if created by cutoff AND (not cancelled OR cancelled after cutoff).
+        active_mask = (
+            booking_df["createdAt"].le(cutoff_by_booking)
+            &
+            (
+                booking_df["cancelledAt"].isna()
+                |
+                booking_df["cancelledAt"].gt(cutoff_by_booking)
+            )
+        )
+
+        # Count unique bookings known at this cutoff for each target date.
+        known_counts = (
+            booking_df.loc[
+                active_mask,
+                [
+                    "booking_target_date",
+                    "bookingId",
+                ],
+            ]
+            .groupby(
+                "booking_target_date",
+                as_index=False,
+            )
+            .agg(
+                bookings_known=(
+                    "bookingId",
+                    "nunique",
+                )
+            )
+            .rename(
+                columns={
+                    "booking_target_date":
+                        "target_date",
+                }
+            )
+        )
+
+        # Merge known counts with actual demand to calculate completion ratios.
+        horizon_result = actual_demand.merge(
+            known_counts,
+            on="target_date",
+            how="left",
+        )
+
+        # Fill any missing known_bookings with 0 and ensure integer type.
+        horizon_result["bookings_known"] = (
+            horizon_result["bookings_known"]
+            .fillna(0)
+            .astype(int)
+        )
+
+        # Add the current lead_days to the result.
+        horizon_result["lead_days"] = (
+            lead_days
+        )
+
+        rows.append(
+            horizon_result
+        )
+
+    # Concatenate all results for different lead times.
+    curve = pd.concat(
+        rows,
+        ignore_index=True,
+    )
+
+    # Calculate the completion ratio: actual demand / known bookings.
+    # Replace 0 known_bookings with NaN to avoid division by zero.
+    curve["completion_ratio"] = (
+        curve["actual_demand"]
+        /
+        curve["bookings_known"].replace(
+            0,
+            np.nan,
+        )
+    )
+
+    # Return the relevant columns, sorted for consistency.
+    return (
+        curve[
+            [
+                "target_date",
+                "lead_days",
+                "bookings_known",
+                "actual_demand",
+                "completion_ratio",
+            ]
+        ]
+        .sort_values(
+            [
+                "target_date",
+                "lead_days",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+def get_booking_curve_factor(
+    curve: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    cutoff_days: int,
+    n: int = 20,
+) -> float:
+    """
+    Estimates the historical booking-curve completion factor for a given target date
+    and lead time, using only information available at the forecast cutoff.
+    (Copied from G1 Simulation)
+
+    This function is deliberately AS-OF aware to prevent look-ahead bias.
+    It considers only historical target dates whose final outcome would have
+    already been known at the `cutoff_timestamp`.
+
+    Parameters:
+        curve (pd.DataFrame): Historical booking-curve dataset (e.g., from `build_historical_booking_curve`).
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        cutoff_days (int): The lead time in days (e.g., 28 for T-28).
+        n (int): Maximum number of recent historical observations to use for the median.
+
+    Returns:
+        float: The median historical completion factor, or NaN if insufficient data.
+    """
+    if curve is None or curve.empty:
+        return np.nan
+
+    target_date = pd.to_datetime(target_date).normalize()
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+
+    history = curve.copy()
+
+    history["target_date"] = pd.to_datetime(
+        history["target_date"],
+        errors="coerce",
+    ).dt.normalize()
+
+    # --- CRITICAL AS-OF FILTER ---
+    # We may ONLY learn from historical target dates whose final outcome
+    # would already have been known at the forecast cut-off.
+    # Therefore: `historical target date < forecast cut-off`
+    # Also exclude the target date itself from historical learning.
+    history = history[
+        history["target_date"].notna()
+        & history["target_date"].lt(cutoff_date)
+        & history["target_date"].lt(target_date)
+    ].copy()
+
+    # Filter to the specific lead time being tested.
+    history = history[
+        history["lead_days"].eq(cutoff_days)
+    ].copy()
+
+    # We cannot estimate a meaningful completion factor where there were no visible bookings.
+    history = history[
+        history["bookings_known"].gt(0)
+    ].copy()
+
+    # Ensure completion ratio is not NaN.
+    history = history[
+        history["completion_ratio"].notna()
+    ].copy()
+
+    if history.empty:
+        return np.nan
+
+    # Prefer the most recent historical observations that were genuinely available.
+    history = (
+        history
+        .sort_values("target_date")
+        .tail(n)
+    )
+
+    # Median is used because booking curves can contain extreme ratios
+    # when only one or two bookings were visible at long lead times.
+    return float(
+        history["completion_ratio"].median()
+    )
+
+
+def forecast_booking_curve(
+    bookings: pd.DataFrame,
+    curve: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    demand_type: str,
+    data_cache: Dict[Tuple, Any], # Cache for pre-computed values
+) -> float:
+    """
+    Forecasts target demand using the currently visible booking population
+    multiplied by the historical completion factor.
+    (Copied from G1 Simulation, adapted to use a cache for production)
+
+    This is the central "how much do we know already?" model.
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        curve (pd.DataFrame): Historical booking curve (entry or exit).
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        demand_type (str): "entry" or "exit".
+        data_cache (Dict[Tuple, Any]): A dictionary holding pre-computed/cached values.
+
+    Returns:
+        float: The booking curve forecast, or NaN if unable to compute.
+    """
+    target_date_norm = pd.to_datetime(target_date).normalize()
+    cutoff_timestamp_norm = pd.to_datetime(cutoff_timestamp).normalize()
+
+    # Calculate lead_days from normalized dates.
+    lead_days = int(
+        np.floor(
+            (target_date_norm - cutoff_timestamp_norm).total_seconds() / 86400
+        )
+    )
+
+    # --- Try to use pre-computed caches for known bookings and curve factors ---
+    # In a production environment, this cache would typically contain the
+    # pre-calculated historical data up to the run date, or be built dynamically.
+    # For this script, we assume the `data_cache` is populated.
+
+    # Cache key for known bookings.
+    known_booking_cache_key = (target_date_norm, lead_days, demand_type)
+    known_count = data_cache.get("known_booking_cache", {}).get(known_booking_cache_key)
+
+    if known_count is None: # If not in cache, calculate known bookings directly.
+        known_bookings_df = get_known_target_bookings(
+            bookings=bookings,
+            target_date=target_date,
+            cutoff_timestamp=cutoff_timestamp,
+            demand_type=demand_type,
+        )
+        known_count = known_bookings_df["bookingId"].nunique()
+        # Store in cache for future calls within the same run.
+        data_cache.setdefault("known_booking_cache", {})[known_booking_cache_key] = known_count
+
+    if known_count == 0:
+        return 0.0
+
+    # Cache key for curve factor.
+    curve_factor_cache_key = (target_date_norm, lead_days, demand_type)
+    factor = data_cache.get("curve_factor_cache", {}).get(curve_factor_cache_key)
+
+    if factor is None: # If not in cache, calculate curve factor directly.
+        factor = get_booking_curve_factor(
+            curve=curve,
+            target_date=target_date,
+            cutoff_timestamp=cutoff_timestamp,
+            cutoff_days=lead_days,
+            n=PRODUCTION_CONFIG["minimum_curve_observations"], # Use config for 'n'
+        )
+        # Store in cache for future calls within the same run.
+        data_cache.setdefault("curve_factor_cache", {})[curve_factor_cache_key] = factor
+
+    if pd.isna(factor):
+        return np.nan
+
+    return clip_forecast(known_count * factor)
+
+
+def build_historical_duration_exit_curve(
+    bookings: pd.DataFrame,
+    master: pd.DataFrame,
+    cutoff_days: List[int],
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Builds duration-specific exit booking-curve observations efficiently.
+    (Copied from G1 Simulation)
+
+    This function measures how much future exit demand is visible at different
+    lead times, separated by planned stay length. This is crucial because
+    short-duration bookings can create exit demand with limited forward
+    visibility, while long-duration bookings may create exit demand that is
+    visible much earlier.
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        master (pd.DataFrame): Master booking-operation DataFrame.
+        cutoff_days (List[int]): A list of lead times (in days) to calculate visibility for.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: A DataFrame representing the historical duration-segmented exit curve.
+    """
+    # Define duration bins and labels from config.
+    duration_bins = config["duration_bins_days"]
+    duration_labels = config["duration_labels"]
+
+    # --- Booking Population ---
+    # Select and clean relevant columns for booking processing.
+    booking_df = bookings[
+        ["bookingId", "createdAt", "cancelledAt", "status", "entryDate", "exitDate"]
+    ].copy()
+
+    for column in ["createdAt", "cancelledAt", "entryDate", "exitDate"]:
+        booking_df[column] = pd.to_datetime(booking_df[column], errors="coerce")
+
+    booking_df["booking_target_date"] = booking_df["exitDate"].dt.normalize()
+    booking_df["planned_duration_days_calc"] = (
+        (booking_df["exitDate"] - booking_df["entryDate"]).dt.total_seconds() / 86400
+    )
+
+    # Create planned duration bands.
+    booking_df["duration_band"] = pd.cut(
+        booking_df["planned_duration_days_calc"],
+        bins=duration_bins,
+        labels=duration_labels,
+    )
+
+    # Filter out invalid or incomplete booking records.
+    booking_df = booking_df[
+        booking_df["bookingId"].notna()
+        & booking_df["createdAt"].notna()
+        & booking_df["booking_target_date"].notna()
+        & booking_df["duration_band"].notna()
+        & booking_df["status"].ne("F")
+    ].copy()
+
+    # Convert duration_band to string to avoid categorical issues in merges/groupbys.
+    booking_df["duration_band"] = booking_df["duration_band"].astype(str)
+
+    # --- Final Actual Exits ---
+    # This represents the ground truth for exit demand.
+    actual_df = master[
+        ["bookingId", "entryDate", "exitDate", "actual_exit_ts"]
+    ].copy()
+
+    for column in ["entryDate", "exitDate", "actual_exit_ts"]:
+        actual_df[column] = pd.to_datetime(actual_df[column], errors="coerce")
+
+    actual_df["target_date"] = actual_df["actual_exit_ts"].dt.normalize()
+    actual_df["planned_duration_days_calc"] = (
+        (actual_df["exitDate"] - actual_df["entryDate"]).dt.total_seconds() / 86400
+    )
+
+    # Create planned duration bands for actuals.
+    actual_df["duration_band"] = pd.cut(
+        actual_df["planned_duration_days_calc"],
+        bins=duration_bins,
+        labels=duration_labels,
+    )
+
+    # Filter out invalid or incomplete actual records.
+    actual_df = actual_df.dropna(
+        subset=["bookingId", "target_date", "duration_band"]
+    ).copy()
+    actual_df["duration_band"] = actual_df["duration_band"].astype(str)
+
+    # Aggregate actual exits by target date and duration band.
+    actuals = (
+        actual_df
+        .groupby(
+            ["target_date", "duration_band"],
+            as_index=False,
+        )
+        .agg(
+            actual_exits=(
+                "bookingId",
+                "nunique",
+            )
+        )
+    )
+
+    if actuals.empty:
+        return pd.DataFrame(columns=["target_date", "lead_days", "duration_band", "visible_bookings", "actual_exits", "completion_ratio"])
+
+    historical_target_dates = set(actuals["target_date"])
+
+    # Retain only bookings for target dates that have actual operational validation.
+    booking_df = booking_df[
+        booking_df["booking_target_date"].isin(
+            historical_target_dates
+        )
+    ].copy()
+
+    rows = []
+
+    # --- Optimize by processing all dates for each lead_days checkpoint ---
+    for lead_days in cutoff_days:
+
+        # Calculate the cutoff timestamp for each booking.
+        cutoff_by_booking = (
+            booking_df["booking_target_date"]
+            - pd.Timedelta(days=lead_days)
+            + pd.Timedelta(hours=7)
+        )
+
+        # Create a mask for bookings active at this specific cutoff.
+        active_mask = (
+            booking_df["createdAt"].le(cutoff_by_booking)
+            &
+            (
+                booking_df["cancelledAt"].isna()
+                |
+                booking_df["cancelledAt"].gt(cutoff_by_booking)
+            )
+        )
+
+        # Count visible bookings by target date and duration band.
+        visible_counts = (
+            booking_df.loc[
+                active_mask,
+                [
+                    "booking_target_date",
+                    "duration_band",
+                    "bookingId",
+                ],
+            ]
+            .groupby(
+                [
+                    "booking_target_date",
+                    "duration_band",
+                ],
+                as_index=False,
+            )
+            .agg(
+                visible_bookings=(
+                    "bookingId",
+                    "nunique",
+                )
+            )
+            .rename(
+                columns={
+                    "booking_target_date":
+                        "target_date",
+                }
+            )
+        )
+
+        # Merge visible counts with actual exits to calculate completion ratios.
+        horizon_result = actuals.merge(
+            visible_counts,
+            on=[
+                "target_date",
+                "duration_band",
+            ],
+            how="left",
+        )
+
+        # Fill missing visible_bookings with 0 and ensure integer type.
+        horizon_result["visible_bookings"] = (
+            horizon_result["visible_bookings"]
+            .fillna(0)
+            .astype(int)
+        )
+
+        horizon_result["lead_days"] = (
+            lead_days
+        )
+
+        # Calculate completion ratio: actual exits / visible bookings.
+        horizon_result["completion_ratio"] = (
+            horizon_result["actual_exits"]
+            /
+            horizon_result[
+                "visible_bookings"
+            ].replace(
+                0,
+                np.nan,
+            )
+        )
+
+        rows.append(
+            horizon_result
+        )
+
+    # Concatenate all results and return, sorted for consistency.
+    return (
+        pd.concat(
+            rows,
+            ignore_index=True,
+        )
+        [
+            [
+                "target_date",
+                "lead_days",
+                "duration_band",
+                "visible_bookings",
+                "actual_exits",
+                "completion_ratio",
+            ]
+        ]
+        .sort_values(
+            [
+                "target_date",
+                "lead_days",
+                "duration_band",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+def get_duration_exit_factors_as_of(
+    duration_curve: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    lead_days: int,
+    minimum_observations: int = 10,
+    maximum_observations: int = 20,
+) -> pd.DataFrame:
+    """
+    Returns duration-specific exit completion factors learned only from
+    historical target dates completed before the forecast cutoff.
+    (Copied from G1 Simulation)
+
+    Parameters:
+        duration_curve (pd.DataFrame): Historical duration-segmented exit curve.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        lead_days (int): The lead time in days (e.g., 28 for T-28).
+        minimum_observations (int): Minimum number of historical observations
+                                   required for a duration segment to be considered valid.
+        maximum_observations (int): Maximum number of recent historical observations
+                                   to consider for the median calculation.
+
+    Returns:
+        pd.DataFrame: A DataFrame of duration-specific completion factors.
+    """
+    if duration_curve is None or duration_curve.empty:
+        return pd.DataFrame()
+
+    target_date = pd.to_datetime(target_date).normalize()
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+
+    history = duration_curve.copy()
+
+    history["target_date"] = pd.to_datetime(
+        history["target_date"],
+        errors="coerce",
+    ).dt.normalize()
+
+    # Filter history to only include data available *before* the cutoff date
+    # and *before* the target date.
+    history = history[
+        history["target_date"].notna()
+        & history["target_date"].lt(cutoff_date)
+        & history["target_date"].lt(target_date)
+    ].copy()
+
+    # Filter to the specific lead time being considered.
+    history = history[
+        history["lead_days"].eq(lead_days)
+    ].copy()
+
+    # Ensure completion ratio is valid and visible bookings are present.
+    history = history[
+        history["completion_ratio"].notna()
+        & history["visible_bookings"].gt(0)
+    ].copy()
+
+    rows = []
+
+    # Calculate median completion ratio for each duration band.
+    for duration_band, group in history.groupby(
+        "duration_band",
+        observed=False, # `observed=False` keeps all categories even if not present in group.
+    ):
+        group = (
+            group
+            .sort_values("target_date")
+            .tail(maximum_observations) # Use only the most recent observations.
+        )
+
+        if len(group) < minimum_observations:
+            continue # Skip if not enough observations for this segment.
+
+        rows.append(
+            {
+                "duration_band": duration_band,
+                "completion_ratio": float(
+                    group["completion_ratio"].median() # Use median to handle outliers.
+                ),
+                "observations": len(group),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def get_duration_adjusted_booking_curve(
+    bookings: pd.DataFrame,
+    curve: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    demand_type: str,
+    historical_duration_factors: pd.DataFrame,
+    config: dict,
+) -> float:
+    """
+    Calculates a booking curve forecast adjusted for the duration mix currently visible.
+    (Copied from G1 Simulation)
+
+    This addresses the finding that `20 visible bookings` means different things
+    depending on whether they are 1-day stays or 14-day stays.
+
+    Parameters:
+        bookings (pd.DataFrame): Cleaned bookings DataFrame.
+        curve (pd.DataFrame): The overall historical exit booking curve.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        demand_type (str): "exit" (this function is specific to exit demand).
+        historical_duration_factors (pd.DataFrame): DataFrame containing duration-specific
+                                                   completion ratios (e.g., from `get_duration_exit_factors_as_of`).
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        float: The duration-adjusted exit booking curve forecast, or NaN.
+    """
+    # Get bookings active at the cutoff for the target date.
+    known = get_known_target_bookings(
+        bookings=bookings,
+        target_date=pd.to_datetime(target_date).normalize(),
+        cutoff_timestamp=cutoff_timestamp,
+        demand_type=demand_type,
+    )
+
+    if known.empty:
+        return 0.0
+
+    # If duration factors are not available or empty, fall back to the standard booking curve forecast.
+    if historical_duration_factors is None or historical_duration_factors.empty:
+        return forecast_booking_curve(
+            bookings=bookings,
+            curve=curve,
+            target_date=target_date,
+            cutoff_timestamp=cutoff_timestamp,
+            demand_type=demand_type,
+            data_cache={}, # No cache for this fallback call.
+        )
+
+    duration_col = "planned_duration_days_calc"
+
+    # Ensure the duration column is present in the known bookings.
+    if duration_col not in known.columns:
+        return forecast_booking_curve(
+            bookings=bookings,
+            curve=curve,
+            target_date=target_date,
+            cutoff_timestamp=cutoff_timestamp,
+            demand_type=demand_type,
+            data_cache={},
+        )
+
+    # Apply duration bands to the known bookings.
+    known["duration_band"] = pd.cut(
+        known[duration_col],
+        bins=config["duration_bins_days"],
+        labels=config["duration_labels"],
+    ).astype(str) # Convert to string to match the factors table.
+
+    forecasts = []
+
+    # Iterate through each duration band in the known bookings.
+    for band, group in known.groupby(
+        "duration_band",
+        observed=False,
+    ):
+        visible = group["bookingId"].nunique()
+
+        # Find the completion factor for this specific duration band.
+        factor_row = historical_duration_factors[
+            historical_duration_factors["duration_band"].eq(band)
+        ]
+
+        # If no factor is found for this band, fall back to the standard booking curve forecast.
+        if factor_row.empty:
+            return forecast_booking_curve(
+                bookings=bookings,
+                curve=curve,
+                target_date=target_date,
+                cutoff_timestamp=cutoff_timestamp,
+                demand_type=demand_type,
+                data_cache={},
+            )
+
+        factor = float(factor_row["completion_ratio"].iloc[0])
+
+        # If factor is not finite or non-positive, fall back.
+        if not np.isfinite(factor) or factor <= 0:
+            return forecast_booking_curve(
+                bookings=bookings,
+                curve=curve,
+                target_date=target_date,
+                cutoff_timestamp=cutoff_timestamp,
+                demand_type=demand_type,
+                data_cache={},
+            )
+
+        forecasts.append(visible * factor)
+
+    # Sum the duration-adjusted forecasts from all bands.
+    return clip_forecast(sum(forecasts))
+
+
+# --- Same-Weekday Historical Functions (from G1 Simulation) ---
+
+def previous_same_weekdays(
+    dataframe: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    n: int,
+) -> pd.DataFrame:
+    """
+    Returns the previous `n` observations from a DataFrame with the same weekday
+    as the target, considering only data available before the cutoff.
+    (Copied from G1 Simulation)
+
+    Parameters:
+        dataframe (pd.DataFrame): The historical data (e.g., `daily_fastpark_actuals`).
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        n (int): The number of previous same-weekday occurrences to retrieve.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the selected historical observations.
+    """
+    df = dataframe.copy()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    target_date = pd.to_datetime(target_date).normalize()
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+
+    # Filter for dates before the target date, before the cutoff date,
+    # and with the same weekday as the target date.
+    result = df[
+        (df["date"] < target_date)
+        & (df["date"] < cutoff_date)
+        & (df["date"].dt.weekday == target_date.weekday())
+    ].sort_values("date")
+
+    # Return the last 'n' occurrences.
+    return result.tail(n)
+
+
+def get_same_weekday_history(
+    daily_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    n: int,
+    target_col: str,
+) -> pd.Series:
+    """
+    Retrieves historical actual demand for previous occurrences of the same weekday.
+    (Copied from G1 Simulation)
+
+    Important: The target date itself is excluded. Any date on/after the forecast
+    cut-off is excluded. This prevents look-ahead bias.
+
+    Parameters:
+        daily_actuals (pd.DataFrame): Historical daily actuals DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        n (int): The number of previous same-weekday occurrences to retrieve.
+        target_col (str): The column in `daily_actuals` representing demand (e.g., "entries", "exits").
+
+    Returns:
+        pd.Series: A Series of historical demand values, or an empty Series if none.
+    """
+    history = previous_same_weekdays(
+        dataframe=daily_actuals,
+        target_date=target_date,
+        cutoff_timestamp=cutoff_timestamp,
+        n=n,
+    )
+
+    if history.empty:
+        return pd.Series(dtype=float)
+
+    return history[target_col].astype(float)
+
+
+def forecast_same_weekday(
+    daily_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    target_col: str,
+    n: int,
+    data_cache: Dict[Tuple, Any],
+) -> float:
+    """
+    Calculates a simple average forecast from the previous `n` same-weekday observations.
+    (Copied from G1 Simulation, adapted to use a cache for production)
+
+    Parameters:
+        daily_actuals (pd.DataFrame): Historical daily actuals DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        target_col (str): The column representing demand ("entries" or "exits").
+        n (int): The number of previous same-weekday occurrences to average.
+        data_cache (Dict[Tuple, Any]): A dictionary holding pre-computed/cached values.
+
+    Returns:
+        float: The same-"""
+
+   # Cache key for same-weekday history.
+    # The cache stores lists of historical values, so we need to retrieve them
+    # and then apply the 'n' filter and mean calculation.
+    target_date_norm = pd.to_datetime(target_date).normalize()
+    cutoff_timestamp_norm = pd.to_datetime(cutoff_timestamp).normalize()
+
+    # Calculate lead_days to match how the cache key was generated in simulation.
+    # This is (target_date - cutoff_date) in days.
+    lead_days = int(
+        (target_date_norm - cutoff_timestamp_norm).days
+    )
+
+    same_weekday_cache_key = (target_date_norm, lead_days)
+    cached_history = data_cache.get("same_weekday_history_cache", {}).get(same_weekday_cache_key)
+
+    if cached_history is not None:
+        # Retrieve values for the specific target column (entries/exits).
+        values = cached_history.get(target_col, [])
+        # Take the last 'n' values for the forecast.
+        values = values[-n:] if len(values) >= n else []
+
+        if len(values) >= n:
+            return clip_forecast(safe_mean(values))
+
+    # Fallback: If not in cache or cache is insufficient, calculate directly.
+    # This should ideally not be hit in production if the cache is pre-populated.
+    values = get_same_weekday_history(
+        daily_actuals=daily_actuals,
+        target_date=target_date,
+        cutoff_timestamp=cutoff_timestamp,
+        n=n,
+        target_col=target_col,
+    )
+
+    if len(values) < n:
+        return np.nan # Not enough historical observations.
+
+    return clip_forecast(values.mean())
+
+
+def get_weekday_month_history(
+    daily_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    max_n: int, # Max number of observations to consider (e.g., 6 years).
+    target_col: str,
+    minimum_observations: int, # Minimum observations required for validity.
+) -> Tuple[float, int]: # Returns (forecast_value, observation_count)
+    """
+    Retrieves historical actual demand for previous occurrences of the same
+    weekday AND same month as the target, considering only data available
+    before the cutoff.
+    (Logic adapted from G1 Simulation)
+
+    Parameters:
+        daily_actuals (pd.DataFrame): Historical daily actuals DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        max_n (int): Maximum number of recent historical occurrences to consider.
+        target_col (str): The column in `daily_actuals` representing demand.
+        minimum_observations (int): Minimum number of observations required to return a valid mean.
+
+    Returns:
+        Tuple[float, int]: A tuple containing the mean of historical demand values
+                           and the count of observations used. Returns (NaN, 0) if
+                           insufficient data.
+    """
+    df = daily_actuals.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+
+    target_date_norm = pd.to_datetime(target_date).normalize()
+    cutoff_date_norm = pd.to_datetime(cutoff_timestamp).normalize()
+
+    weekday = target_date_norm.weekday()
+    month = target_date_norm.month
+
+    # Filter for historical dates that are:
+    # - Before the target date.
+    # - Before the cutoff date (to avoid look-ahead bias).
+    # - Have the same weekday as the target.
+    # - Have the same month as the target.
+    history = df[
+        (df["date"] < target_date_norm)
+        & (df["date"] < cutoff_date_norm)
+        & (df["date"].dt.weekday == weekday)
+        & (df["date"].dt.month == month)
+    ].sort_values("date").tail(max_n) # Take up to max_n most recent occurrences.
+
+    if len(history) < minimum_observations:
+        return np.nan, 0
+
+    return safe_mean(history[target_col].tolist()), len(history)
+
+
+def forecast_weekday_month(
+    daily_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    target_col: str,
+    data_cache: Dict[Tuple, Any],
+    minimum_observations: int,
+) -> Tuple[float, int]:
+    """
+    Calculates a forecast using the mean of same-weekday-same-month historical observations.
+    (Logic adapted from G1 Simulation)
+
+    Parameters:
+        daily_actuals (pd.DataFrame): Historical daily actuals DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        target_col (str): The column representing demand ("entries" or "exits").
+        data_cache (Dict[Tuple, Any]): A dictionary holding pre-computed/cached values.
+        minimum_observations (int): Minimum observations required for a valid forecast.
+
+    Returns:
+        Tuple[float, int]: A tuple containing the forecast value and the number of observations used.
+    """
+    target_date_norm = pd.to_datetime(target_date).normalize()
+    cutoff_timestamp_norm = pd.to_datetime(cutoff_timestamp).normalize()
+
+    # Calculate lead_days to match how the cache key was generated in simulation.
+    lead_days = int(
+        (target_date_norm - cutoff_timestamp_norm).days
+    )
+
+    weekday_month_cache_key = (target_date_norm, lead_days)
+    cached_data = data_cache.get("weekday_month_history_cache", {}).get(weekday_month_cache_key)
+
+    if cached_data is not None:
+        values = cached_data.get(target_col, [])
+        count = cached_data.get("count", 0)
+
+        if count >= minimum_observations:
+            return clip_forecast(safe_mean(values)), count
+
+    # Fallback: If not in cache or insufficient, calculate directly.
+    forecast_value, obs_count = get_weekday_month_history(
+        daily_actuals=daily_actuals,
+        target_date=target_date,
+        cutoff_timestamp=cutoff_timestamp,
+        max_n=PRODUCTION_CONFIG.get("weekday_month_max_n", 8), # Default to 8 if not in config.
+        target_col=target_col,
+        minimum_observations=minimum_observations,
+    )
+    return clip_forecast(forecast_value), obs_count
+
+
+def calculate_level_trend_factor(
+    daily_actuals: pd.DataFrame,
+    cutoff_timestamp: pd.Timestamp,
+    target_col: str,
+    recent_days: int,
+    comparison_days: int,
+    minimum_factor: float,
+    maximum_factor: float,
+) -> float:
+    """
+    Estimates a purely historical demand level adjustment (trend factor)
+    as of the forecast cutoff.
+    (Copied from G2 Simulation)
+
+    The trend factor is calculated as: `mean(recent_demand) / mean(comparison_demand)`.
+    It is clipped to prevent extreme values from short-lived shocks.
+
+    Parameters:
+        daily_actuals (pd.DataFrame): Historical daily actuals DataFrame.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        target_col (str): The column representing demand ("entries" or "exits").
+        recent_days (int): Number of recent days to average for the 'recent level'.
+        comparison_days (int): Number of preceding days to average for the 'comparison level'.
+        minimum_factor (float): Lower bound for clipping the trend factor.
+        maximum_factor (float): Upper bound for clipping the trend factor.
+
+    Returns:
+        float: The clipped trend factor (e.g., 1.0 if no trend or insufficient data).
+    """
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+
+    history = daily_actuals.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce").dt.normalize()
+
+    # Filter for historical data available before the cutoff date.
+    history = history[
+        history["date"].lt(cutoff_date)
+    ].sort_values("date")
+
+    # Define the date ranges for recent and comparison periods.
+    recent_start = cutoff_date - pd.Timedelta(days=recent_days)
+    comparison_start = recent_start - pd.Timedelta(days=comparison_days)
+
+    # Extract demand for the recent and comparison periods.
+    recent_demand = history[
+        history["date"].ge(recent_start)
+    ][target_col]
+
+    comparison_demand = history[
+        history["date"].ge(comparison_start)
+        & history["date"].lt(recent_start)
+    ][target_col]
+
+    # Return 1.0 (no adjustment) if insufficient data for either period.
+    if len(recent_demand) < max(7, recent_days // 2): # Heuristic for sufficient data.
+        return 1.0
+    if len(comparison_demand) < max(14, comparison_days // 2):
+        return 1.0
+
+    recent_mean = safe_mean(recent_demand)
+    comparison_mean = safe_mean(comparison_demand)
+
+    # Return 1.0 if means are invalid or comparison mean is zero.
+    if pd.isna(recent_mean) or pd.isna(comparison_mean) or comparison_mean <= 0:
+        return 1.0
+
+    factor = recent_mean / comparison_mean
+
+    # Clip the factor to prevent extreme adjustments.
+    return float(
+        np.clip(
+            factor,
+            minimum_factor,
+            maximum_factor,
+        )
+    )
+
+
+def forecast_trend_adjusted_seasonal(
+    seasonal_forecast: float | None,
+    trend_factor: float | None,
+) -> float:
+    """
+    Applies a historical demand-level trend factor to a seasonal forecast.
+    (Copied from G2 Simulation)
+
+    Parameters:
+        seasonal_forecast (float | None): The base seasonal forecast.
+        trend_factor (float | None): The trend adjustment factor.
+
+    Returns:
+        float: The trend-adjusted forecast, or NaN if inputs are invalid.
+    """
+    if pd.isna(seasonal_forecast) or pd.isna(trend_factor):
+        return np.nan
+
+    return clip_forecast(
+        seasonal_forecast * trend_factor
+    )
+
+
+def shrink_booking_forecast(
+    booking_forecast: float | None,
+    historical_forecast: float | None,
+    known_bookings: int | float | None,
+    shrinkage_strength: int | float,
+) -> float:
+    """
+    Shrinks an unstable booking-curve forecast toward a historical baseline.
+    (Copied from G2 Simulation)
+
+    This mechanism improves stability at longer horizons where booking visibility is low.
+    The reliability weight is calculated as `known_bookings / (known_bookings + shrinkage_strength)`.
+    Low-visibility forecasts receive more historical support, while high-visibility
+    forecasts remain closer to the booking curve.
+
+    Parameters:
+        booking_forecast (float | None): The raw booking curve forecast.
+        historical_forecast (float | None): The historical baseline forecast.
+        known_bookings (int | float | None): The number of known bookings for the target.
+        shrinkage_strength (int | float): A parameter controlling the strength of shrinkage.
+                                          Higher values lead to more shrinkage.
+
+    Returns:
+        float: The shrunk forecast, or NaN if inputs are invalid.
+    """
+    if pd.isna(booking_forecast):
+        return historical_forecast
+    if pd.isna(historical_forecast):
+        return booking_forecast
+
+    known_bookings_val = max(0.0, float(known_bookings)) if known_bookings is not None else 0.0
+    shrinkage_strength_val = max(0.0, float(shrinkage_strength))
+
+    if shrinkage_strength_val == 0:
+        return clip_forecast(booking_forecast) # No shrinkage if strength is 0.
+
+    reliability = (
+        known_bookings_val
+        / (known_bookings_val + shrinkage_strength_val)
+    )
+
+    return clip_forecast(
+        reliability * booking_forecast
+        + (1.0 - reliability) * historical_forecast
+    )
+
+# --- Cancellation Feature Functions (from G2.1 Simulation) ---
+
+def prepare_cancellation_booking_data(
+    bookings: pd.DataFrame,
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Prepares a cancellation-specific copy of the cleaned booking data.
+    This function does not alter the original bookings DataFrame.
+    (Copied from G2.1 Simulation)
+
+    Parameters:
+        bookings (pd.DataFrame): The cleaned bookings DataFrame.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: A DataFrame with cancellation-specific columns converted to datetime.
+    """
+    output = bookings.copy()
+
+    created_col = config["booking_created_timestamp_col"]
+    cancelled_col = config["cancellation_timestamp_col"]
+    entry_col = config["booking_entry_date_col"]
+    exit_col = config["booking_exit_date_col"]
+
+    output[created_col] = pd.to_datetime(output[created_col], errors="coerce")
+    output[cancelled_col] = pd.to_datetime(output[cancelled_col], errors="coerce")
+    output[entry_col] = pd.to_datetime(output[entry_col], errors="coerce").dt.normalize()
+    output[exit_col] = pd.to_datetime(output[exit_col], errors="coerce").dt.normalize()
+
+    return output
+
+
+def build_cancellation_features_for_flow(
+    component_table_subset: pd.DataFrame, # A slice of the component table for specific target dates
+    cancellation_bookings: pd.DataFrame,
+    flow: str, # "entry" or "exit"
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Builds as-of cancellation metrics for a given flow (entry or exit) and set of snapshots.
+    (Copied from G2.1 Simulation)
+
+    A cancellation is counted only if:
+    - `createdAt <= cutoff_timestamp`
+    - `cancelledAt <= cutoff_timestamp`
+    - Planned entry/exit date == `target_date`
+
+    This ensures no future cancellation information is used.
+
+    Parameters:
+        component_table_subset (pd.DataFrame): A DataFrame with `target_date` and `cutoff_timestamp`
+                                               for which to build cancellation features.
+        cancellation_bookings (pd.DataFrame): Prepared cancellation booking data.
+        flow (str): "entry" or "exit" indicating the demand type.
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: A DataFrame with cancellation features merged for the given snapshots.
+    """
+    created_col = config["booking_created_timestamp_col"]
+    cancelled_col = config["cancellation_timestamp_col"]
+    booking_id_col = config["booking_id_col"]
+
+    target_col = config["booking_entry_date_col"] if flow == "entry" else config["booking_exit_date_col"]
+
+    # Ensure snapshot dates are normalized.
+    snapshots = component_table_subset[[
+        "target_date", "horizon_days", "cutoff_timestamp"
+    ]].drop_duplicates().copy()
+    snapshots["target_date"] = pd.to_datetime(snapshots["target_date"]).dt.normalize()
+    snapshots["cutoff_timestamp"] = pd.to_datetime(snapshots["cutoff_timestamp"])
+
+    # Select relevant booking columns and rename the target date column for merging.
+    booking_subset = cancellation_bookings[
+        [booking_id_col, created_col, cancelled_col, target_col]
+    ].copy()
+    booking_subset = booking_subset.rename(columns={target_col: "target_date"})
+    booking_subset["target_date"] = pd.to_datetime(booking_subset["target_date"]).dt.normalize()
+
+    # Expand snapshots by merging with booking data, creating a row for each booking
+    # relevant to each snapshot.
+    expanded = snapshots.merge(
+        booking_subset,
+        on="target_date",
+        how="left",
+    )
+
+    # Determine if the booking was created by the cutoff timestamp.
+    expanded["created_by_cutoff"] = (
+        expanded[created_col].notna()
+        & expanded[created_col].le(expanded["cutoff_timestamp"])
+    )
+
+    # Determine if the cancellation was known by the cutoff timestamp.
+    expanded["cancelled_by_cutoff"] = (
+        expanded["created_by_cutoff"]
+        & expanded[cancelled_col].notna()
+        & expanded[cancelled_col].le(expanded["cutoff_timestamp"])
+    )
+
+    # Calculate cancellations within specified rolling windows before the cutoff.
+    for window_days in config["cancellation_windows_days"]:
+        window_start = expanded["cutoff_timestamp"] - pd.Timedelta(days=window_days)
+        expanded[f"cancelled_last_{window_days}d"] = (
+            expanded["cancelled_by_cutoff"]
+            & expanded[cancelled_col].gt(window_start)
+        )
+
+    # Aggregate the counts for each snapshot.
+    aggregation = {
+        booking_id_col: "nunique", # Count unique bookings for gross created.
+        "created_by_cutoff": "sum",
+        "cancelled_by_cutoff": "sum",
+    }
+    for window_days in config["cancellation_windows_days"]:
+        aggregation[f"cancelled_last_{window_days}d"] = "sum"
+
+    summary = (
+        expanded
+        .groupby(["target_date", "horizon_days"], as_index=False)
+        .agg(
+            gross_created_by_cutoff=(booking_id_col, "nunique"), # Total unique bookings created by cutoff for this target date.
+            **{k: v for k, v in aggregation.items() if k != booking_id_col} # Add other aggregated columns.
+        )
+    )
+
+    # Rename columns to be flow-specific.
+    summary = summary.rename(
+        columns={
+            "gross_created_by_cutoff": f"{flow}_gross_created_by_cutoff",
+            "cancelled_by_cutoff": f"{flow}_cancelled_by_cutoff",
+        }
+    )
+
+    gross_col = f"{flow}_gross_created_by_cutoff"
+    cumulative_cancelled_col = f"{flow}_cancelled_by_cutoff"
+
+    # Calculate cumulative cancellation rate.
+    summary[f"{flow}_cumulative_cancellation_rate"] = (
+        summary[cumulative_cancelled_col]
+        / summary[gross_col].replace(0, np.nan)
+    ).fillna(0.0)
+
+    # Calculate rolling cancellation rates.
+    for window_days in config["cancellation_windows_days"]:
+        source_col = f"cancelled_last_{window_days}d"
+        count_col = f"{flow}_cancellations_last_{window_days}d"
+        rate_col = f"{flow}_cancellation_rate_last_{window_days}d"
+
+        summary = summary.rename(columns={source_col: count_col})
+        summary[rate_col] = (
+            summary[count_col]
+            / summary[gross_col].replace(0, np.nan)
+        ).fillna(0.0)
+
+    return summary
+
+
+def get_cancellation_rate_bands(
+    training_data: pd.DataFrame, # Historical data for training the bands
+    target_data: pd.DataFrame,   # Data to apply the learned bands to
+    flow: str, # "entry" or "exit"
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Classifies cancellation activity relative to training-period behavior.
+    (Copied from G2.1 Simulation)
+
+    Training-period medians are used to define the "normal" cancellation rate
+    for a given horizon and weekday. The target data is then categorized
+    into bands (e.g., "low", "normal", "high") based on its deviation from these medians.
+
+    Parameters:
+        training_data (pd.DataFrame): Historical data used to learn cancellation rate medians.
+        target_data (pd.DataFrame): Data (e.g., current forecast target) to which bands are applied.
+        flow (str): "entry" or "exit".
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: `target_data` with added cancellation rate band features.
+    """
+    window_days = config["primary_cancellation_window_days"]
+    cancellation_rate_col = f"{flow}_cancellation_rate_last_{window_days}d"
+    relative_col = f"{flow}_cancellation_rate_relative"
+    band_col = f"{flow}_cancellation_band"
+
+    # Learn medians from training data.
+    training_medians = (
+        training_data
+        .groupby(["horizon_days", "weekday"], dropna=False)
+        .agg(training_cancellation_median=(cancellation_rate_col, "median"))
+        .reset_index()
+    )
+
+    output_df = target_data.copy()
+
+    # Merge learned medians with the target data.
+    output_df = output_df.merge(
+        training_medians,
+        on=["horizon_days", "weekday"],
+        how="left",
+        validate="many_to_one",
+    )
+
+    # Calculate relative deviation from the median.
+    # Clip denominator to avoid division by zero or very small numbers.
+    denominator = output_df["training_cancellation_median"].abs().clip(lower=0.0001)
+    output_df[relative_col] = (
+        output_df[cancellation_rate_col] - output_df["training_cancellation_median"]
+    ) / denominator
+
+    # Apply cancellation rate bands.
+    output_df[band_col] = pd.cut(
+        output_df[relative_col],
+        bins=config["cancellation_rate_bins"],
+        labels=config["cancellation_rate_labels"],
+        include_lowest=True,
+    ).astype("object").fillna("unknown") # Fill NaNs with "unknown" band.
+
+    # Drop the temporary median column.
+    output_df = output_df.drop(columns=["training_cancellation_median"])
+
+    return output_df
+
+
+def apply_segment_adjustment(
+    frame: pd.DataFrame,
+    base_forecast_col: str,
+    adjustment_table: pd.DataFrame,
+    segment_cols: List[str],
+    output_col: str,
+) -> pd.DataFrame:
+    """
+    Applies segment-specific adjustments to a base forecast.
+    (Copied from G2.1 Simulation)
+
+    Parameters:
+        frame (pd.DataFrame): The DataFrame containing the base forecast and segment identifiers.
+        base_forecast_col (str): The name of the column containing the base forecast.
+        adjustment_table (pd.DataFrame): A DataFrame containing 'adjustment' factors and 'observations'
+                                         for each segment, learned from historical data.
+        segment_cols (List[str]): Columns that define the segments (e.g., ["horizon_days", "weekday", "pace_band"]).
+        output_col (str): The name of the new column for the adjusted forecast.
+
+    Returns:
+        pd.DataFrame: The input DataFrame with the new adjusted forecast column.
+    """
+    output = frame.copy()
+
+    # If no adjustments are provided, the adjusted forecast is simply the base forecast.
+    if adjustment_table.empty:
+        output[output_col] = output[base_forecast_col]
+        return output
+
+    # Merge the adjustment factors into the main DataFrame based on segment columns.
+    output = output.merge(adjustment_table, on=segment_cols, how="left")
+    # Fill any missing adjustment factors with 1.0 (no adjustment).
+    output["adjustment"] = output["adjustment"].fillna(1.0)
+
+    # Apply the adjustment factor to the base forecast.
+    output[output_col] = output[base_forecast_col] * output["adjustment"]
+
+    # Drop temporary columns.
+    output = output.drop(columns=["adjustment", "observations"], errors="ignore")
+    return output
+
+
+# --- Booking Pace Feature Functions (from G2.1 Simulation) ---
+
+def get_booking_pace_per_day(
+    component_table_subset: pd.DataFrame,
+    flow: str, # "entry" or "exit"
+    pace_lookback_days: int,
+    horizons: List[int],
+) -> pd.DataFrame:
+    """
+    Calculates the booking pace (growth rate of known bookings per day)
+    between successive forecast horizons.
+    (Logic adapted from G2.1 Simulation)
+
+    Parameters:
+        component_table_subset (pd.DataFrame): A DataFrame slice containing
+                                               `target_date`, `horizon_days`,
+                                               and `_known_bookings` columns.
+        flow (str): "entry" or "exit".
+        pace_lookback_days (int): The minimum gap in days between horizons to
+                                  calculate pace.
+        horizons (List[int]): All available forecast horizons.
+
+    Returns:
+        pd.DataFrame: The input DataFrame with added `_pace_per_day` and
+                      `_pace_source_horizon` columns.
+    """
+    output = component_table_subset.copy()
+    known_col = f"{flow}_known_bookings"
+    pace_col = f"{flow}_pace_per_day"
+    source_horizon_col = f"{flow}_pace_source_horizon"
+
+    output[pace_col] = np.nan
+    output[source_horizon_col] = np.nan
+
+    # Create a lookup table for known bookings by target date and horizon.
+    lookup = output.set_index(["target_date", "horizon_days"])[known_col]
+
+    # Iterate through each row (snapshot) in the component table.
+    for index, row in output.iterrows():
+        current_horizon = int(row["horizon_days"])
+        current_target_date = row["target_date"]
+        current_known = row[known_col]
+
+        # Find the nearest earlier horizon to calculate pace from.
+        earlier_horizon = nearest_earlier_horizon(
+            current_horizon,
+            horizons,
+            minimum_gap=pace_lookback_days,
+        )
+
+        if earlier_horizon is None:
+            continue
+
+        # Try to retrieve known bookings from the earlier horizon using the lookup.
+        try:
+            earlier_known = lookup.loc[(current_target_date, earlier_horizon)]
+        except KeyError: # If the earlier horizon is not in the lookup for this date.
+            continue
+
+        gap = earlier_horizon - current_horizon # Days between the two horizons.
+        pace = safe_ratio(current_known - earlier_known, gap) # (Change in bookings) / (Change in days)
+
+        output.at[index, pace_col] = pace
+        output.at[index, source_horizon_col] = earlier_horizon
+
+    return output
+
+
+def get_pace_bands(
+    training_data: pd.DataFrame, # Historical data for training the bands
+    target_data: pd.DataFrame,   # Data to apply the learned bands to
+    flow: str, # "entry" or "exit"
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Classifies booking pace into bands (e.g., "low", "normal", "high")
+    relative to training-period medians.
+    (Logic adapted from G2.1 Simulation)
+
+    Training-period medians are used to define the "normal" pace for a given
+    horizon and weekday. The target data's pace is then categorized based on
+    its deviation from these medians.
+
+    Parameters:
+        training_data (pd.DataFrame): Historical data used to learn pace medians.
+        target_data (pd.DataFrame): Data (e.g., current forecast target) to which bands are applied.
+        flow (str): "entry" or "exit".
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: `target_data` with added pace band features.
+    """
+    pace_col = f"{flow}_pace_per_day"
+    relative_col = f"{flow}_pace_relative"
+    band_col = f"{flow}_pace_band"
+
+    # Learn medians from training data.
+    medians = (
+        training_data.groupby(["horizon_days", "weekday"], dropna=False)[pace_col]
+        .median()
+        .rename("training_pace_median")
+        .reset_index()
+    )
+
+    output_df = target_data.copy()
+
+    # Merge learned medians with the target data.
+    output_df = output_df.merge(
+        medians,
+        on=["horizon_days", "weekday"],
+        how="left",
+        validate="many_to_one",
+    )
+
+    # Calculate relative deviation from the median pace.
+    denominator = output_df["training_pace_median"].abs().clip(lower=1.0) # Clip to avoid div by zero.
+    output_df[relative_col] = (
+        output_df[pace_col] - output_df["training_pace_median"]
+    ) / denominator
+
+    # Apply pace bands.
+    output_df[band_col] = pd.cut(
+        output_df[relative_col],
+        bins=config["pace_bins"],
+        labels=config["pace_labels"],
+        include_lowest=True,
+    ).astype("object").fillna("unknown") # Fill NaNs with "unknown" band.
+
+    # Drop the temporary median column.
+    output_df = output_df.drop(columns=["training_pace_median"])
+
+    return output_df
+
+
+# --- Calendar Feature Functions (from G2.1 Simulation) ---
+
+def build_calendar_table(start_date: pd.Timestamp, end_date: pd.Timestamp, periods: dict) -> pd.DataFrame:
+    """
+    Creates a calendar DataFrame with flags for special periods (holidays, events).
+    (Copied from G2.1 Simulation)
+
+    Parameters:
+        start_date (pd.Timestamp): The start date of the calendar period.
+        end_date (pd.Timestamp): The end date of the calendar period.
+        periods (dict): A dictionary mapping calendar categories (e.g., "public_holiday")
+                        to lists of (start_date, end_date) tuples for those periods.
+
+    Returns:
+        pd.DataFrame: A DataFrame with `target_date` and calendar flags/types.
+    """
+    calendar = pd.DataFrame(
+        {
+            "target_date": pd.date_range(
+                start=start_date,
+                end=end_date,
+                freq="D",
+            )
+        }
+    )
+    calendar["target_date"] = pd.to_datetime(calendar["target_date"]).dt.normalize()
+
+    calendar_flags = []
+    for category, ranges in periods.items():
+        flag_column = f"is_{category}"
+        calendar[flag_column] = False
+        calendar_flags.append(flag_column)
+
+        for start, end in ranges:
+            start_ts = pd.to_datetime(start).normalize()
+            end_ts = pd.to_datetime(end).normalize()
+
+            if end_ts < start_ts:
+                raise ValueError(
+                    f"Calendar range end is before start: {category}, {start_ts.date()} to {end_ts.date()}"
+                )
+
+            mask = calendar["target_date"].between(start_ts, end_ts, inclusive="both")
+            calendar.loc[mask, flag_column] = True
+
+    # Identify any day that is part of any special period.
+    calendar["is_any_special_period"] = (
+        calendar[calendar_flags].any(axis=1)
+        if calendar_flags
+        else False
+    )
+
+    # Convert to set for efficient lookup.
+    special_dates = set(
+        calendar.loc[
+            calendar["is_any_special_period"],
+            "target_date",
+        ]
+    )
+
+    # Flag days immediately before or after a special period.
+    calendar["is_day_before_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date + pd.Timedelta(days=1)
+            ) in special_dates
+        )
+    )
+    calendar["is_day_after_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date - pd.Timedelta(days=1)
+            ) in special_dates
+        )
+    )
+
+    # Combine all active calendar types into a single categorical column.
+    def combine_calendar_types(row: pd.Series) -> str:
+        active_categories = []
+        for category in periods:
+            if row[f"is_{category}"]:
+                active_categories.append(category)
+
+        if active_categories:
+            return "|".join(active_categories)
+        if row["is_day_before_special"]:
+            return "day_before_special"
+        if row["is_day_after_special"]:
+            return "day_after_special"
+        return "normal"
+
+    calendar["calendar_type"] = calendar.apply(combine_calendar_types, axis=1)
+
+    return calendar
+
+
+
+def forecast_trend_adjusted_seasonal(
+    seasonal_forecast: float | None,
+    trend_factor: float | None,
+) -> float:
+    """
+    Applies a historical demand-level trend factor to a seasonal forecast.
+    (Copied from G2 Simulation)
+
+    Parameters:
+        seasonal_forecast (float | None): The base seasonal forecast.
+        trend_factor (float | None): The trend adjustment factor.
+
+    Returns:
+        float: The trend-adjusted forecast, or NaN if inputs are invalid.
+    """
+    if pd.isna(seasonal_forecast) or pd.isna(trend_factor):
+        return np.nan
+
+    return clip_forecast(
+        seasonal_forecast * trend_factor
+    )
+
+
+def shrink_booking_forecast(
+    booking_forecast: float | None,
+    historical_forecast: float | None,
+    known_bookings: int | float | None,
+    shrinkage_strength: int | float,
+) -> float:
+    """
+    Shrinks an unstable booking-curve forecast toward a historical baseline.
+    (Copied from G2 Simulation)
+
+    This mechanism improves stability at longer horizons where booking visibility is low.
+    The reliability weight is calculated as `known_bookings / (known_bookings + shrinkage_strength)`.
+    Low-visibility forecasts receive more historical support, while high-visibility
+    forecasts remain closer to the booking curve.
+
+    Parameters:
+        booking_forecast (float | None): The raw booking curve forecast.
+        historical_forecast (float | None): The historical baseline forecast.
+        known_bookings (int | float | None): The number of known bookings for the target.
+        shrinkage_strength (int | float): A parameter controlling the strength of shrinkage.
+                                          Higher values lead to more shrinkage.
+
+    Returns:
+        float: The shrunk forecast, or NaN if inputs are invalid.
+    """
+    if pd.isna(booking_forecast):
+        return historical_forecast
+    if pd.isna(historical_forecast):
+        return booking_forecast
+
+    known_bookings_val = max(0.0, float(known_bookings)) if known_bookings is not None else 0.0
+    shrinkage_strength_val = max(0.0, float(shrinkage_strength))
+
+    if shrinkage_strength_val == 0:
+        return clip_forecast(booking_forecast) # No shrinkage if strength is 0.
+
+    reliability = (
+        known_bookings_val
+        / (known_bookings_val + shrinkage_strength_val)
+    )
+
+    return clip_forecast(
+        reliability * booking_forecast
+        + (1.0 - reliability) * historical_forecast
+    )
+
+
+# --- Booking Pace Feature Functions (from G2.1 Simulation) ---
+
+def get_booking_pace_per_day(
+    component_table_subset: pd.DataFrame,
+    flow: str, # "entry" or "exit"
+    pace_lookback_days: int,
+    horizons: List[int],
+) -> pd.DataFrame:
+    """
+    Calculates the booking pace (growth rate of known bookings per day)
+    between successive forecast horizons.
+    (Logic adapted from G2.1 Simulation)
+
+    Parameters:
+        component_table_subset (pd.DataFrame): A DataFrame slice containing
+                                               `target_date`, `horizon_days`,
+                                               and `_known_bookings` columns.
+        flow (str): "entry" or "exit".
+        pace_lookback_days (int): The minimum gap in days between horizons to
+                                  calculate pace.
+        horizons (List[int]): All available forecast horizons.
+
+    Returns:
+        pd.DataFrame: The input DataFrame with added `_pace_per_day` and
+                      `_pace_source_horizon` columns.
+    """
+    output = component_table_subset.copy()
+    known_col = f"{flow}_known_bookings"
+    pace_col = f"{flow}_pace_per_day"
+    source_horizon_col = f"{flow}_pace_source_horizon"
+
+    output[pace_col] = np.nan
+    output[source_horizon_col] = np.nan
+
+    # Create a lookup table for known bookings by target date and horizon.
+    lookup = output.set_index(["target_date", "horizon_days"])[known_col]
+
+    # Iterate through each row (snapshot) in the component table.
+    for index, row in output.iterrows():
+        current_horizon = int(row["horizon_days"])
+        current_target_date = row["target_date"]
+        current_known = row[known_col]
+
+        # Find the nearest earlier horizon to calculate pace from.
+        earlier_horizon = nearest_earlier_horizon(
+            current_horizon,
+            horizons,
+            minimum_gap=pace_lookback_days,
+        )
+
+        if earlier_horizon is None:
+            continue
+
+        # Try to retrieve known bookings from the earlier horizon using the lookup.
+        try:
+            earlier_known = lookup.loc[(current_target_date, earlier_horizon)]
+        except KeyError: # If the earlier horizon is not in the lookup for this date.
+            continue
+
+        gap = earlier_horizon - current_horizon # Days between the two horizons.
+        pace = safe_ratio(current_known - earlier_known, gap) # (Change in bookings) / (Change in days)
+
+        output.at[index, pace_col] = pace
+        output.at[index, source_horizon_col] = earlier_horizon
+
+    return output
+
+
+def get_pace_bands(
+    training_data: pd.DataFrame, # Historical data for training the bands
+    target_data: pd.DataFrame,   # Data to apply the learned bands to
+    flow: str, # "entry" or "exit"
+    config: dict,
+) -> pd.DataFrame:
+    """
+    Classifies booking pace into bands (e.g., "low", "normal", "high")
+    relative to training-period medians.
+    (Logic adapted from G2.1 Simulation)
+
+    Training-period medians are used to define the "normal" pace for a given
+    horizon and weekday. The target data's pace is then categorized based on
+    its deviation from these medians.
+
+    Parameters:
+        training_data (pd.DataFrame): Historical data used to learn pace medians.
+        target_data (pd.DataFrame): Data (e.g., current forecast target) to which bands are applied.
+        flow (str): "entry" or "exit".
+        config (dict): Configuration dictionary (e.g., `PRODUCTION_CONFIG`).
+
+    Returns:
+        pd.DataFrame: `target_data` with added pace band features.
+    """
+    pace_col = f"{flow}_pace_per_day"
+    relative_col = f"{flow}_pace_relative"
+    band_col = f"{flow}_pace_band"
+
+    # Learn medians from training data.
+    medians = (
+        training_data.groupby(["horizon_days", "weekday"], dropna=False)[pace_col]
+        .median()
+        .rename("training_pace_median")
+        .reset_index()
+    )
+
+    output_df = target_data.copy()
+
+    # Merge learned medians with the target data.
+    output_df = output_df.merge(
+        medians,
+        on=["horizon_days", "weekday"],
+        how="left",
+        validate="many_to_one",
+    )
+
+    # Calculate relative deviation from the median pace.
+    denominator = output_df["training_pace_median"].abs().clip(lower=1.0) # Clip to avoid div by zero.
+    output_df[relative_col] = (
+        output_df[pace_col] - output_df["training_pace_median"]
+    ) / denominator
+
+    # Apply pace bands.
+    output_df[band_col] = pd.cut(
+        output_df[relative_col],
+        bins=config["pace_bins"],
+        labels=config["pace_labels"],
+        include_lowest=True,
+    ).astype("object").fillna("unknown") # Fill NaNs with "unknown" band.
+
+    # Drop the temporary median column.
+    output_df = output_df.drop(columns=["training_pace_median"])
+
+    return output_df
+
+
+# --- Calendar Feature Functions (from G2.1 Simulation) ---
+
+def build_calendar_table(start_date: pd.Timestamp, end_date: pd.Timestamp, periods: dict) -> pd.DataFrame:
+    """
+    Creates a calendar DataFrame with flags for special periods (holidays, events).
+    (Copied from G2.1 Simulation)
+
+    Parameters:
+        start_date (pd.Timestamp): The start date of the calendar period.
+        end_date (pd.Timestamp): The end date of the calendar period.
+        periods (dict): A dictionary mapping calendar categories (e.g., "public_holiday")
+                        to lists of (start_date, end_date) tuples for those periods.
+
+    Returns:
+        pd.DataFrame: A DataFrame with `target_date` and calendar flags/types.
+    """
+    calendar = pd.DataFrame(
+        {
+            "target_date": pd.date_range(
+                start=start_date,
+                end=end_date,
+                freq="D",
+            )
+        }
+    )
+    calendar["target_date"] = pd.to_datetime(calendar["target_date"]).dt.normalize()
+
+    calendar_flags = []
+    for category, ranges in periods.items():
+        flag_column = f"is_{category}"
+        calendar[flag_column] = False
+        calendar_flags.append(flag_column)
+
+        for start, end in ranges:
+            start_ts = pd.to_datetime(start).normalize()
+            end_ts = pd.to_datetime(end).normalize()
+
+            if end_ts < start_ts:
+                raise ValueError(
+                    f"Calendar range end is before start: {category}, {start_ts.date()} to {end_ts.date()}"
+                )
+
+            mask = calendar["target_date"].between(start_ts, end_ts, inclusive="both")
+            calendar.loc[mask, flag_column] = True
+
+    # Identify any day that is part of any special period.
+    calendar["is_any_special_period"] = (
+        calendar[calendar_flags].any(axis=1)
+        if calendar_flags
+        else False
+    )
+
+    # Convert to set for efficient lookup.
+    special_dates = set(
+        calendar.loc[
+            calendar["is_any_special_period"],
+            "target_date",
+        ]
+    )
+
+    # Flag days immediately before or after a special period.
+    calendar["is_day_before_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date + pd.Timedelta(days=1)
+            ) in special_dates
+        )
+    )
+    calendar["is_day_after_special"] = (
+        calendar["target_date"].map(
+            lambda date: (
+                date - pd.Timedelta(days=1)
+            ) in special_dates
+        )
+    )
+
+    # Combine all active calendar types into a single categorical column.
+    def combine_calendar_types(row: pd.Series) -> str:
+        active_categories = []
+        for category in periods:
+            if row[f"is_{category}"]:
+                active_categories.append(category)
+
+        if active_categories:
+            return "|".join(active_categories)
+        if row["is_day_before_special"]:
+            return "day_before_special"
+        if row["is_day_after_special"]:
+            return "day_after_special"
+        return "normal"
+
+    calendar["calendar_type"] = calendar.apply(combine_calendar_types, axis=1)
+
+    return calendar
+
+# =============================================================================
+# 3. PRODUCTION DATA PREPARATION
+# =============================================================================
+
+def load_and_clean_production_data(config: dict, sql_engine) -> Dict[str, pd.DataFrame]:
+    """
+    Loads and cleans all necessary historical data up to the current run date.
+    This data forms the basis for calculating forecast components.
+
+    Parameters:
+        config (dict): The global configuration dictionary (`PRODUCTION_CONFIG`).
+        sql_engine: The SQLAlchemy engine for database connection.
+
+    Returns:
+        Dict[str, pd.DataFrame]: A dictionary containing cleaned bookings, operations,
+                                 flights, master, daily actuals, hourly actuals,
+                                 daily passenger context, and historical curves.
+    """
+    current_run_date = pd.to_datetime(config["current_run_date"]).normalize()
+    history_start_date = config["history_start_date"]
+
+    # The end date for all historical data is the current run date.
+    history_end_date = current_run_date.strftime("%Y-%m-%d")
+
+    # Load raw data.
+    bookings_raw = get_fastpark_bookings(
+        start=history_start_date,
+        end=history_end_date,
+        statuses=[config["valid_booking_status"], config["cancelled_status"], "F"],
+        asset_name=config["asset_name"],
+        engine=sql_engine,
+    )
+    operations_raw = get_fastpark_entry_exits(
+        start=history_start_date,
+        end=history_end_date,
+        engine=sql_engine,
+    )
+    flights_raw = get_historical_flight_performance(
+        start=history_start_date,
+        end=history_end_date,
+        engine=sql_engine,
+    )
+
+    # Clean raw data.
+    bookings_clean = clean_bookings(bookings_raw, config)
+    operations_clean = clean_operations(operations_raw, config)
+    flights_clean = clean_flights(flights_raw, config)
+
+    # Reconcile bookings and operations.
+    master_df = reconcile_bookings_to_operations(bookings_clean, operations_clean)
+
+    # Create daily and hourly FastPark actuals.
+    daily_actuals_df = create_daily_fastpark_actuals(master_df)
+    hourly_actuals_df = create_hourly_fastpark_actuals(master_df)
+
+    # Create daily passenger context.
+    daily_passenger_context_df = create_daily_passenger_context(flights_clean)
+
+        # Build historical booking curves.
+    # The `forecast_horizons_list` needs to include all possible lead_days from 0 to 56.
+    # This list will be used to calculate booking curve completion ratios for all relevant horizons.
+    forecast_horizons_list = list(range(config["forecast_lookahead_days"] + 1))
+
+    entry_booking_curve = build_historical_booking_curve(
+        bookings=bookings_clean,
+        master=master_df,
+        target_field="entryDate",
+        actual_field="actual_entry_ts",
+        cutoff_days=forecast_horizons_list,
+    )
+    exit_booking_curve = build_historical_booking_curve(
+        bookings=bookings_clean,
+        master=master_df,
+        target_field="exitDate",
+        actual_field="actual_exit_ts",
+        cutoff_days=forecast_horizons_list,
+    )
+    duration_exit_booking_curve = build_historical_duration_exit_curve(
+        bookings=bookings_clean,
+        master=master_df,
+        cutoff_days=forecast_horizons_list,
+        config=config,
+    )
+
+    # Prepare cancellation booking data (if enabled)
+    cancellation_bookings_prepared = pd.DataFrame()
+    if config.get("enable_cancellation_test", False):
+        cancellation_bookings_prepared = prepare_cancellation_booking_data(
+            bookings=bookings_clean,
+            config=config,
+        )
+
+    return {
+        "bookings_clean": bookings_clean,
+        "operations_clean": operations_clean, # Not directly used in forecast, but good for context.
+        "flights_clean": flights_clean, # Not directly used in forecast, but good for context.
+        "master_df": master_df,
+        "daily_actuals_df": daily_actuals_df,
+        "hourly_actuals_df": hourly_actuals_df,
+        "daily_passenger_context_df": daily_passenger_context_df,
+        "entry_booking_curve": entry_booking_curve,
+        "exit_booking_curve": exit_booking_curve,
+        "duration_exit_booking_curve": duration_exit_booking_curve,
+        "cancellation_bookings_prepared": cancellation_bookings_prepared,
+    }
+
+
+class ProductionForecastData:
+    """
+    A container class to hold all pre-loaded and pre-processed data
+    needed for the production forecast. This avoids passing many
+    individual DataFrames to functions.
+    """
+    def __init__(self, data: Dict[str, pd.DataFrame], config: Dict[str, Any]):
+        self.config = config
+        self.bookings_clean = data["bookings_clean"]
+        self.master_df = data["master_df"]
+        self.daily_actuals_df = data["daily_actuals_df"]
+        self.hourly_actuals_df = data["hourly_actuals_df"]
+        self.daily_passenger_context_df = data["daily_passenger_context_df"]
+        self.entry_booking_curve = data["entry_booking_curve"]
+        self.exit_booking_curve = data["exit_booking_curve"]
+        self.duration_exit_booking_curve = data["duration_exit_booking_curve"]
+        self.cancellation_bookings_prepared = data["cancellation_bookings_prepared"]
+
+        # Load learned weights and parameters
+        self.forecast_weights = pd.read_csv(config["forecast_weights_path"])
+        self.forecast_parameters = pd.read_csv(config["forecast_parameters_path"])
+
+        # Pre-process parameters for faster lookup
+        self._prepare_parameters()
+
+        # Cache for frequently accessed historical values to avoid redundant calculations
+        self.cache: Dict[Tuple, Any] = {
+            "known_booking_cache": {},
+            "curve_factor_cache": {},
+            "same_weekday_history_cache": {},
+            "weekday_month_history_cache": {},
+        }
+
+    def _prepare_parameters(self):
+        """
+        Build lookup tables compatible with the generated production CSV files.
+
+        The production files generated by the helper scripts use either:
+        - the simplified format from create_forecast_parameters.py, or
+        - the older detailed format with parameter_type / weekday / band columns.
+
+        We support both so that the script remains robust across model exports.
+        """
+        self.weights_lookup = self.forecast_weights.set_index(
+            ["demand_type", "horizon_days"]
+        ).to_dict(orient="index")
+
+        param_df = self.forecast_parameters.copy()
+        param_df["flow"] = param_df.get("flow", param_df.get("demand_type", pd.Series(index=param_df.index, dtype=object)))
+        param_df["flow"] = param_df["flow"].astype(str).str.lower()
+
+        self.historical_window_lookup = {}
+        if {"flow", "horizon_days", "same_weekday_history"}.issubset(param_df.columns):
+            self.historical_window_lookup = (
+                param_df[["flow", "horizon_days", "same_weekday_history"]]
+                .dropna(subset=["same_weekday_history"])
+                .set_index(["flow", "horizon_days"])["same_weekday_history"]
+                .to_dict()
+            )
+        elif {"demand_type", "horizon_days", "selected_historical_window"}.issubset(param_df.columns):
+            self.historical_window_lookup = (
+                param_df[["demand_type", "horizon_days", "selected_historical_window"]]
+                .dropna(subset=["selected_historical_window"])
+                .set_index(["demand_type", "horizon_days"])["selected_historical_window"]
+                .to_dict()
+            )
+
+        self.hourly_profile_window_lookup = {}
+        if {"flow", "horizon_days", "hourly_profile_window"}.issubset(param_df.columns):
+            self.hourly_profile_window_lookup = (
+                param_df[["flow", "horizon_days", "hourly_profile_window"]]
+                .dropna(subset=["hourly_profile_window"])
+                .set_index(["flow", "horizon_days"])["hourly_profile_window"]
+                .to_dict()
+            )
+        elif {"demand_type", "horizon_days", "profile_weeks"}.issubset(param_df.columns):
+            self.hourly_profile_window_lookup = (
+                param_df[["demand_type", "horizon_days", "profile_weeks"]]
+                .dropna(subset=["profile_weeks"])
+                .set_index(["demand_type", "horizon_days"])["profile_weeks"]
+                .to_dict()
+            )
+
+        self.pace_adjustment_lookup = {}
+        if {"flow", "horizon_days", "pace_adjustment"}.issubset(param_df.columns):
+            self.pace_adjustment_lookup = (
+                param_df[["flow", "horizon_days", "pace_adjustment"]]
+                .dropna(subset=["pace_adjustment"])
+                .set_index(["flow", "horizon_days"])["pace_adjustment"]
+                .to_dict()
+            )
+        elif {"demand_type", "horizon_days", "weekday", "pace_band", "adjustment"}.issubset(param_df.columns):
+            self.pace_adjustment_lookup = (
+                param_df[["demand_type", "horizon_days", "weekday", "pace_band", "adjustment"]]
+                .dropna(subset=["adjustment"])
+                .set_index(["demand_type", "horizon_days", "weekday", "pace_band"])["adjustment"]
+                .to_dict()
+            )
+
+        self.cancellation_adjustment_lookup = {}
+        if {"flow", "horizon_days", "cancellation_adjustment"}.issubset(param_df.columns):
+            self.cancellation_adjustment_lookup = (
+                param_df[["flow", "horizon_days", "cancellation_adjustment"]]
+                .dropna(subset=["cancellation_adjustment"])
+                .set_index(["flow", "horizon_days"])["cancellation_adjustment"]
+                .to_dict()
+            )
+        elif {"demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"}.issubset(param_df.columns):
+            self.cancellation_adjustment_lookup = (
+                param_df[["demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"]]
+                .dropna(subset=["adjustment"])
+                .set_index(["demand_type", "horizon_days", "weekday", "cancellation_band"])["adjustment"]
+                .to_dict()
+            )
+
+        self.pace_median_lookup = {}
+        self.cancellation_median_lookup = {}
+
+
+# =============================================================================
+# 4. FORECAST COMPONENT CALCULATION FUNCTIONS
+# =============================================================================
+# These functions calculate the individual signals that form the ensemble forecast.
+# They are adapted from G1, G2, and G2.1 simulation scripts.
+
+
+def calculate_component_forecasts(
+    target_date: pd.Timestamp,
+    horizon_days: int,
+    data: ProductionForecastData,
+) -> Dict[str, Any]:
+    """
+    Calculate one forecast snapshot for a single target date and lead time.
+
+    The model builds each forecast from the state of the world that would have been
+    known at the cutoff for that date. In practical terms, this means:
+    - count bookings already visible at the cutoff;
+    - apply the learned booking-curve completion factor;
+    - add seasonality, trend, and behavioural adjustments;
+    - combine signals with the weights selected for this horizon.
+
+    This function is the main engine behind a single target-date forecast.
+    """
+    cutoff_timestamp = (
+        pd.to_datetime(target_date).normalize()
+        - pd.Timedelta(days=horizon_days)
+        + pd.Timedelta(hours=7)
+    )
+
+    components = {
+        "target_date": target_date,
+        "horizon_days": horizon_days,
+        "cutoff_timestamp": cutoff_timestamp,
+    }
+
+    # --- 1. Raw Components ---
+    components["entry_booking"] = forecast_booking_curve(data.bookings_clean, data.entry_booking_curve, target_date, cutoff_timestamp, "entry", data.cache)
+    components["exit_booking"] = forecast_booking_curve(data.bookings_clean, data.exit_booking_curve, target_date, cutoff_timestamp, "exit", data.cache)
+
+    # --- 2. Historical & Trend ---
+    entry_w = data.historical_window_lookup.get(("entry", horizon_days), 4)
+    exit_w = data.historical_window_lookup.get(("exit", horizon_days), 4)
+    
+    components["entry_weekday"] = forecast_same_weekday(data.daily_actuals_df, target_date, cutoff_timestamp, "entries", entry_w, data.cache)
+    components["exit_weekday"] = forecast_same_weekday(data.daily_actuals_df, target_date, cutoff_timestamp, "exits", exit_w, data.cache)
+    
+    components["entry_month"], _ = forecast_weekday_month(data.daily_actuals_df, target_date, cutoff_timestamp, "entries", data.cache, 3)
+    components["exit_month"], _ = forecast_weekday_month(data.daily_actuals_df, target_date, cutoff_timestamp, "exits", data.cache, 3)
+    
+    # Trend
+    entry_trend_factor = calculate_level_trend_factor(data.daily_actuals_df, cutoff_timestamp, "entries", 28, 84, 0.7, 1.3)
+    exit_trend_factor = calculate_level_trend_factor(data.daily_actuals_df, cutoff_timestamp, "exits", 28, 84, 0.7, 1.3)
+    components["entry_trend_month"] = forecast_trend_adjusted_seasonal(components["entry_month"], entry_trend_factor)
+    components["exit_trend_month"] = forecast_trend_adjusted_seasonal(components["exit_month"], exit_trend_factor)
+
+    # --- 3. Behavioral Adjustments (Pace & Cancellation) ---
+    # Get known bookings for the current target date/horizon
+    components["entry_known_bookings"] = get_known_target_bookings(data.bookings_clean, target_date, cutoff_timestamp, "entry")["bookingId"].nunique()
+    components["exit_known_bookings"] = get_known_target_bookings(data.bookings_clean, target_date, cutoff_timestamp, "exit")["bookingId"].nunique()
+    
+    for flow in ["entry", "exit"]:
+        # A. PACE ADJUSTMENT
+        # Calculate pace: (current known - earlier horizon known) / gap
+        # We need the snapshot df to use the pace helper
+        snap_df = pd.DataFrame([{'target_date': target_date, 'horizon_days': horizon_days, f'{flow}_known_bookings': components[f'{flow}_known_bookings']}])
+        pace_df = get_booking_pace_per_day(snap_df, flow, data.config["pace_lookback_days"], sorted(data.forecast_weights["horizon_days"].unique().tolist()))
+        current_pace = pace_df[f'{flow}_pace_per_day'].iloc[0]
+        
+        # Determine Band
+        median = data.pace_median_lookup.get((flow, horizon_days, target_date.day_name()), 0.0)
+        rel_pace = safe_ratio(current_pace - median, median, 0.0)
+        pace_band = pd.cut([rel_pace], bins=data.config["pace_bins"], labels=data.config["pace_labels"], include_lowest=True)[0]
+        
+        # Apply adjustment
+        adj = data.pace_adjustment_lookup.get((flow, horizon_days, target_date.day_name(), pace_band), 1.0)
+        components[f"{flow}_booking_pace_adjusted"] = clip_forecast(components[f"{flow}_booking"] * adj)
+
+        # B. CANCELLATION ADJUSTMENT
+        c_df = build_cancellation_features_for_flow(snap_df, data.cancellation_bookings_prepared, flow, data.config)
+        c_rate = c_df[f"{flow}_cancellation_rate_last_7d"].iloc[0]
+        c_median = data.cancellation_median_lookup.get((flow, horizon_days, target_date.day_name()), 0.0)
+        
+        c_rel = safe_ratio(c_rate - c_median, c_median, 0.0)
+        c_band = pd.cut([c_rel], bins=data.config["cancellation_rate_bins"], labels=data.config["cancellation_rate_labels"], include_lowest=True)[0]
+        c_adj = data.cancellation_adjustment_lookup.get((flow, horizon_days, target_date.day_name(), c_band), 1.0)
+        
+        components[f"{flow}_booking_cancellation_adjusted"] = clip_forecast(components[f"{flow}_booking"] * c_adj)
+
+    # --- 4. Finalize Ensemble ---
+    for flow in ["entry", "exit"]:
+        strength = data.weights_lookup.get((flow, horizon_days), {}).get("booking_shrinkage_strength", 0)
+        # Shrink the booking component after applying behavioral adjustments
+        components[f"{flow}_booking_shrunk"] = shrink_booking_forecast(
+            components[f"{flow}_booking_cancellation_adjusted"],
+            components[f"{flow}_trend_month"],
+            components[f"{flow}_known_bookings"],
+            strength
+        )
+    return components
+
+
+# =============================================================================
+# 5. DAILY FORECAST GENERATION
+# =============================================================================
+# The daily model is the core of the production forecast. For each target date in the
+# forward window, the script calculates the main components (booking visibility,
+# historic weekday/month patterns, trend, pace, and cancellation), then combines those
+# components using the optimal weights for that specific horizon.
+
+def generate_daily_forecasts(data: ProductionForecastData) -> pd.DataFrame:
+    """
+    Generate the daily entry and exit forecast across the full forward window.
+
+    The output is one row per target date, where each row contains:
+    - the date being forecast;
+    - the lead time (horizon) from the run date;
+    - the final entry forecast;
+    - the final exit forecast;
+    - the component values used to build the forecast.
+
+    Parameters:
+        data (ProductionForecastData): Pre-loaded historical data, learned parameters,
+                                       and lookup tables for the run.
+
+    Returns:
+        pd.DataFrame: Daily forecast table with one row for each future day.
+    """
+    current_run_date = pd.to_datetime(data.config["current_run_date"]).normalize()
+    forecast_lookahead_days = data.config["forecast_lookahead_days"]
+
+    forecast_results = []
+
+    # Include today as horizon 0 and continue through the full lookahead window.
+    # This matches the historical backtest convention used in the simulation work.
+    target_dates = [
+        current_run_date + pd.Timedelta(days=d)
+        for d in range(0, forecast_lookahead_days + 1)
+    ]
+
+    print(f"Generating daily forecasts for {len(target_dates)} dates...")
+
+    # Each target date has one valid horizon value based on its distance from the run date.
+    # Example: today = 0, tomorrow = 1, +14 days = 14, ...
+    for target_date in target_dates:
+        horizon_days = int((target_date - current_run_date).days)
+
+        components = calculate_component_forecasts(
+            target_date=target_date,
+            horizon_days=horizon_days,
+            data=data,
+        )
+
+        entry_weights_row = data.weights_lookup.get(("entry", horizon_days))
+        exit_weights_row = data.weights_lookup.get(("exit", horizon_days))
+
+        if entry_weights_row is None or exit_weights_row is None:
+            continue
+
+        # --- ENTRY Forecast ---
+        entry_components_list = [
+            (name, weight)
+            for name, weight in entry_weights_row.items()
+            if name.startswith("entry_") and name.endswith("_weight")
+        ]
+        entry_component_names = [name.replace("_weight", "") for name, _ in entry_components_list]
+        entry_component_values = [components.get(name) for name in entry_component_names]
+        entry_component_weights = [weight for _, weight in entry_components_list]
+
+        final_entry_forecast = weighted_average(
+            values=entry_component_values,
+            weights=entry_component_weights,
+        )
+
+        # --- EXIT Forecast ---
+        exit_components_list = [
+            (name, weight)
+            for name, weight in exit_weights_row.items()
+            if name.startswith("exit_") and name.endswith("_weight")
+        ]
+        exit_component_names = [name.replace("_weight", "") for name, _ in exit_components_list]
+        exit_component_values = [components.get(name) for name in exit_component_names]
+        exit_component_weights = [weight for _, weight in exit_components_list]
+
+        final_exit_forecast = weighted_average(
+            values=exit_component_values,
+            weights=exit_component_weights,
+        )
+
+        forecast_results.append({
+            "target_date": target_date.normalize(),
+            "horizon_days": horizon_days,
+            "entry_forecast": final_entry_forecast,
+            "exit_forecast": final_exit_forecast,
+            **{k: v for k, v in components.items() if not isinstance(v, (pd.Timestamp, datetime))},
+        })
+
+    daily_forecast_df = pd.DataFrame(forecast_results)
+
+    # Clean up component columns that might be NaN if not always used
+    for col in daily_forecast_df.columns:
+        if isinstance(daily_forecast_df[col].dtype, pd.Float64Dtype):
+            daily_forecast_df[col] = daily_forecast_df[col].replace([np.inf, -np.inf], np.nan)
+
+    # Keep the exported daily forecast limited to the business-facing fields.
+    # Detailed component diagnostics are useful for model review, but they should live in a
+    # separate troubleshooting export rather than in the main production output table.
+    keep_cols = [
+        "target_date",
+        "horizon_days",
+        "entry_forecast",
+        "exit_forecast",
+        "entry_known_bookings",
+        "exit_known_bookings",
+    ]
+    available_cols = [col for col in keep_cols if col in daily_forecast_df.columns]
+    daily_forecast_df = daily_forecast_df[available_cols].copy()
+    daily_forecast_df = daily_forecast_df.rename(
+        columns={
+            "entry_known_bookings": "entry_bookings",
+            "exit_known_bookings": "exit_bookings",
+        }
+    )
+
+    return daily_forecast_df
+
+
+# =============================================================================
+# 6. HOURLY FORECAST GENERATION
+# =============================================================================
+
+def build_hourly_profile(
+    hourly_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    demand_type: str,
+    n_weeks: int,
+) -> Dict[int, float] | None:
+    """
+    Build a same-weekday hourly profile for either entry or exit demand.
+
+    The purpose is to answer: "Given the total daily demand for this date, how is that
+    demand usually distributed across the 24 hours on the same weekday?"
+
+    We use only historical dates that are fully in the past relative to the chosen
+    forecast cutoff, so the profile remains consistent with the as-of logic used in the
+    rest of the model.
+
+    Parameters:
+        hourly_actuals (pd.DataFrame): Historical hourly actuals DataFrame.
+        target_date (pd.Timestamp): The date for which the forecast is being made.
+        cutoff_timestamp (pd.Timestamp): The "as-of" point in time for the forecast.
+        demand_type (str): "entry" or "exit".
+        n_weeks (int): The number of previous same-weekday weeks to use for the profile.
+
+    Returns:
+        Dict[int, float] | None: Hour (0-23) mapped to that hour's proportion of the day.
+    """
+    target_date = pd.to_datetime(target_date).normalize()
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+
+    weekday = target_date.weekday()
+
+    df = hourly_actuals
+
+    # Filter for historical data that is:
+    # - Before the target date.
+    # - Before the cutoff date (to avoid look-ahead bias).
+    # - Has the same weekday as the target.
+    historical = df[
+        (df["date"] < target_date)
+        & (df["date"] < cutoff_date)
+        & (df["weekday_num"].eq(weekday))
+    ].copy()
+
+    if historical.empty:
+        return None
+
+    # Select the most recent `n_weeks` of historical dates.
+    selected_dates = (
+        historical["date"]
+        .drop_duplicates()
+        .sort_values()
+        .tail(n_weeks)
+    )
+
+    if len(selected_dates) < n_weeks: # Ensure enough historical weeks are available.
+        return None
+
+    historical = historical[
+        historical["date"].isin(
+            selected_dates
+        )
+    ]
+
+    demand_col = "entries" if demand_type == "entry" else "exits"
+
+    # Aggregate hourly totals and reindex to ensure all 24 hours are present.
+    hourly_totals = (
+        historical
+        .groupby("hour")[demand_col]
+        .sum()
+        .reindex(
+            range(24),
+            fill_value=0,
+        )
+        .astype(float)
+    )
+
+    total_demand = hourly_totals.sum()
+
+    if total_demand <= 0: # Avoid division by zero.
+        return None
+
+    # Calculate the proportion of demand for each hour.
+    profile = (
+        hourly_totals
+        /
+        total_demand
+    )
+
+    # Basic check to ensure proportions sum to 1 (allowing for floating point inaccuracies).
+    if not np.isclose(
+        profile.sum(),
+        1.0,
+        atol=1e-10,
+    ):
+        raise RuntimeError(
+            "Hourly profile does not sum to 1. Check `build_hourly_profile` logic."
+        )
+
+    return profile.to_dict()
+
+
+def distribute_daily_to_hourly(
+    daily_forecast: float | None,
+    hourly_profile: Dict[int, float] | None,
+) -> Dict[int, float] | None:
+    """
+    Convert a daily forecast into an hourly forecast using the selected hourly profile.
+
+    Example:
+    - daily forecast = 100 entries
+    - hour 9 profile share = 0.12
+    - hourly forecast for hour 9 = 12 entries
+
+    The profile values always sum to 1 across the 24 hours, so this is a simple
+    proportional allocation of the daily total.
+
+    Parameters:
+        daily_forecast (float | None): The total daily demand forecast.
+        hourly_profile (Dict[int, float] | None): Share of the day for each hour.
+
+    Returns:
+        Dict[int, float] | None: Hourly forecast by hour of day.
+    """
+    if hourly_profile is None:
+        return None
+    if pd.isna(daily_forecast):
+        return None
+
+    hourly_forecast = {}
+    for hour in range(24):
+        proportion = hourly_profile.get(hour, 0.0)
+        hourly_forecast[hour] = clip_forecast(daily_forecast * proportion)
+
+    return hourly_forecast
+
+
+def generate_hourly_forecasts(
+    daily_forecasts_df: pd.DataFrame,
+    data: ProductionForecastData,
+) -> pd.DataFrame:
+    """
+    Turn daily forecasts into hourly forecasts.
+
+    The daily forecast gives a total for the whole day. The hourly forecast then takes
+    that total and spreads it across each hour using a historical weekday profile. This
+    allows the model to represent peak and off-peak demand patterns without needing to
+    forecast every hour separately.
+
+    We also add the actual booking counts that are scheduled for each target date/hour,
+    based on the booking's planned entry or exit date/time, as of the current run cutoff.
+    This keeps the forecast model unchanged while providing a useful operational snapshot.
+
+    Parameters:
+        daily_forecasts_df (pd.DataFrame): DataFrame containing daily forecasts.
+        data (ProductionForecastData): Production data object with historical hourly profiles.
+
+    Returns:
+        pd.DataFrame: A long-form table of one row per target date and hour.
+    """
+    hourly_forecast_results = []
+
+    print("Generating hourly forecasts...")
+
+    # Each date in the daily forecast table maps to a single total forecast for that day.
+    # We allocate that total across 24 hours using the best historical profile for the
+    # matching weekday and horizon.
+    final_daily_forecasts = daily_forecasts_df.copy()
+    run_cutoff = pd.to_datetime(data.config["current_run_date"]).normalize() + pd.Timedelta(hours=7)
+
+    for index, row in final_daily_forecasts.iterrows():
+        target_date = row["target_date"]
+        target_date_norm = pd.to_datetime(target_date).normalize()
+
+        # Retrieve the optimal historical window for hourly profiles from parameters.
+        entry_n_weeks = data.hourly_profile_window_lookup.get(("entry", row["horizon_days"]))
+        exit_n_weeks = data.hourly_profile_window_lookup.get(("exit", row["horizon_days"]))
+
+        # If no specific window is found, use a default (e.g., 6 weeks, which was common in G1).
+        if entry_n_weeks is None:
+            entry_n_weeks = 6
+        if exit_n_weeks is None:
+            exit_n_weeks = 6
+
+        # Build hourly profiles for entry and exit.
+        entry_profile = build_hourly_profile(
+            hourly_actuals=data.hourly_actuals_df,
+            target_date=target_date,
+            cutoff_timestamp=run_cutoff,
+            demand_type="entry",
+            n_weeks=entry_n_weeks,
+        )
+        exit_profile = build_hourly_profile(
+            hourly_actuals=data.hourly_actuals_df,
+            target_date=target_date,
+            cutoff_timestamp=run_cutoff,
+            demand_type="exit",
+            n_weeks=exit_n_weeks,
+        )
+
+        # Distribute daily forecasts into hourly forecasts.
+        hourly_entries = distribute_daily_to_hourly(
+            daily_forecast=row["entry_forecast"],
+            hourly_profile=entry_profile,
+        )
+        hourly_exits = distribute_daily_to_hourly(
+            daily_forecast=row["exit_forecast"],
+            hourly_profile=exit_profile,
+        )
+
+        # Actual booking counts for the target date/hour, based on planned booking dates,
+        # while respecting the same as-of logic used elsewhere in the forecast.
+        # This is an operational snapshot, not a different forecast model.
+        active_bookings = data.bookings_clean[
+            data.bookings_clean["createdAt"].le(run_cutoff)
+            & (
+                data.bookings_clean["cancelledAt"].isna()
+                |
+                data.bookings_clean["cancelledAt"].gt(run_cutoff)
+            )
+            & data.bookings_clean["status"].ne("F")
+        ].copy()
+
+        # Append hourly results for each hour of the day.
+        for hour in range(24):
+            entry_actual = active_bookings[
+                (pd.to_datetime(active_bookings["entryDate"], errors="coerce").dt.normalize() == target_date_norm)
+                & (active_bookings["planned_entry_hour"].eq(hour))
+            ]["bookingId"].nunique()
+
+            exit_actual = active_bookings[
+                (pd.to_datetime(active_bookings["exitDate"], errors="coerce").dt.normalize() == target_date_norm)
+                & (active_bookings["planned_exit_hour"].eq(hour))
+            ]["bookingId"].nunique()
+
+            hourly_forecast_results.append({
+                "target_date": target_date,
+                "datetime_hour": pd.to_datetime(target_date) + pd.Timedelta(hours=hour),
+                "hour": hour,
+                "entry_forecast_hourly": hourly_entries.get(hour, np.nan) if hourly_entries else np.nan,
+                "exit_forecast_hourly": hourly_exits.get(hour, np.nan) if hourly_exits else np.nan,
+                "entry_actual_bookings_hourly": float(entry_actual) if pd.notna(entry_actual) else 0.0,
+                "exit_actual_bookings_hourly": float(exit_actual) if pd.notna(exit_actual) else 0.0,
+            })
+
+    hourly_forecast_df = pd.DataFrame(hourly_forecast_results)
+    return hourly_forecast_df
+
+
+# =============================================================================
+# 7. MAIN EXECUTION PIPELINE
+# =============================================================================
+
+def run_production_forecast(config: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Executes the full FastPark production forecasting pipeline.
+
+    Parameters:
+        config (dict): The global configuration dictionary (`PRODUCTION_CONFIG`).
+
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame]: A tuple containing the daily and hourly
+                                           forecasts DataFrames.
+    """
+    t0 = time.perf_counter()
+    print("=" * 80)
+    print("FASTPARK PRODUCTION FORECAST GENERATION")
+    print("=" * 80)
+
+    # --- 1. Initialize Run Date ---
+    if config["current_run_date"] is None:
+        # Use today's date if not specified in config.
+        current_run_date = pd.Timestamp.today().normalize()
+    else:
+        current_run_date = pd.to_datetime(config["current_run_date"]).normalize()
+    config["current_run_date"] = current_run_date # Update config with resolved date.
+
+    print(f"Forecast run date: {current_run_date.date()}")
+    print(f"Forecasting {config['forecast_lookahead_days']} days ahead.")
+    print(f"Historical data starts: {config['history_start_date']}")
+    print(f"Historical data ends (implicitly): {current_run_date.date()}")
+
+    # --- 2. Establish Database Connection ---
+    sql_engine = get_engine(dsn=config["db_dsn"], username=config["db_username"])
+    t1 = step(t0, "Established database connection")
+
+    # --- 3. Load and Clean Historical Data ---
+    raw_data_dict = load_and_clean_production_data(config, sql_engine)
+    t2 = step(t1, "Loaded and cleaned historical data")
+
+    # --- 4. Initialize ProductionForecastData Object ---
+    # This object holds all data and pre-processed parameters for efficient access.
+    data_for_forecast = ProductionForecastData(raw_data_dict, config)
+    t3 = step(t2, "Prepared production forecast data structures")
+
+    # --- 5. Generate Daily Forecasts ---
+    daily_forecasts = generate_daily_forecasts(data_for_forecast)
+    t4 = step(t3, f"Generated daily forecasts ({len(daily_forecasts)} records)")
+
+    # --- 6. Generate Hourly Forecasts ---
+    hourly_forecasts = generate_hourly_forecasts(daily_forecasts, data_for_forecast)
+    t5 = step(t4, f"Generated hourly forecasts ({len(hourly_forecasts)} records)")
+
+    # --- 7. Export Results ---
+    daily_forecasts.to_csv(config["daily_forecast_output_file"], index=False)
+    hourly_forecasts.to_csv(config["hourly_forecast_output_file"], index=False)
+    t6 = step(t5, f"Exported forecasts to {config['daily_forecast_output_file']} and {config['hourly_forecast_output_file']}")
+
+    total_runtime = time.perf_counter() - t0
+    print(f"\nFastPark Production Forecast completed in {total_runtime:.2f} seconds.")
+    print("=" * 80)
+
+    return daily_forecasts, hourly_forecasts
+
+
+# =============================================================================
+# 8. SCRIPT ENTRY POINT
+# =============================================================================
+
+if __name__ == "__main__":
+    # --- IMPORTANT: Ensure forecast_weights.csv and forecast_parameters.csv are available ---
+    # These files are crucial for the script to run. They must be generated by
+    # the Generation 2 and Generation 2.1 simulation scripts and placed in the
+    # `PRODUCTION_OUTPUT_DIR` specified in `PRODUCTION_CONFIG`.
+    #
+    # Example structure for `forecast_weights.csv`:
+    # demand_type,horizon_days,shrinkage_strength,entry_booking_shrunk_weight,entry_weekday_weight,...
+    # entry,0,0,1.0,0.0,...
+    # exit,0,0,0.8,0.0,...
+    #
+    # Example structure for `forecast_parameters.csv`:
+    # demand_type,horizon_days,parameter_type,weekday,pace_band,cancellation_band,adjustment,selected_historical_window,...
+    # entry,0,pace_adjustment,Monday,normal,1.0,NaN,...
+    # entry,0,historical_window,NaN,NaN,NaN,4,...
+
+    # Execute the production forecast pipeline.
+    daily_forecast_output, hourly_forecast_output = run_production_forecast(PRODUCTION_CONFIG)
+
+    print("\nDaily Forecast Output (first 5 rows):")
+    print(daily_forecast_output.head())
+    print("\nHourly Forecast Output (first 5 rows):")
+    print(hourly_forecast_output.head())
