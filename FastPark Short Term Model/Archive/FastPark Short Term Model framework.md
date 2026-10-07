@@ -4090,6 +4090,26 @@ rather than:
 Forecast Signals.
 ```
 
+The objective was not to replace the Generation 2 framework. 
+
+The objective was to determine whether behavioural and operational context could improve forecasts
+already built from booking visibility, duration, 
+hisotrical behaviour, seasonality and trend. 
+
+Generation 2.1 therefore focused on
+
+```text
+contextual adjustments
+```
+
+rather than
+
+```text
+entirely new forecasting components.
+```
+
+
+
 ---
 
 
@@ -4262,9 +4282,15 @@ Where demand is moving.
 
 ## Decision
 
-✅ Influenced Production Forecast
+✅ Adopted
 
-Booking Pace demonstrated genuine forecasting value, although benefits were horizon-specific rather than universal.
+Booking Pace consistently demonstrated forecasting value across multiple horizons
+and multiple demand streams. 
+
+Unlike booking visibility, which measures current known demand, booking pace measures the rate
+at which demand is developing.
+
+The feature repeatedly improed forecast accuracy and was retained as a production contextual adjustment.
 
 ---
 
@@ -4375,9 +4401,14 @@ This was a real forecasting signal but not a dominant one.
 
 ## Decision
 
-✅ Influenced Production Forecast
+✅ Adopted as Contextual Adjustment
 
-Cancellation behaviour demonstrated useful forecasting information but did not justify becoming a major standalone forecast component.
+
+Cancellation behaviour demonstrated useful forecasting information across a range of forecast horizons. 
+
+The feature did not justify becoming a standalong forecast component. However it consistently provided information about the
+reliability of visible bookings and therefore remains a useful contextual adjustment within the production forecasting framework.
+
 
 ---
 
@@ -4451,9 +4482,15 @@ already captured much of the available calendar information.
 
 ## Decision
 
-❌ Not Adopted
+⚠ Mixed Evidence
 
-Calendar adjustments failed to demonstrate consistent incremental forecasting value.
+Calendar effects produced inconsistent results.
+
+Some horizons showed little improvement while others demonstrated meeaning reductions in forecast error. 
+
+The feature did not provide sufficient evidence to become a primary production forecasting component. 
+
+However calendar context remains operationally important and may warrent future investigation as additioal historical data becomes available. 
 
 ---
 
@@ -4678,11 +4715,34 @@ and later Production Forecast configuration.
 | Feature | Evidence Strength | Decision |
 |----------|----------|----------|
 | Historical Window Selection | Strong | Adopted |
-| Booking Pace | Strong | Influenced Production |
-| Cancellation Behaviour | Moderate | Influenced Production |
-| Calendar Effects | Weak | Rejected |
+| Booking Pace | Strong | Adopted |
+| Cancellation Behaviour | Moderate | Adopted As Contextual Adjustment |
+| Calendar Effects | Mixed | Further Evaluation Recommended |
 | Booking Regimes | Weak | Rejected |
 | Weekday Trend | Weak | Rejected |
+
+## Behavioural Feature Hierarchy
+
+The strongest evidence generated during Generation
+2.1 was:
+
+Strong Evidence
+---------------
+• Historical Window Selection
+• Booking Pace
+
+Moderate Evidence
+-----------------
+• Cancellation Behaviour
+• Calendar Effects
+
+Weak Evidence
+-------------
+• Booking Regimes
+• Weekday-Specific Trend
+
+This hierarchy formed the basis of later production
+forecast design decisions.
 
 ---
 
@@ -4734,6 +4794,12 @@ Generation 2.1 established:
 Forecast Parameters
 ```
 
+and
+
+```text
+Forecast Context
+```
+
 The key conclusion was:
 
 ```text
@@ -4751,9 +4817,32 @@ had now identified:
 - the forecasting signals,
 - the forecasting models,
 - the signal weights,
-- and the optimal operating parameters.
+- the optimal operating parameters
+- the most useful contextual adjustments
 
-The final remaining challenge was to combine these findings into a single repeatable operational forecasting framework.
+The strongest additional evidence generated during Generation 2.1 was found for:
+
+- Historical Window Selection
+- Booking Pace
+- Cancellation Behaviour
+
+Generation 2.1 demonstrated that forecasting
+performance can be improved not only through better
+forecast signals, but also through better
+interpretation of operational context.
+ 
+The final remaining challenge was therefore to
+combine:
+ 
+- Booking Visibility
+- Historical Behaviour
+- Duration
+- Horizon-Specific Weighting
+- Booking Pace Context
+- Cancellation Context
+ 
+within a single repeatable operational forecasting
+framework.
 
 This directly motivated the development of the:
 
