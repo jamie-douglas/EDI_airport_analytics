@@ -64,7 +64,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 INPUT_FILE = (
     BASE_DIR
-    / "refined_selected_weights_backup_all_dates.csv"
+    / "inputs" / "refined_selected_weights_backup_all_dates.csv"
 )
 
 OUTPUT_FILE = (

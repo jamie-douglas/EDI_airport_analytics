@@ -1941,7 +1941,11 @@ def run_experiments(component_table, refined, config):
     return (
         pd.concat(predictions, ignore_index=True),
         pd.DataFrame(selected_rows),
-        pd.concat(all_tests, ignore_index=True),
+        (
+            pd.concat(all_tests, ignore_index=True)
+            if all_tests
+            else pd.DataFrame()
+        ),
         pd.concat(historical_diagnostics, ignore_index=True),
         pd.DataFrame(folds),
 

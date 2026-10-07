@@ -111,22 +111,40 @@ def weighted_average(series, weights):
     )
 
 def build_adjustment_parameters():
-    """
-    Extracts pace and cancellation adjustment factors from the Non-Price simulation.
-    """
-    # Assuming 'Selected Weights' or the main results export contains the adjustment factors
-    df = pd.read_excel(NON_PRICE_SIMULATION_FILE, sheet_name="Selected Weights")
-    
-    # We filter to the latest fold to get the most recent learned adjustments
-    latest_month = df["test_month"].max()
-    df_latest = df[df["test_month"] == latest_month].copy()
-    
-    # Map the columns to what the production script expects
-    # You need the 'adjustment' for Pace and Cancellation
-    # This assumes your simulation export has columns like 'pace_adjustment' and 'cancellation_adjustment'
-    cols = ["flow", "horizon_days", "pace_adjustment", "cancellation_adjustment"]
-    
-    return df_latest[cols].drop_duplicates()
+
+    pace = pd.read_excel(
+        NON_PRICE_SIMULATION_FILE,
+        sheet_name="Pace Parameters",
+    )
+
+    cancellation = pd.read_excel(
+        NON_PRICE_SIMULATION_FILE,
+        sheet_name="Cancellation Parameters",
+    )
+
+    pace = pace.rename(
+        columns={
+            "training_pace_median":
+            "pace_adjustment"
+        }
+    )
+
+    cancellation = cancellation.rename(
+        columns={
+            "training_cancellation_median":
+            "cancellation_adjustment"
+        }
+    )
+
+    return pace.merge(
+        cancellation,
+        on=[
+            "flow",
+            "horizon_days",
+            "weekday",
+        ],
+        how="outer",
+    )
 
 # ============================================================================
 # SHRINKAGE PARAMETERS
