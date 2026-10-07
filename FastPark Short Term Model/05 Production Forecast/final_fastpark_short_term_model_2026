@@ -226,6 +226,57 @@ def safe_ratio(numerator: float, denominator: float, default: float = np.nan) ->
     return float(numerator) / float(denominator)
 
 
+def get_experiment_component_names(experiment_name: str, flow: str) -> List[str]:
+    """
+    Return the exact component list used by a given simulation experiment.
+
+    This mirrors the G2.1 experiment definitions so the production forecast uses the
+    same component set that was tested in the workbook for each horizon.
+    """
+    experiment_map = {
+        "BASELINE": {
+            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_trend_month"],
+            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_trend_month"],
+        },
+        "ADD_BOOKING_PACE": {
+            "entry": ["entry_booking_shrunk", "entry_booking_pace_adjusted", "entry_weekday_selected", "entry_month"],
+            "exit": ["exit_booking_shrunk", "exit_booking_pace_adjusted", "exit_duration", "exit_weekday_selected"],
+        },
+        "ADD_CANCELLATION": {
+            "entry": ["entry_booking_shrunk", "entry_booking_cancellation_adjusted", "entry_weekday_selected", "entry_month"],
+            "exit": ["exit_booking_shrunk", "exit_booking_cancellation_adjusted", "exit_duration", "exit_weekday_selected"],
+        },
+        "ADD_CALENDAR": {
+            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_calendar_adjusted"],
+            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_calendar_adjusted"],
+        },
+        "ADD_BOOKING_REGIME": {
+            "entry": ["entry_booking_shrunk", "entry_booking_regime_adjusted", "entry_weekday_selected", "entry_month"],
+            "exit": ["exit_booking_shrunk", "exit_booking_regime_adjusted", "exit_duration", "exit_weekday_selected"],
+        },
+        "ADD_WEEKDAY_TREND": {
+            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_weekday_trend"],
+            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_weekday_trend"],
+        },
+        "ALL_NON_PRICE": {
+            "entry": ["entry_booking_shrunk", "entry_booking_pace_adjusted", "entry_booking_regime_adjusted", "entry_calendar_adjusted", "entry_weekday_selected"],
+            "exit": ["exit_booking_shrunk", "exit_duration", "exit_booking_pace_adjusted", "exit_booking_regime_adjusted", "exit_calendar_adjusted"],
+        },
+    }
+
+    if experiment_name not in experiment_map:
+        raise ValueError(
+            f"Unknown experiment '{experiment_name}'. Expected one of: {sorted(experiment_map.keys())}"
+        )
+
+    if flow not in experiment_map[experiment_name]:
+        raise ValueError(
+            f"Experiment '{experiment_name}' does not support flow '{flow}'."
+        )
+
+    return experiment_map[experiment_name][flow]
+
+
 def nearest_earlier_horizon(horizon: int, available_horizons: List[int], minimum_gap: int = 1) -> int | None:
     """
     Return the nearest available horizon that is strictly after the current horizon.
@@ -3318,6 +3369,15 @@ class ProductionForecastData:
                 .to_dict()
             )
 
+        self.horizon_component_lookup = {}
+        if {"flow", "horizon_days", "winner_experiment"}.issubset(param_df.columns):
+            self.horizon_component_lookup = (
+                param_df[["flow", "horizon_days", "winner_experiment"]]
+                .dropna(subset=["winner_experiment"])
+                .set_index(["flow", "horizon_days"])["winner_experiment"]
+                .to_dict()
+            )
+
         self.pace_median_lookup = {}
         self.cancellation_median_lookup = {}
 
@@ -3481,30 +3541,25 @@ def generate_daily_forecasts(data: ProductionForecastData) -> pd.DataFrame:
         if entry_weights_row is None or exit_weights_row is None:
             continue
 
-        # --- ENTRY Forecast ---
-        entry_components_list = [
-            (name, weight)
-            for name, weight in entry_weights_row.items()
-            if name.startswith("entry_") and name.endswith("_weight")
-        ]
-        entry_component_names = [name.replace("_weight", "") for name, _ in entry_components_list]
+        entry_experiment = data.horizon_component_lookup.get(("entry", horizon_days), "ALL_NON_PRICE")
+        exit_experiment = data.horizon_component_lookup.get(("exit", horizon_days), "ALL_NON_PRICE")
+
+        entry_component_names = get_experiment_component_names(entry_experiment, "entry")
+        exit_component_names = get_experiment_component_names(exit_experiment, "exit")
+
         entry_component_values = [components.get(name) for name in entry_component_names]
-        entry_component_weights = [weight for _, weight in entry_components_list]
+        exit_component_values = [components.get(name) for name in exit_component_names]
+
+        entry_weight_columns = [f"{name}_weight" for name in entry_component_names]
+        exit_weight_columns = [f"{name}_weight" for name in exit_component_names]
+
+        entry_component_weights = [float(entry_weights_row.get(column, 0.0)) for column in entry_weight_columns]
+        exit_component_weights = [float(exit_weights_row.get(column, 0.0)) for column in exit_weight_columns]
 
         final_entry_forecast = weighted_average(
             values=entry_component_values,
             weights=entry_component_weights,
         )
-
-        # --- EXIT Forecast ---
-        exit_components_list = [
-            (name, weight)
-            for name, weight in exit_weights_row.items()
-            if name.startswith("exit_") and name.endswith("_weight")
-        ]
-        exit_component_names = [name.replace("_weight", "") for name, _ in exit_components_list]
-        exit_component_values = [components.get(name) for name in exit_component_names]
-        exit_component_weights = [weight for _, weight in exit_components_list]
 
         final_exit_forecast = weighted_average(
             values=exit_component_values,
