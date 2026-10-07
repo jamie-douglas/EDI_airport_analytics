@@ -70,6 +70,33 @@ if str(PROJECT_ROOT) not in sys.path:
 PRODUCTION_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 PRODUCTION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+MANUAL_CALENDAR_PERIODS = {
+    "public_holiday": [
+        ("2025-05-03", "2025-05-05"), ("2025-05-24", "2025-05-26"),
+        ("2025-08-02", "2025-08-04"), ("2025-11-29", "2025-12-01"),
+        ("2026-03-18", "2026-03-20"), ("2026-05-02", "2026-05-04"),
+        ("2026-05-23", "2026-05-25"), ("2026-08-01", "2026-08-03"),
+        ("2026-09-19", "2026-09-21"), ("2026-11-28", "2026-11-30"),
+    ],
+    "school_holiday": [
+        ("2024-09-13", "2024-09-16"), ("2024-10-11", "2024-10-21"),
+        ("2024-12-20", "2025-01-06"), ("2025-02-07", "2025-02-16"),
+        ("2025-04-04", "2025-04-21"), ("2025-05-02", "2025-05-06"),
+        ("2025-05-16", "2025-05-19"), ("2025-06-26", "2025-08-11"),
+        ("2025-09-12", "2025-09-14"), ("2025-10-10", "2025-10-19"),
+        ("2025-12-19", "2026-01-04"), ("2026-02-13", "2026-02-22"),
+        ("2026-04-02", "2026-04-20"), ("2026-05-01", "2026-05-05"),
+        ("2026-05-15", "2026-05-18"), ("2026-06-26", "2026-08-10"),
+    ],
+    "easter_period": [("2025-03-17", "2025-03-21"), ("2026-03-02", "2026-03-06")],
+    "christmas_ny_period": [("2025-12-19", "2026-01-03")],
+    "special_event": [
+        ("2025-06-19", "2025-06-22"), ("2026-06-18", "2026-06-21"),
+        ("2025-08-22", "2025-08-26"), ("2026-08-21", "2026-08-29"),
+        ("2025-08-01", "2025-08-25"), ("2026-08-07", "2026-08-30"),
+    ],
+}
+
 
 # --- PRODUCTION_CONFIG ---
 # This is the main settings block for the forecast. Review these values before each run.
@@ -93,6 +120,7 @@ PRODUCTION_CONFIG = {
     # to apply the optimised weights and parameters for the forecast.
     "forecast_weights_path": PRODUCTION_OUTPUT_DIR / "forecast_weights.csv",
     "forecast_parameters_path": PRODUCTION_OUTPUT_DIR / "forecast_parameters.csv",
+    "forecast_component_parameters_path": PRODUCTION_OUTPUT_DIR / "forecast_component_parameters.csv",
 
     # --- Historical lookback ---
     # Use enough history to make the booking curves, trend components, and weekly
@@ -3275,9 +3303,20 @@ class ProductionForecastData:
         # Load learned weights and parameters
         self.forecast_weights = pd.read_csv(config["forecast_weights_path"])
         self.forecast_parameters = pd.read_csv(config["forecast_parameters_path"])
+        self.forecast_component_parameters = pd.read_csv(
+            config["forecast_component_parameters_path"]
+        )
 
         # Pre-process parameters for faster lookup
         self._prepare_parameters()
+
+        run_date = pd.to_datetime(config["current_run_date"]).normalize()
+        calendar = build_calendar_table(
+            run_date,
+            run_date + pd.Timedelta(days=config["forecast_lookahead_days"]),
+            MANUAL_CALENDAR_PERIODS,
+        )
+        self.calendar_lookup = calendar.set_index("target_date").to_dict(orient="index")
 
         # Cache for frequently accessed historical values to avoid redundant calculations
         self.cache: Dict[Tuple, Any] = {
@@ -3378,8 +3417,62 @@ class ProductionForecastData:
                 .to_dict()
             )
 
-        self.pace_median_lookup = {}
-        self.cancellation_median_lookup = {}
+        component_df = self.forecast_component_parameters.copy()
+        component_df["flow"] = component_df["flow"].astype(str).str.lower()
+
+        self.pace_median_lookup = (
+            component_df.loc[component_df["parameter_type"].eq("pace_median")]
+            .set_index(["flow", "horizon_days", "weekday"])["parameter_value"]
+            .to_dict()
+        )
+        self.cancellation_median_lookup = (
+            component_df.loc[
+                component_df["parameter_type"].eq("cancellation_median")
+            ]
+            .set_index(["flow", "horizon_days", "weekday"])["parameter_value"]
+            .to_dict()
+        )
+        self.pace_adjustment_lookup = (
+            component_df.loc[
+                component_df["parameter_type"].eq("pace_adjustment")
+            ]
+            .set_index(["flow", "horizon_days", "weekday", "band"])[
+                "parameter_value"
+            ]
+            .to_dict()
+        )
+        self.cancellation_adjustment_lookup = (
+            component_df.loc[
+                component_df["parameter_type"].eq("cancellation_adjustment")
+            ]
+            .set_index(["flow", "horizon_days", "weekday", "band"])[
+                "parameter_value"
+            ]
+            .to_dict()
+        )
+        self.calendar_adjustment_lookup = (
+            component_df.loc[
+                component_df["parameter_type"].eq("calendar_adjustment")
+            ]
+            .set_index(["flow", "horizon_days", "category"])["parameter_value"]
+            .to_dict()
+        )
+        self.regime_adjustment_lookup = (
+            component_df.loc[
+                component_df["parameter_type"].eq("regime_adjustment")
+            ]
+            .set_index(["flow", "horizon_days", "band"])["parameter_value"]
+            .to_dict()
+        )
+        self.regime_edges_lookup = {}
+        regime_edges = component_df[
+            component_df["parameter_type"].eq("regime_edge")
+        ]
+        if not regime_edges.empty:
+            for key, group in regime_edges.groupby(["flow", "horizon_days"]):
+                self.regime_edges_lookup[key] = np.concatenate(
+                    ([-np.inf], group.sort_values("edge_index")["parameter_value"].to_numpy(dtype=float), [np.inf])
+                )
 
 
 # =============================================================================
@@ -3387,6 +3480,38 @@ class ProductionForecastData:
 # =============================================================================
 # These functions calculate the individual signals that form the ensemble forecast.
 # They are adapted from G1, G2, and G2.1 simulation scripts.
+
+def weekday_specific_trend_forecast(
+    daily_actuals: pd.DataFrame,
+    target_date: pd.Timestamp,
+    cutoff_timestamp: pd.Timestamp,
+    target_col: str,
+    seasonal_forecast: float,
+    recent_occurrences: int = 4,
+    comparison_occurrences: int = 12,
+    lower: float = 0.70,
+    upper: float = 1.30,
+) -> float:
+    if pd.isna(seasonal_forecast):
+        return np.nan
+
+    history = daily_actuals.copy()
+    history["date"] = pd.to_datetime(history["date"], errors="coerce").dt.normalize()
+    cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
+    target_weekday = pd.to_datetime(target_date).weekday()
+    history = history[
+        history["date"].lt(cutoff_date)
+        & history["date"].dt.weekday.eq(target_weekday)
+    ].sort_values("date")
+    needed = recent_occurrences + comparison_occurrences
+    values = history[target_col].dropna().tail(needed)
+    if len(values) < needed:
+        return float(seasonal_forecast)
+
+    recent_mean = values.tail(recent_occurrences).mean()
+    comparison_mean = values.head(comparison_occurrences).mean()
+    factor = float(np.clip(safe_ratio(recent_mean, comparison_mean, 1.0), lower, upper))
+    return clip_forecast(float(seasonal_forecast) * factor)
 
 
 def calculate_component_forecasts(
@@ -3421,6 +3546,22 @@ def calculate_component_forecasts(
     # --- 1. Raw Components ---
     components["entry_booking"] = forecast_booking_curve(data.bookings_clean, data.entry_booking_curve, target_date, cutoff_timestamp, "entry", data.cache)
     components["exit_booking"] = forecast_booking_curve(data.bookings_clean, data.exit_booking_curve, target_date, cutoff_timestamp, "exit", data.cache)
+    duration_factors = get_duration_exit_factors_as_of(
+        duration_curve=data.duration_exit_booking_curve,
+        target_date=target_date,
+        cutoff_timestamp=cutoff_timestamp,
+        lead_days=horizon_days,
+        minimum_observations=data.config["minimum_curve_observations"],
+    )
+    components["exit_duration"] = get_duration_adjusted_booking_curve(
+        bookings=data.bookings_clean,
+        curve=data.exit_booking_curve,
+        target_date=target_date,
+        cutoff_timestamp=cutoff_timestamp,
+        demand_type="exit",
+        historical_duration_factors=duration_factors,
+        config=data.config,
+    )
 
     # --- 2. Historical & Trend ---
     entry_w = data.historical_window_lookup.get(("entry", horizon_days), 4)
@@ -3428,6 +3569,8 @@ def calculate_component_forecasts(
     
     components["entry_weekday"] = forecast_same_weekday(data.daily_actuals_df, target_date, cutoff_timestamp, "entries", entry_w, data.cache)
     components["exit_weekday"] = forecast_same_weekday(data.daily_actuals_df, target_date, cutoff_timestamp, "exits", exit_w, data.cache)
+    components["entry_weekday_selected"] = components["entry_weekday"]
+    components["exit_weekday_selected"] = components["exit_weekday"]
     
     components["entry_month"], _ = forecast_weekday_month(data.daily_actuals_df, target_date, cutoff_timestamp, "entries", data.cache, 3)
     components["exit_month"], _ = forecast_weekday_month(data.daily_actuals_df, target_date, cutoff_timestamp, "exits", data.cache, 3)
@@ -3438,6 +3581,19 @@ def calculate_component_forecasts(
     components["entry_trend_month"] = forecast_trend_adjusted_seasonal(components["entry_month"], entry_trend_factor)
     components["exit_trend_month"] = forecast_trend_adjusted_seasonal(components["exit_month"], exit_trend_factor)
 
+    components["entry_weekday_trend"] = weekday_specific_trend_forecast(
+        data.daily_actuals_df, target_date, cutoff_timestamp, "entries",
+        components["entry_month"],
+    )
+    components["exit_weekday_trend"] = weekday_specific_trend_forecast(
+        data.daily_actuals_df, target_date, cutoff_timestamp, "exits",
+        components["exit_month"],
+    )
+
+    calendar_features = data.calendar_lookup.get(target_date.normalize(), {})
+    calendar_type = calendar_features.get("calendar_type", "normal")
+    components["calendar_type"] = calendar_type
+
     # --- 3. Behavioral Adjustments (Pace & Cancellation) ---
     # Get known bookings for the current target date/horizon
     components["entry_known_bookings"] = get_known_target_bookings(data.bookings_clean, target_date, cutoff_timestamp, "entry")["bookingId"].nunique()
@@ -3447,13 +3603,56 @@ def calculate_component_forecasts(
         # A. PACE ADJUSTMENT
         # Calculate pace: (current known - earlier horizon known) / gap
         # We need the snapshot df to use the pace helper
-        snap_df = pd.DataFrame([{'target_date': target_date, 'horizon_days': horizon_days, f'{flow}_known_bookings': components[f'{flow}_known_bookings']}])
-        pace_df = get_booking_pace_per_day(snap_df, flow, data.config["pace_lookback_days"], sorted(data.forecast_weights["horizon_days"].unique().tolist()))
-        current_pace = pace_df[f'{flow}_pace_per_day'].iloc[0]
+        snap_df = pd.DataFrame([{
+            "target_date": target_date,
+            "horizon_days": horizon_days,
+            "cutoff_timestamp": cutoff_timestamp,
+            "weekday": target_date.day_name(),
+            f"{flow}_known_bookings": components[f"{flow}_known_bookings"],
+        }])
+        available_horizons = sorted(
+            data.forecast_weights["horizon_days"].astype(int).unique().tolist()
+        )
+        prior_horizon = nearest_earlier_horizon(
+            horizon_days,
+            available_horizons,
+            minimum_gap=data.config["pace_lookback_days"],
+        )
+        current_pace = np.nan
+        if prior_horizon is not None:
+            pace_gap = prior_horizon - horizon_days
+            prior_cutoff = cutoff_timestamp - pd.Timedelta(days=pace_gap)
+            prior_known = get_known_target_bookings(
+                data.bookings_clean, target_date, prior_cutoff, flow
+            )["bookingId"].nunique()
+            pace_snapshots = pd.DataFrame([
+                {
+                    "target_date": target_date,
+                    "horizon_days": horizon_days,
+                    f"{flow}_known_bookings": components[f"{flow}_known_bookings"],
+                },
+                {
+                    "target_date": target_date,
+                    "horizon_days": prior_horizon,
+                    f"{flow}_known_bookings": prior_known,
+                },
+            ])
+            pace_df = get_booking_pace_per_day(
+                pace_snapshots, flow, data.config["pace_lookback_days"],
+                [horizon_days, prior_horizon],
+            )
+            current_pace = pace_df.loc[
+                pace_df["horizon_days"].eq(horizon_days),
+                f"{flow}_pace_per_day",
+            ].iloc[0]
         
         # Determine Band
         median = data.pace_median_lookup.get((flow, horizon_days, target_date.day_name()), 0.0)
-        rel_pace = safe_ratio(current_pace - median, median, 0.0)
+        rel_pace = (
+            (current_pace - median) / max(abs(median), 1.0)
+            if pd.notna(current_pace)
+            else np.nan
+        )
         pace_band = pd.cut([rel_pace], bins=data.config["pace_bins"], labels=data.config["pace_labels"], include_lowest=True)[0]
         
         # Apply adjustment
@@ -3465,18 +3664,49 @@ def calculate_component_forecasts(
         c_rate = c_df[f"{flow}_cancellation_rate_last_7d"].iloc[0]
         c_median = data.cancellation_median_lookup.get((flow, horizon_days, target_date.day_name()), 0.0)
         
-        c_rel = safe_ratio(c_rate - c_median, c_median, 0.0)
+        c_rel = (
+            (c_rate - c_median) / max(abs(c_median), 0.0001)
+            if pd.notna(c_rate)
+            else np.nan
+        )
         c_band = pd.cut([c_rel], bins=data.config["cancellation_rate_bins"], labels=data.config["cancellation_rate_labels"], include_lowest=True)[0]
         c_adj = data.cancellation_adjustment_lookup.get((flow, horizon_days, target_date.day_name(), c_band), 1.0)
         
         components[f"{flow}_booking_cancellation_adjusted"] = clip_forecast(components[f"{flow}_booking"] * c_adj)
 
+        calendar_adjustment = data.calendar_adjustment_lookup.get(
+            (flow, horizon_days, calendar_type), 1.0
+        )
+        components[f"{flow}_calendar_adjusted"] = clip_forecast(
+            components[f"{flow}_month"] * calendar_adjustment
+        )
+
+        regime_edges = data.regime_edges_lookup.get((flow, horizon_days))
+        if regime_edges is None:
+            regime_band = "normal"
+        else:
+            regime_labels = [f"Q{i + 1}" for i in range(len(regime_edges) - 1)]
+            regime_band = pd.cut(
+                [components[f"{flow}_known_bookings"]],
+                bins=regime_edges,
+                labels=regime_labels,
+                include_lowest=True,
+            ).astype("object")[0]
+            regime_band = "unknown" if pd.isna(regime_band) else str(regime_band)
+        components[f"{flow}_regime_band"] = regime_band
+        regime_adjustment = data.regime_adjustment_lookup.get(
+            (flow, horizon_days, regime_band), 1.0
+        )
+        components[f"{flow}_booking_regime_adjusted"] = clip_forecast(
+            components[f"{flow}_booking"] * regime_adjustment
+        )
+
     # --- 4. Finalize Ensemble ---
     for flow in ["entry", "exit"]:
         strength = data.weights_lookup.get((flow, horizon_days), {}).get("booking_shrinkage_strength", 0)
-        # Shrink the booking component after applying behavioral adjustments
+        # Gen 2.1 shrinks the raw booking component toward the trend baseline.
         components[f"{flow}_booking_shrunk"] = shrink_booking_forecast(
-            components[f"{flow}_booking_cancellation_adjusted"],
+            components[f"{flow}_booking"],
             components[f"{flow}_trend_month"],
             components[f"{flow}_known_bookings"],
             strength
