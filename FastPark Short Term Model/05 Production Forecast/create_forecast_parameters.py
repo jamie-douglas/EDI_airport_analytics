@@ -112,21 +112,79 @@ def weighted_average(series, weights):
 
 def build_adjustment_parameters():
     """
-    Extracts pace and cancellation adjustment factors from the Non-Price simulation.
+    Extract the dedicated pace and cancellation parameter tables from the
+    Generation 2.1 workbook, if they were exported in the expected format.
+
+    The production forecast script is written to read adjustment values only when
+    they are present. When the dedicated adjustment tables are absent or do not
+    contain explicit numerical factors, the script falls back to a neutral value
+    of 1.0 and therefore no adjustment is applied.
+
+    This avoids the previous mismatch where we incorrectly assumed the main
+    'Selected Weights' sheet contained pace/cancellation multipliers; it does not.
     """
-    # Assuming 'Selected Weights' or the main results export contains the adjustment factors
-    df = pd.read_excel(NON_PRICE_SIMULATION_FILE, sheet_name="Selected Weights")
-    
-    # We filter to the latest fold to get the most recent learned adjustments
-    latest_month = df["test_month"].max()
-    df_latest = df[df["test_month"] == latest_month].copy()
-    
-    # Map the columns to what the production script expects
-    # You need the 'adjustment' for Pace and Cancellation
-    # This assumes your simulation export has columns like 'pace_adjustment' and 'cancellation_adjustment'
-    cols = ["flow", "horizon_days", "pace_adjustment", "cancellation_adjustment"]
-    
-    return df_latest[cols].drop_duplicates()
+
+    tables = []
+
+    for sheet_name, adjustment_type in [
+        ("Pace Parameters", "pace"),
+        ("Cancellation Parameters", "cancellation"),
+    ]:
+        try:
+            df = pd.read_excel(NON_PRICE_SIMULATION_FILE, sheet_name=sheet_name)
+        except ValueError:
+            continue
+
+        if df.empty:
+            continue
+
+        df = df.copy()
+
+        flow_col = None
+        for candidate in ["flow", "demand_type", "flow_type"]:
+            if candidate in df.columns:
+                flow_col = candidate
+                break
+
+        if flow_col is None:
+            continue
+
+        df[flow_col] = df[flow_col].astype(str).str.lower()
+
+        if adjustment_type == "pace":
+            candidate_cols = ["flow", "horizon_days", "weekday", "pace_band", "adjustment"]
+            if {"flow", "horizon_days", "adjustment"}.issubset(df.columns):
+                output = df[["flow", "horizon_days", "adjustment"]].copy()
+                output = output.rename(columns={"adjustment": "pace_adjustment"})
+                tables.append(output)
+            elif {"flow", "horizon_days", "weekday", "pace_band", "adjustment"}.issubset(df.columns):
+                output = df[["flow", "horizon_days", "weekday", "pace_band", "adjustment"]].copy()
+                output = output.rename(columns={"adjustment": "pace_adjustment"})
+                tables.append(output)
+            elif {"demand_type", "horizon_days", "weekday", "pace_band", "adjustment"}.issubset(df.columns):
+                output = df[["demand_type", "horizon_days", "weekday", "pace_band", "adjustment"]].copy()
+                output = output.rename(columns={"demand_type": "flow", "adjustment": "pace_adjustment"})
+                tables.append(output)
+
+        else:
+            if {"flow", "horizon_days", "adjustment"}.issubset(df.columns):
+                output = df[["flow", "horizon_days", "adjustment"]].copy()
+                output = output.rename(columns={"adjustment": "cancellation_adjustment"})
+                tables.append(output)
+            elif {"flow", "horizon_days", "weekday", "cancellation_band", "adjustment"}.issubset(df.columns):
+                output = df[["flow", "horizon_days", "weekday", "cancellation_band", "adjustment"]].copy()
+                output = output.rename(columns={"adjustment": "cancellation_adjustment"})
+                tables.append(output)
+            elif {"demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"}.issubset(df.columns):
+                output = df[["demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"]].copy()
+                output = output.rename(columns={"demand_type": "flow", "adjustment": "cancellation_adjustment"})
+                tables.append(output)
+
+    if not tables:
+        return pd.DataFrame()
+
+    combined = pd.concat(tables, ignore_index=True)
+    return combined.drop_duplicates().reset_index(drop=True)
 
 # ============================================================================
 # SHRINKAGE PARAMETERS
@@ -582,7 +640,10 @@ def build_forecast_parameters():
             ],
             how="outer",
         )
-        .merge(
+    )
+
+    if not adjustments.empty:
+        parameters = parameters.merge(
             adjustments,
             on=[
                 "flow",
@@ -590,14 +651,14 @@ def build_forecast_parameters():
             ],
             how="outer",
         )
-        .merge(
-            workbook_horizon_map,
-            on=[
-                "flow",
-                "horizon_days",
-            ],
-            how="left",
-        )
+
+    parameters = parameters.merge(
+        workbook_horizon_map,
+        on=[
+            "flow",
+            "horizon_days",
+        ],
+        how="left",
     )
 
     parameters = (
@@ -614,23 +675,29 @@ def build_forecast_parameters():
     parameters["booking_shrinkage_strength"] = parameters["booking_shrinkage_strength"].fillna(0).round().astype(int)
     parameters["hourly_profile_window"] = parameters["hourly_profile_window"].fillna(6).astype(int)
     parameters["same_weekday_history"] = parameters["same_weekday_history"].fillna(4).astype(int)
-    parameters["pace_adjustment"] = parameters["pace_adjustment"].fillna(1.0) # 1.0 = no adjustment
-    parameters["cancellation_adjustment"] = parameters["cancellation_adjustment"].fillna(1.0) # 1.0 = no adjustment
+
+    if "pace_adjustment" in parameters.columns:
+        parameters["pace_adjustment"] = parameters["pace_adjustment"].fillna(1.0)
+    if "cancellation_adjustment" in parameters.columns:
+        parameters["cancellation_adjustment"] = parameters["cancellation_adjustment"].fillna(1.0)
+
     parameters["winner_experiment"] = parameters["winner_experiment"].fillna("ALL_NON_PRICE")
 
     # ------------------------------------------------------------------------
-    # Sheet structure validation
+    # Required output columns.
     #
-    # Historical Window Tests was generated by
-    # fastpark_forecast_simulation_non_price.py.
-    #
-    # If the simulation export changes in future, fail loudly rather than
-    # silently producing incorrect production parameters.
+    # The production forecast script needs the calibrated fields below to exist.
+    # Pace and cancellation adjustments are optional because the dedicated
+    # workbook sheets may not always export a single flow/horizon adjustment
+    # table; when absent the script will default to neutral impact.
     # ------------------------------------------------------------------------
     required_columns = [
-        "flow", "horizon_days", "booking_shrinkage_strength",
-        "hourly_profile_window", "same_weekday_history",
-        "pace_adjustment", "cancellation_adjustment", "winner_experiment"
+        "flow",
+        "horizon_days",
+        "booking_shrinkage_strength",
+        "hourly_profile_window",
+        "same_weekday_history",
+        "winner_experiment",
     ]
 
     missing_columns = [
