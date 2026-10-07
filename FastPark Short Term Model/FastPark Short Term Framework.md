@@ -294,7 +294,7 @@ Generation 2 successfully identified the optimal weighting of forecasting signal
 
 ### 6.2 Research Question
 
-Generation 2.1 investigated whether additional "Behavioural Features" could improve the already optimized Generation 2 framework.
+Generation 2.1 investigated whether additional behavioural and operational features could improve the already optimised Generation 2 framework.
 
 ### 6.3 Features Tested
 
@@ -313,15 +313,14 @@ Six feature groups were evaluated independently against the final Generation 2 b
 *   **Entry Results:** Booking Pace showed improvements. At T-1, WAPE improved from **4.508%** (Baseline) to **4.322%** (Booking Pace), a **0.186 percentage point** improvement with a **66.7%** win rate. At T-2, WAPE improved from **5.742%** to **5.470%**, a **0.272 percentage point** improvement with an **83.3%** win rate. Improvements were also visible at longer horizons (e.g., T-42: **12.09%** to **10.73%**).
 *   **Exit Results:** Performance gains were generally smaller but remained positive at selected horizons. Booking pace contributed useful information beyond Exit Visibility and Duration, particularly when visibility was still evolving.
 *   **Interpretation:** Booking pace captures something fundamentally different from booking visibility. Generation 2 answers "Where demand currently is," while booking pace answers "Where demand is moving."
-*   **Decision:** **Influenced Production Forecast.** Booking Pace demonstrated genuine forecasting value, although benefits were horizon-specific rather than universal.
+*   **Decision:** **Adopted.** Booking Pace consistently demonstrated forecasting value across multiple horizons and multiple demand streams. Unlike booking visibility, which measures current known demand, booking pace measure the rate at which demand is developing. The feature repeatedly improved forecast accuracy and was retained as a production contextual adjustment. 
 
 **Cancellation Behaviour (Hypothesis: Unusual cancellation activity provides additional forecasting information):**
 *   **Method:** Three cancellation windows (1 Day, 3 Day, 7 Day) were tested, classifying cancellation behavior relative to historical norms (Very Low, Low, Normal, High, Very High). Only cancellations known at the historical forecast cutoff were included.
 *   **Entry Results:** At T-1, WAPE improved from **4.508%** (Baseline) to **4.406%** (Cancellation), a **0.102 percentage point** improvement with a **50.0%** win rate. At T-2, WAPE improved from **5.742%** to **5.625%**, a **0.117 percentage point** improvement with an **83.3%** win rate. Improvements were also seen at longer horizons (e.g., T-28: **11.46%** to **11.02%**).
 *   **Exit Results:** Cancellation behavior produced mixed but occasionally useful improvements (e.g., T-14: **7.78%** to **7.72%**).
 *   **Interpretation:** Cancellation behavior asks "How reliable are those visible bookings?" This was identified as a real forecasting signal, but not a dominant one.
-*   **Decision:** **Influenced Production Forecast.** Cancellation behavior demonstrated useful forecasting information but did not justify becoming a major standalone forecast component.
-
+*   **Decision:** **Adopted as a Contextual Adjustment.** Cancellation behaviour demonstrated useful forecasting infomration across a range of forecast horizons. The feature did not justify becoming a standalone forecast componenet. However, it is consistently provided information about the reliability of visible bookings and was therefore retained as a contextural adjustment within the production forecasting framework. 
 **Calendar Effects (Hypothesis: Demand is affected by Public Holidays, School Holidays, Easter, Christmas/New Year, and Major Events):**
 *   **Method:** Calendar categories were manually maintained and supplied to the simulation. Historical behavior within each category was used to adjust forecasts.
 *   **Entry Results:** Calendar effects did not provide consistent improvement. For example, at T-0, Baseline and Calendar WAPE were both **1.176%**. At T-2, Calendar WAPE was **5.849%** while Baseline was **5.742%**.
@@ -357,13 +356,41 @@ forecast weighting.
 ### 6.5 Overall Results: Feature Ranking
 
 | Feature | Evidence Strength | Decision |
-|:---|:---|:---|
 | Historical Window Selection | Strong | Adopted |
-| Booking Pace | Strong | Influenced Production |
-| Cancellation Behaviour | Moderate | Influenced Production |
-| Calendar Effects | Weak | Indirectly Incorporated |
+| Booking Pace | Strong | Adopted |
+| Cancellation Behaviour | Moderate | Adopted as Contextual Adjustment |
+| Calendar Effects | Mixed | Indirectly Incorporated |
 | Booking Regimes | Weak | Rejected |
 | Weekday Trend | Weak | Rejected |
+
+
+Behavioural Feature Hierarchy
+
+Strong Evidence
+---------------
+• Historical Window Selection
+• Booking Pace
+
+Moderate Evidence
+-----------------
+• Cancellation Behaviour
+• Calendar Effects
+
+Weak Evidence
+-------------
+• Booking Regimes
+• Weekday-Specific Trend
+
+Generation 2.1 demonstrated that the strongest
+behavioural improvements came from features that
+improved the interpretation of existing forecasts
+rather than replacing them.
+
+The evidence suggested that booking pace and
+cancellation context added value by explaining how
+the visible booking position was evolving and how
+reliable that visible booking position was likely
+to be.
 
 ### 6.6 Results
 
