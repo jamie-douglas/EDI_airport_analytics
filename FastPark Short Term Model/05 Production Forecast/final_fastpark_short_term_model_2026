@@ -56,10 +56,8 @@ from modules.utils.progress import step
 # 1. GLOBAL CONFIGURATION FOR PRODUCTION
 # =============================================================================
 
-# Define the root directory for the project. This is assumed to be two levels
-# up from where this script is located (e.g., if script is in `project/scripts/`,
-# PROJECT_ROOT is `project/`).
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# The production script is directly inside the project-level forecast folder.
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Add PROJECT_ROOT to sys.path to ensure modules.utils can be found.
 if str(PROJECT_ROOT) not in sys.path:
@@ -254,55 +252,23 @@ def safe_ratio(numerator: float, denominator: float, default: float = np.nan) ->
     return float(numerator) / float(denominator)
 
 
-def get_experiment_component_names(experiment_name: str, flow: str) -> List[str]:
-    """
-    Return the exact component list used by a given simulation experiment.
-
-    This mirrors the G2.1 experiment definitions so the production forecast uses the
-    same component set that was tested in the workbook for each horizon.
-    """
-    experiment_map = {
-        "BASELINE": {
-            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_trend_month"],
-            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_trend_month"],
-        },
-        "ADD_BOOKING_PACE": {
-            "entry": ["entry_booking_shrunk", "entry_booking_pace_adjusted", "entry_weekday_selected", "entry_month"],
-            "exit": ["exit_booking_shrunk", "exit_booking_pace_adjusted", "exit_duration", "exit_weekday_selected"],
-        },
-        "ADD_CANCELLATION": {
-            "entry": ["entry_booking_shrunk", "entry_booking_cancellation_adjusted", "entry_weekday_selected", "entry_month"],
-            "exit": ["exit_booking_shrunk", "exit_booking_cancellation_adjusted", "exit_duration", "exit_weekday_selected"],
-        },
-        "ADD_CALENDAR": {
-            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_calendar_adjusted"],
-            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_calendar_adjusted"],
-        },
-        "ADD_BOOKING_REGIME": {
-            "entry": ["entry_booking_shrunk", "entry_booking_regime_adjusted", "entry_weekday_selected", "entry_month"],
-            "exit": ["exit_booking_shrunk", "exit_booking_regime_adjusted", "exit_duration", "exit_weekday_selected"],
-        },
-        "ADD_WEEKDAY_TREND": {
-            "entry": ["entry_booking_shrunk", "entry_weekday_selected", "entry_month", "entry_weekday_trend"],
-            "exit": ["exit_booking_shrunk", "exit_duration", "exit_weekday_selected", "exit_weekday_trend"],
-        },
-        "ALL_NON_PRICE": {
-            "entry": ["entry_booking_shrunk", "entry_booking_pace_adjusted", "entry_booking_regime_adjusted", "entry_calendar_adjusted", "entry_weekday_selected"],
-            "exit": ["exit_booking_shrunk", "exit_duration", "exit_booking_pace_adjusted", "exit_booking_regime_adjusted", "exit_calendar_adjusted"],
-        },
-    }
-
-    if experiment_name not in experiment_map:
-        raise ValueError(
-            f"Unknown experiment '{experiment_name}'. Expected one of: {sorted(experiment_map.keys())}"
-        )
-
-    if flow not in experiment_map[experiment_name]:
-        raise ValueError(
-            f"Experiment '{experiment_name}' does not support flow '{flow}'."
-        )
-
-    return experiment_map[experiment_name][flow]
+def get_base_component_names(flow: str) -> List[str]:
+    """Return the four fixed Generation 2 components that receive weights."""
+    if flow == "entry":
+        return [
+            "entry_booking_shrunk",
+            "entry_weekday",
+            "entry_month",
+            "entry_trend_month",
+        ]
+    if flow == "exit":
+        return [
+            "exit_booking_shrunk",
+            "exit_duration",
+            "exit_weekday",
+            "exit_trend_month",
+        ]
+    raise ValueError(f"Unknown flow: {flow}")
 
 
 def nearest_earlier_horizon(horizon: int, available_horizons: List[int], minimum_gap: int = 1) -> int | None:
@@ -2488,19 +2454,19 @@ def build_cancellation_features_for_flow(
 
     # Aggregate the counts for each snapshot.
     aggregation = {
-        booking_id_col: "nunique", # Count unique bookings for gross created.
-        "created_by_cutoff": "sum",
-        "cancelled_by_cutoff": "sum",
+        "created_by_cutoff": ("created_by_cutoff", "sum"),
+        "cancelled_by_cutoff": ("cancelled_by_cutoff", "sum"),
     }
     for window_days in config["cancellation_windows_days"]:
-        aggregation[f"cancelled_last_{window_days}d"] = "sum"
+        column = f"cancelled_last_{window_days}d"
+        aggregation[column] = (column, "sum")
 
     summary = (
         expanded
         .groupby(["target_date", "horizon_days"], as_index=False)
         .agg(
             gross_created_by_cutoff=(booking_id_col, "nunique"), # Total unique bookings created by cutoff for this target date.
-            **{k: v for k, v in aggregation.items() if k != booking_id_col} # Add other aggregated columns.
+            **aggregation
         )
     )
 
@@ -3336,13 +3302,47 @@ class ProductionForecastData:
 
         We support both so that the script remains robust across model exports.
         """
-        self.weights_lookup = self.forecast_weights.set_index(
+        required_horizons = {
+            (flow, horizon)
+            for flow in ("entry", "exit")
+            for horizon in range(self.config["forecast_lookahead_days"] + 1)
+        }
+        weight_df = self.forecast_weights.copy()
+        weight_df["demand_type"] = weight_df["demand_type"].astype(str).str.lower()
+        weight_df["horizon_days"] = pd.to_numeric(
+            weight_df["horizon_days"], errors="raise"
+        ).astype(int)
+        self.weights_lookup = weight_df.set_index(
             ["demand_type", "horizon_days"]
         ).to_dict(orient="index")
+
+        required_weight_columns = {
+            *get_base_component_names("entry"),
+            *get_base_component_names("exit"),
+        }
+        missing_weight_columns = required_weight_columns - set(
+            self.forecast_weights.columns
+        )
+        if missing_weight_columns:
+            raise ValueError(
+                "Generation 2 weight file is missing base component columns: "
+                f"{sorted(missing_weight_columns)}"
+            )
+        missing_weight_horizons = sorted(
+            required_horizons - set(self.weights_lookup)
+        )
+        if missing_weight_horizons:
+            raise ValueError(
+                "Generation 2 weight file is missing flow/horizon rows: "
+                f"{missing_weight_horizons}"
+            )
 
         param_df = self.forecast_parameters.copy()
         param_df["flow"] = param_df.get("flow", param_df.get("demand_type", pd.Series(index=param_df.index, dtype=object)))
         param_df["flow"] = param_df["flow"].astype(str).str.lower()
+        param_df["horizon_days"] = pd.to_numeric(
+            param_df["horizon_days"], errors="raise"
+        ).astype(int)
 
         self.historical_window_lookup = {}
         if {"flow", "horizon_days", "same_weekday_history"}.issubset(param_df.columns):
@@ -3357,6 +3357,15 @@ class ProductionForecastData:
                 param_df[["demand_type", "horizon_days", "selected_historical_window"]]
                 .dropna(subset=["selected_historical_window"])
                 .set_index(["demand_type", "horizon_days"])["selected_historical_window"]
+                .to_dict()
+            )
+
+        self.shrinkage_lookup = {}
+        if {"flow", "horizon_days", "booking_shrinkage_strength"}.issubset(param_df.columns):
+            self.shrinkage_lookup = (
+                param_df[["flow", "horizon_days", "booking_shrinkage_strength"]]
+                .dropna(subset=["booking_shrinkage_strength"])
+                .set_index(["flow", "horizon_days"])["booking_shrinkage_strength"]
                 .to_dict()
             )
 
@@ -3376,38 +3385,6 @@ class ProductionForecastData:
                 .to_dict()
             )
 
-        self.pace_adjustment_lookup = {}
-        if {"flow", "horizon_days", "pace_adjustment"}.issubset(param_df.columns):
-            self.pace_adjustment_lookup = (
-                param_df[["flow", "horizon_days", "pace_adjustment"]]
-                .dropna(subset=["pace_adjustment"])
-                .set_index(["flow", "horizon_days"])["pace_adjustment"]
-                .to_dict()
-            )
-        elif {"demand_type", "horizon_days", "weekday", "pace_band", "adjustment"}.issubset(param_df.columns):
-            self.pace_adjustment_lookup = (
-                param_df[["demand_type", "horizon_days", "weekday", "pace_band", "adjustment"]]
-                .dropna(subset=["adjustment"])
-                .set_index(["demand_type", "horizon_days", "weekday", "pace_band"])["adjustment"]
-                .to_dict()
-            )
-
-        self.cancellation_adjustment_lookup = {}
-        if {"flow", "horizon_days", "cancellation_adjustment"}.issubset(param_df.columns):
-            self.cancellation_adjustment_lookup = (
-                param_df[["flow", "horizon_days", "cancellation_adjustment"]]
-                .dropna(subset=["cancellation_adjustment"])
-                .set_index(["flow", "horizon_days"])["cancellation_adjustment"]
-                .to_dict()
-            )
-        elif {"demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"}.issubset(param_df.columns):
-            self.cancellation_adjustment_lookup = (
-                param_df[["demand_type", "horizon_days", "weekday", "cancellation_band", "adjustment"]]
-                .dropna(subset=["adjustment"])
-                .set_index(["demand_type", "horizon_days", "weekday", "cancellation_band"])["adjustment"]
-                .to_dict()
-            )
-
         self.horizon_component_lookup = {}
         if {"flow", "horizon_days", "winner_experiment"}.issubset(param_df.columns):
             self.horizon_component_lookup = (
@@ -3417,8 +3394,42 @@ class ProductionForecastData:
                 .to_dict()
             )
 
+        missing_winners = sorted(required_horizons - set(self.horizon_component_lookup))
+        if missing_winners:
+            raise ValueError(
+                "Forecast parameters are missing Gen 2.1 winners for: "
+                f"{missing_winners}"
+            )
+
         component_df = self.forecast_component_parameters.copy()
+        required_component_columns = {
+            "flow", "horizon_days", "parameter_type", "parameter_value"
+        }
+        missing_component_columns = required_component_columns - set(component_df.columns)
+        if missing_component_columns:
+            raise ValueError(
+                "Component parameter file is missing columns: "
+                f"{sorted(missing_component_columns)}"
+            )
         component_df["flow"] = component_df["flow"].astype(str).str.lower()
+
+        required_parameter_types = {
+            "pace_median",
+            "cancellation_median",
+            "pace_adjustment",
+            "cancellation_adjustment",
+            "calendar_adjustment",
+            "regime_adjustment",
+            "regime_edge",
+        }
+        missing_parameter_types = required_parameter_types - set(
+            component_df["parameter_type"].dropna().unique()
+        )
+        if missing_parameter_types:
+            raise ValueError(
+                "Component parameter file is missing Gen 2.1 tables: "
+                f"{sorted(missing_parameter_types)}"
+            )
 
         self.pace_median_lookup = (
             component_df.loc[component_df["parameter_type"].eq("pace_median")]
@@ -3473,6 +3484,12 @@ class ProductionForecastData:
                 self.regime_edges_lookup[key] = np.concatenate(
                     ([-np.inf], group.sort_values("edge_index")["parameter_value"].to_numpy(dtype=float), [np.inf])
                 )
+
+        if not self.pace_median_lookup or not self.cancellation_median_lookup:
+            raise ValueError(
+                "Pace/cancellation median lookups are empty. Regenerate "
+                "forecast_component_parameters.csv from the Gen 2.1 workbook."
+            )
 
 
 # =============================================================================
@@ -3603,7 +3620,7 @@ def calculate_component_forecasts(
         # A. PACE ADJUSTMENT
         # Calculate pace: (current known - earlier horizon known) / gap
         # We need the snapshot df to use the pace helper
-        snap_df = pd.DataFrame([{
+        cancellation_snapshot = pd.DataFrame([{
             "target_date": target_date,
             "horizon_days": horizon_days,
             "cutoff_timestamp": cutoff_timestamp,
@@ -3658,9 +3675,15 @@ def calculate_component_forecasts(
         # Apply adjustment
         adj = data.pace_adjustment_lookup.get((flow, horizon_days, target_date.day_name(), pace_band), 1.0)
         components[f"{flow}_booking_pace_adjusted"] = clip_forecast(components[f"{flow}_booking"] * adj)
+        components[f"{flow}_pace_adjustment_factor"] = float(adj)
 
         # B. CANCELLATION ADJUSTMENT
-        c_df = build_cancellation_features_for_flow(snap_df, data.cancellation_bookings_prepared, flow, data.config)
+        c_df = build_cancellation_features_for_flow(
+            cancellation_snapshot,
+            data.cancellation_bookings_prepared,
+            flow,
+            data.config,
+        )
         c_rate = c_df[f"{flow}_cancellation_rate_last_7d"].iloc[0]
         c_median = data.cancellation_median_lookup.get((flow, horizon_days, target_date.day_name()), 0.0)
         
@@ -3673,6 +3696,7 @@ def calculate_component_forecasts(
         c_adj = data.cancellation_adjustment_lookup.get((flow, horizon_days, target_date.day_name(), c_band), 1.0)
         
         components[f"{flow}_booking_cancellation_adjusted"] = clip_forecast(components[f"{flow}_booking"] * c_adj)
+        components[f"{flow}_cancellation_adjustment_factor"] = float(c_adj)
 
         calendar_adjustment = data.calendar_adjustment_lookup.get(
             (flow, horizon_days, calendar_type), 1.0
@@ -3680,6 +3704,7 @@ def calculate_component_forecasts(
         components[f"{flow}_calendar_adjusted"] = clip_forecast(
             components[f"{flow}_month"] * calendar_adjustment
         )
+        components[f"{flow}_calendar_adjustment_factor"] = float(calendar_adjustment)
 
         regime_edges = data.regime_edges_lookup.get((flow, horizon_days))
         if regime_edges is None:
@@ -3700,10 +3725,20 @@ def calculate_component_forecasts(
         components[f"{flow}_booking_regime_adjusted"] = clip_forecast(
             components[f"{flow}_booking"] * regime_adjustment
         )
+        components[f"{flow}_regime_adjustment_factor"] = float(regime_adjustment)
+
+        weekday_trend_factor = safe_ratio(
+            components[f"{flow}_weekday_trend"],
+            components[f"{flow}_month"],
+            1.0,
+        )
+        components[f"{flow}_weekday_trend_adjustment_factor"] = float(
+            weekday_trend_factor
+        )
 
     # --- 4. Finalize Ensemble ---
     for flow in ["entry", "exit"]:
-        strength = data.weights_lookup.get((flow, horizon_days), {}).get("booking_shrinkage_strength", 0)
+        strength = data.shrinkage_lookup.get((flow, horizon_days), 0)
         # Gen 2.1 shrinks the raw booking component toward the trend baseline.
         components[f"{flow}_booking_shrunk"] = shrink_booking_forecast(
             components[f"{flow}_booking"],
@@ -3717,10 +3752,8 @@ def calculate_component_forecasts(
 # =============================================================================
 # 5. DAILY FORECAST GENERATION
 # =============================================================================
-# The daily model is the core of the production forecast. For each target date in the
-# forward window, the script calculates the main components (booking visibility,
-# historic weekday/month patterns, trend, pace, and cancellation), then combines those
-# components using the optimal weights for that specific horizon.
+# The daily model weights the four Generation 2 base components first, then applies
+# the winning Generation 2.1 horizon adjustment.
 
 def generate_daily_forecasts(data: ProductionForecastData) -> pd.DataFrame:
     """
@@ -3765,42 +3798,61 @@ def generate_daily_forecasts(data: ProductionForecastData) -> pd.DataFrame:
             data=data,
         )
 
-        entry_weights_row = data.weights_lookup.get(("entry", horizon_days))
-        exit_weights_row = data.weights_lookup.get(("exit", horizon_days))
+        entry_weights_row = data.weights_lookup[("entry", horizon_days)]
+        exit_weights_row = data.weights_lookup[("exit", horizon_days)]
 
-        if entry_weights_row is None or exit_weights_row is None:
-            continue
+        entry_experiment = data.horizon_component_lookup[("entry", horizon_days)]
+        exit_experiment = data.horizon_component_lookup[("exit", horizon_days)]
 
-        entry_experiment = data.horizon_component_lookup.get(("entry", horizon_days), "ALL_NON_PRICE")
-        exit_experiment = data.horizon_component_lookup.get(("exit", horizon_days), "ALL_NON_PRICE")
+        entry_component_names = get_base_component_names("entry")
+        exit_component_names = get_base_component_names("exit")
 
-        entry_component_names = get_experiment_component_names(entry_experiment, "entry")
-        exit_component_names = get_experiment_component_names(exit_experiment, "exit")
-
-        entry_component_values = [components.get(name) for name in entry_component_names]
-        exit_component_values = [components.get(name) for name in exit_component_names]
-
-        entry_weight_columns = [f"{name}_weight" for name in entry_component_names]
-        exit_weight_columns = [f"{name}_weight" for name in exit_component_names]
-
-        entry_component_weights = [float(entry_weights_row.get(column, 0.0)) for column in entry_weight_columns]
-        exit_component_weights = [float(exit_weights_row.get(column, 0.0)) for column in exit_weight_columns]
-
-        final_entry_forecast = weighted_average(
-            values=entry_component_values,
-            weights=entry_component_weights,
+        base_entry_forecast = weighted_average(
+            values=[components.get(name) for name in entry_component_names],
+            weights=[float(entry_weights_row.get(name, 0.0)) for name in entry_component_names],
+        )
+        base_exit_forecast = weighted_average(
+            values=[components.get(name) for name in exit_component_names],
+            weights=[float(exit_weights_row.get(name, 0.0)) for name in exit_component_names],
         )
 
-        final_exit_forecast = weighted_average(
-            values=exit_component_values,
-            weights=exit_component_weights,
-        )
+        def selected_adjustment_factor(flow: str, experiment: str) -> float:
+            if experiment == "BASELINE":
+                return 1.0
+            if experiment == "ADD_BOOKING_PACE":
+                return components[f"{flow}_pace_adjustment_factor"]
+            if experiment == "ADD_CANCELLATION":
+                return components[f"{flow}_cancellation_adjustment_factor"]
+            if experiment == "ADD_CALENDAR":
+                return components[f"{flow}_calendar_adjustment_factor"]
+            if experiment == "ADD_BOOKING_REGIME":
+                return components[f"{flow}_regime_adjustment_factor"]
+            if experiment == "ADD_WEEKDAY_TREND":
+                return components[f"{flow}_weekday_trend_adjustment_factor"]
+            if experiment == "ALL_NON_PRICE":
+                return (
+                    components[f"{flow}_pace_adjustment_factor"]
+                    * components[f"{flow}_regime_adjustment_factor"]
+                    * components[f"{flow}_calendar_adjustment_factor"]
+                )
+            raise ValueError(f"Unsupported winning experiment: {experiment}")
+
+        entry_adjustment = selected_adjustment_factor("entry", entry_experiment)
+        exit_adjustment = selected_adjustment_factor("exit", exit_experiment)
+        final_entry_forecast = clip_forecast(base_entry_forecast * entry_adjustment)
+        final_exit_forecast = clip_forecast(base_exit_forecast * exit_adjustment)
 
         forecast_results.append({
             "target_date": target_date.normalize(),
             "horizon_days": horizon_days,
             "entry_forecast": final_entry_forecast,
             "exit_forecast": final_exit_forecast,
+            "entry_base_forecast": base_entry_forecast,
+            "exit_base_forecast": base_exit_forecast,
+            "entry_winner_experiment": entry_experiment,
+            "exit_winner_experiment": exit_experiment,
+            "entry_adjustment_factor": entry_adjustment,
+            "exit_adjustment_factor": exit_adjustment,
             **{k: v for k, v in components.items() if not isinstance(v, (pd.Timestamp, datetime))},
         })
 
@@ -3819,6 +3871,25 @@ def generate_daily_forecasts(data: ProductionForecastData) -> pd.DataFrame:
         "horizon_days",
         "entry_forecast",
         "exit_forecast",
+        "entry_base_forecast",
+        "exit_base_forecast",
+        "entry_winner_experiment",
+        "exit_winner_experiment",
+        "entry_adjustment_factor",
+        "exit_adjustment_factor",
+        "entry_weekday_selected",
+        "exit_weekday_selected",
+        "exit_duration",
+        "entry_booking_pace_adjusted",
+        "exit_booking_pace_adjusted",
+        "entry_booking_cancellation_adjusted",
+        "exit_booking_cancellation_adjusted",
+        "entry_calendar_adjusted",
+        "exit_calendar_adjusted",
+        "entry_booking_regime_adjusted",
+        "exit_booking_regime_adjusted",
+        "entry_weekday_trend",
+        "exit_weekday_trend",
         "entry_known_bookings",
         "exit_known_bookings",
     ]
