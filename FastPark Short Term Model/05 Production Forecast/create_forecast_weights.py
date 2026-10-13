@@ -207,11 +207,15 @@ def build_forecast_weights():
     ):
 
         output = {
-            "demand_type":
-                demand_type,
+            "demand_type": demand_type,
 
-            "horizon_days":
-                int(horizon_days),
+            "horizon_days": int(horizon_days),
+
+            "shrinkage_strength": (
+                group.groupby("shrinkage_strength")["weight_quality"]
+                .sum()
+                .idxmax()
+            ),
         }
 
         for column in weight_columns:

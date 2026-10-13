@@ -12,3 +12,9 @@ __pycache__/
 #Optional: ignore cached data
 data/staged/
 *.parquet
+
+# Forecast outputs
+FastPark Short Term Model/outputs/*.xlsx
+
+# Forecast inputs
+FastPark Short Term Model/05 Production Forecast/inputs/*.xlsx
