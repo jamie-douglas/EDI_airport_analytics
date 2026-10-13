@@ -1,0 +1,340 @@
+flowchart TD
+
+    START(["FastPark forecast process begins"])
+
+    %% =====================================================
+    %% 1. DATA COLLECTION
+    %% =====================================================
+
+    subgraph DATA["1. Collect and prepare source data"]
+
+        A["Collect FastPark booking data<br/>Planned entries, planned exits, booking creation dates, cancellations, status and planned duration"]
+
+        B["Collect FastPark operational data<br/>Actual check-in completion and actual checkout timestamps"]
+
+        C["Select the forecasting population<br/>FastPark bookings with relevant booking statuses"]
+        
+        D["Match bookings to operational records<br/>Booking ID matched to operational booking reference"]
+
+        E["Create the master booking and operations dataset<br/>One reconciled view of planned demand and realised movements"]
+
+        A --> C
+        B --> D
+        C --> D
+        D --> E
+
+    end
+
+    START --> A
+    START --> B
+
+    %% =====================================================
+    %% 2. HISTORICAL ACTUAL DEMAND
+    %% =====================================================
+
+    subgraph ACTUALS["2. Create historical actual demand"]
+
+        F["Identify actual entry movements<br/>Use completed check-in timestamp"]
+
+        G["Identify actual exit movements<br/>Use actual checkout timestamp"]
+
+        H["Aggregate historical daily demand<br/>Unique actual entries and exits by day"]
+
+        I["Aggregate historical hourly demand<br/>Unique actual entries and exits by hour"]
+
+        J["Create historical demand measures<br/>Entries, exits, movements, net flow and relative occupancy"]
+
+        E --> F
+        E --> G
+        F --> H
+        G --> H
+        F --> I
+        G --> I
+        H --> J
+
+    end
+
+    %% =====================================================
+    %% 3. STANDARD BOOKING CURVES
+    %% =====================================================
+
+    subgraph BOOKING_CURVES["3. Build standard booking curves"]
+
+        K["Select historical target dates<br/>Historical entry dates for the entry curve<br/>Historical exit dates for the exit curve"]
+
+        L["Reconstruct booking visibility at different lead times<br/>Determine how many bookings would have been visible before each target date"]
+
+        M["Compare visible bookings with final actual demand<br/>Visible bookings are compared with completed operational entries or exits"]
+
+        N["Calculate completion ratios<br/>Final actual demand divided by visible bookings"]
+
+        O["Build entry booking curve<br/>Historical completion factors by entry lead time"]
+
+        P["Build exit booking curve<br/>Historical completion factors by exit lead time"]
+
+        Q["Use recent valid historical observations<br/>Median completion factors reduce the influence of extreme ratios"]
+
+        E --> K
+        J --> K
+        K --> L
+        L --> M
+        M --> N
+        N --> O
+        N --> P
+        O --> Q
+        P --> Q
+
+    end
+
+    %% =====================================================
+    %% 4. DURATION EXIT CURVE
+    %% =====================================================
+
+    subgraph DURATION_CURVE["4. Build duration-specific exit curves"]
+
+        R["Segment historical bookings by planned stay duration<br/>0-1, 2-3, 4-7, 8-10, 11-14, 15-21 and 22+ days"]
+
+        S["Group historical exits by duration band<br/>Count actual exits for each target date and duration segment"]
+
+        T["Measure visibility by duration band<br/>Count how many bookings in each duration segment were visible at each lead time"]
+
+        U["Calculate duration-specific completion ratios<br/>Actual exits divided by visible bookings within each duration band"]
+
+        V["Create duration exit factors<br/>Recent median completion factor for each duration band and lead time"]
+
+        E --> R
+        J --> S
+        R --> T
+        S --> T
+        T --> U
+        U --> V
+
+    end
+
+    %% =====================================================
+    %% 5. SEASONAL AND TREND BASELINES
+    %% =====================================================
+
+    subgraph BASELINES["5. Create historical and trend baselines"]
+
+        W["Create same-weekday baseline<br/>Average recent historical demand for the same weekday"]
+
+        X["Create same-weekday-and-month baseline<br/>Average historical demand for the same weekday and calendar month"]
+
+        Y["Measure recent demand trend<br/>Compare recent demand with the preceding historical period"]
+
+        Z["Apply trend adjustment<br/>Increase or decrease the seasonal baseline within controlled limits"]
+
+        AA["Create entry historical baselines<br/>Entry weekday, entry month and trend-adjusted entry month"]
+
+        AB["Create exit historical baselines<br/>Exit weekday and trend-adjusted exit month"]
+
+        J --> W
+        J --> X
+        J --> Y
+        W --> AA
+        X --> AA
+        Y --> Z
+        Z --> AA
+        W --> AB
+        X --> AB
+        Y --> Z
+        Z --> AB
+
+    end
+
+    %% =====================================================
+    %% 6. CURRENT VISIBLE BOOKINGS
+    %% =====================================================
+
+    subgraph VISIBILITY["6. Determine currently visible future bookings"]
+
+        AC["Identify bookings visible at the forecast point<br/>Bookings created by the forecast cutoff and not cancelled before that point"]
+
+        AD["Count visible entry bookings<br/>Bookings planned to enter on each target date"]
+
+        AE["Count visible exit bookings<br/>Bookings planned to exit on each target date"]
+
+        AF["Identify the visible exit duration mix<br/>Group visible exit bookings by planned stay duration"]
+
+        E --> AC
+        AC --> AD
+        AC --> AE
+        AC --> AF
+
+    end
+
+    %% =====================================================
+    %% 7. FORECAST COMPONENTS
+    %% =====================================================
+
+    subgraph COMPONENTS["7. Create detailed forecast components"]
+
+        AG["Entry booking forecast<br/>Visible entry bookings multiplied by the historical entry completion factor"]
+
+        AH["Exit booking forecast<br/>Visible exit bookings multiplied by the historical exit completion factor"]
+
+        AI["Duration-adjusted exit forecast<br/>Visible exit bookings in each duration band multiplied by the matching duration-specific exit factor"]
+
+        AJ["Sum duration-level exit forecasts<br/>Create one duration-adjusted exit forecast for the target date"]
+
+        AK["Entry seasonal and trend components<br/>Entry weekday, entry month and trend-adjusted entry month"]
+
+        AL["Exit seasonal and trend components<br/>Exit weekday and trend-adjusted exit month"]
+
+        AD --> AG
+        Q --> AG
+
+        AE --> AH
+        Q --> AH
+
+        AF --> AI
+        V --> AI
+        AI --> AJ
+
+        AA --> AK
+        AB --> AL
+
+    end
+
+    %% =====================================================
+    %% 8. SHRINKAGE
+    %% =====================================================
+
+    subgraph SHRINKAGE["8. Stabilise booking-led forecasts using shrinkage"]
+
+        AM["Retrieve shrinkage strength<br/>Use the learned parameter for the relevant flow and forecast horizon"]
+
+        AN["Calculate booking reliability<br/>More visible bookings means greater confidence in the booking forecast"]
+
+        AO["Shrink entry booking forecast toward historical baseline<br/>Blend entry booking forecast with trend-adjusted entry baseline"]
+
+        AP["Shrink exit booking forecast toward historical baseline<br/>Blend exit booking forecast with trend-adjusted exit baseline"]
+
+        AQ["Create entry booking-shrunk component"]
+
+        AR["Create exit booking-shrunk component"]
+
+        AG --> AM
+        AH --> AM
+        AD --> AN
+        AE --> AN
+        AM --> AN
+
+        AN --> AO
+        AK --> AO
+        AO --> AQ
+
+        AN --> AP
+        AL --> AP
+        AP --> AR
+
+    end
+
+    %% =====================================================
+    %% 9. LEARNED WEIGHTED ENSEMBLE
+    %% =====================================================
+
+    subgraph ENSEMBLE["9. Combine components using learned horizon-specific weights"]
+
+        AS["Load learned forecast weights<br/>Weights vary by entry or exit and by forecast horizon"]
+
+        AT["Entry ensemble components<br/>Entry booking-shrunk, entry weekday, entry month and entry trend month"]
+
+        AU["Exit ensemble components<br/>Exit booking-shrunk, duration-adjusted exit, exit weekday and exit trend month"]
+
+        AV["Apply entry weights<br/>Combine the valid entry components using a weighted average"]
+
+        AW["Apply exit weights<br/>Combine the valid exit components using a weighted average"]
+
+        AX["Create daily entry forecast"]
+
+        AY["Create daily exit forecast"]
+
+        AS --> AV
+        AS --> AW
+
+        AQ --> AT
+        AK --> AT
+        AT --> AV
+        AV --> AX
+
+        AR --> AU
+        AJ --> AU
+        AL --> AU
+        AU --> AW
+        AW --> AY
+
+    end
+
+    Q --> AS
+    V --> AS
+
+    %% =====================================================
+    %% 10. DAILY OUTPUT
+    %% =====================================================
+
+    subgraph DAILY["10. Create daily forecast output"]
+
+        AZ["Combine daily entry and exit forecasts"]
+
+        BA["Retain forecast audit information<br/>Component forecasts, visible booking counts, duration forecast and forecast horizon"]
+
+        BB["Daily FastPark forecast<br/>Expected entries and exits for each target date"]
+
+        AX --> AZ
+        AY --> AZ
+        AZ --> BA
+        BA --> BB
+
+    end
+
+    %% =====================================================
+    %% 11. HOURLY PROFILE
+    %% =====================================================
+
+    subgraph HOURLY["11. Convert daily forecasts into hourly forecasts"]
+
+        BC["Build historical entry hourly profile<br/>Use recent comparable weekdays to calculate each hour's share of daily entries"]
+
+        BD["Build historical exit hourly profile<br/>Use recent comparable weekdays to calculate each hour's share of daily exits"]
+
+        BE["Distribute daily entry forecast across 24 hours<br/>Daily entry forecast multiplied by hourly entry proportions"]
+
+        BF["Distribute daily exit forecast across 24 hours<br/>Daily exit forecast multiplied by hourly exit proportions"]
+
+        BG["Create visible planned booking counts by hour<br/>Planned entry and exit bookings by target date and hour"]
+
+        BH["Combine hourly forecasts and booking visibility<br/>Hourly entry forecast, hourly exit forecast and current planned booking counts"]
+
+        I --> BC
+        I --> BD
+        BB --> BE
+        BB --> BF
+        AC --> BG
+        BC --> BE
+        BD --> BF
+        BE --> BH
+        BF --> BH
+        BG --> BH
+
+    end
+
+    %% =====================================================
+    %% 12. FINAL OUTPUTS
+    %% =====================================================
+
+    subgraph OUTPUTS["12. Produce final outputs"]
+
+        BI["Daily forecast file<br/>Daily entries, exits and model components"]
+
+        BJ["Hourly forecast file<br/>Hourly entries, exits and visible planned bookings"]
+
+        BK(["FastPark forecasting process complete"])
+
+        BB --> BI
+        BH --> BJ
+        BI --> BK
+        BJ --> BK
+
+    end

@@ -563,12 +563,9 @@ def create_daily_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
     daily["date"] = pd.to_datetime(daily["date"])
     daily = daily.sort_values("date").reset_index(drop=True)
 
-    # Calculate total movements and net flow (entries - exits).
+    # Calculate total movements
     daily["movements"] = daily["entries"] + daily["exits"]
-    daily["net_flow"] = daily["entries"] - daily["exits"]
 
-    # Calculate a running sum of net flow, representing relative occupancy change.
-    daily["relative_occupancy"] = daily["net_flow"].cumsum()
 
     return daily
 
@@ -583,7 +580,7 @@ def create_hourly_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: Hourly actuals table with `datetime_hour`, `date`, `hour`,
-                      `entries`, `exits`, `movements`, and `net_flow`.
+                      `entries`, `exits`, `movements`
     """
     # Group entries by the hour of their actual entry timestamp.
     entries_hourly = (
@@ -608,7 +605,6 @@ def create_hourly_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
 
     # Calculate total movements and net flow.
     hourly["movements"] = hourly["entries"] + hourly["exits"]
-    hourly["net_flow"] = hourly["entries"] - hourly["exits"]
 
     # Extract date, hour, weekday, and month components from the hourly timestamp.
     hourly["date"] = hourly["datetime_hour"].dt.normalize()
