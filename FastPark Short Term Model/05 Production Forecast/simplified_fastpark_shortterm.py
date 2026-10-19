@@ -31,6 +31,9 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+import openpyxl
+from openpyxl import load_workbook
+
 MODULE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -110,6 +113,15 @@ PRODUCTION_CONFIG = {
     "actual_exit_timestamp_col": "ActualCheckedOutDate",
 
     # --- Output files ---
+    "save_new_outputs": True,
+    "save_legacy_outputs": True,
+    "toggle_workforce": True,
+    "toggle_dwh": True,
+    "toggle_accuracy": False,
+    "toggle_weekly": False,
+    "user_home": str(Path.home()), # Dynamically resolve user path
+    "legacy_base_path": r"Edinburgh Airport Limited\Business Planning - Documents\02. Capacity Areas\09. Car Parking\01. FastPark\FastPark Model Rebuild 2025\FastPark Short-Term Model Rebuild",
+
     # These are the final daily and hourly outputs created by the production run.
     "daily_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_daily_forecast.csv",
     "hourly_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_hourly_forecast.csv",
@@ -605,6 +617,7 @@ def create_hourly_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
 
     # Calculate total movements and net flow.
     hourly["movements"] = hourly["entries"] + hourly["exits"]
+
 
     # Extract date, hour, weekday, and month components from the hourly timestamp.
     hourly["date"] = hourly["datetime_hour"].dt.normalize()
@@ -1978,7 +1991,6 @@ def load_and_clean_production_data(config: dict, sql_engine) -> Dict[str, pd.Dat
     daily_actuals_df = create_daily_fastpark_actuals(master_df)
     hourly_actuals_df = create_hourly_fastpark_actuals(master_df)
 
-
         # Build historical booking curves.
     # The `forecast_horizons_list` needs to include all possible lead_days from 0 to 56.
     # This list will be used to calculate booking curve completion ratios for all relevant horizons.
@@ -2012,6 +2024,8 @@ def load_and_clean_production_data(config: dict, sql_engine) -> Dict[str, pd.Dat
         "master_df": master_df,
         "daily_actuals_df": daily_actuals_df,
         "hourly_actuals_df": hourly_actuals_df,
+        "fastpark_actual_entries_df": operations_clean.copy(),
+        "fastpark_actual_exits_df": operations_clean.copy(),
         "entry_booking_curve": entry_booking_curve,
         "exit_booking_curve": exit_booking_curve,
         "duration_exit_booking_curve": duration_exit_booking_curve,
@@ -2768,6 +2782,179 @@ def generate_hourly_forecasts(
     hourly_forecast_df = pd.DataFrame(hourly_forecast_results)
     return hourly_forecast_df
 
+def update_rolling_transactions(bookings, config):
+    today = pd.Timestamp.today().normalize()
+    # Define range: 4 weeks prior to 8 weeks after
+    start_date = today - pd.Timedelta(weeks=4)
+    end_date = today + pd.Timedelta(weeks=8)
+    
+    # Calculate daily entries/exits from bookings_clean
+    entries = bookings[bookings['entryDate'].between(start_date, end_date)]\
+              .groupby(bookings['entryDate'].dt.date)['bookingId'].nunique()
+    exits = bookings[bookings['exitDate'].between(start_date, end_date)]\
+            .groupby(bookings['exitDate'].dt.date)['bookingId'].nunique()
+    
+    # Combine into a summary dataframe
+    summary = pd.DataFrame({'Entries': entries, 'Exits': exits}).fillna(0)
+    
+    # Update Excel
+    tracker_path = Path(f"C:/Users/{config['db_username']}") / config["legacy_base_path"] / "FastPark Forecast Accuracy Tracker NEW.xlsx"
+    wb = load_workbook(tracker_path)
+    ws = wb["Rolling Weekly Transactions"]
+    
+    # Match dates in column A
+    for r in range(2, ws.max_row + 1):
+        cell_date = pd.to_datetime(ws.cell(r, 1).value)
+        if start_date <= cell_date <= end_date:
+            date_key = cell_date.date()
+            if date_key in summary.index:
+                ws.cell(r, 4, value=summary.loc[date_key, 'Entries']) # Col D
+                ws.cell(r, 5, value=summary.loc[date_key, 'Exits'])   # Col E
+                ws.cell(r, 6, value=summary.loc[date_key, 'Entries'] + summary.loc[date_key, 'Exits']) # Col F
+    wb.save(tracker_path)
+
+
+
+def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, actual_exits):
+    today = datetime.now()
+    user = config["db_username"]
+    base_path = Path(f"C:/Users/{user}") / config["legacy_base_path"]
+    is_monday = (today.weekday() == 0)
+    is_weekly_run = (config["toggle_weekly"] or is_monday)
+    
+    # 1. NEW SCRIPT NATIVE OUTPUTS
+    if config.get("save_new_outputs"):
+        hourly_df.to_csv(config["hourly_forecast_output_file"], index=False)
+        daily_df.to_csv(config["daily_forecast_output_file"], index=False)
+
+    # 2. LEGACY OUTPUTS
+    if config.get("save_legacy_outputs"):
+        # Prepare dataframes
+        comb = hourly_df.copy()
+        comb['date'] = comb['datetime_hour'].dt.date
+        comb['time'] = comb['datetime_hour'].dt.time
+        today_str = today.strftime('%Y-%m-%d')
+
+                # 1. Daily Forecast
+        legacy_daily = daily_df[
+            [
+                "target_date",
+                "entry_bookings",
+                "exit_bookings",
+                "entry_forecast",
+                "exit_forecast",
+            ]
+        ].copy()
+
+        legacy_daily.rename(
+            columns={
+                "target_date": "",
+                "entry_bookings": "booking_entries",
+                "exit_bookings": "booking_exits",
+            },
+            inplace=True,
+        )
+
+        legacy_daily.set_index("").to_csv(
+            base_path / "Daily Forecast Output" / f"{today_str}_daily_forecast.csv"
+        )
+
+
+        # 2. Hourly Forecast Pivots
+        for flow, col in [('Entry', 'entry_forecast_hourly'), ('Exit', 'exit_forecast_hourly')]:
+            pivot = comb.pivot(index='date', columns='time', values=col)
+            pivot.columns = [str(c) for c in pivot.columns]
+            pivot['Total'] = pivot.sum(axis=1)
+            pivot.to_csv(base_path / f"FastPark {flow} Hourly Forecast Output.csv")
+
+        # 3. DWH (Local Mirror ALWAYS, Server via Toggle)
+        flat_leg = pd.DataFrame({
+            "Date": comb["date"],
+            "intervalStartTime_Local": comb["time"],
+            "Entries": comb["entry_forecast_hourly"],
+            "Exits": comb["exit_forecast_hourly"],
+        })
+        flat_leg.to_csv(base_path / "Daily Forecast Output" / f"{today_str}_daily_forecast_DWH.csv", index=False)
+        if config["toggle_dwh"]:
+            dwh_path = rf"\\BIPOEVSAPP01\FilesForUpload\BusinessAnalytics\FastParkForecast\FP_Forecast_output_{today.strftime('%Y%m%d')}.csv"
+            flat_leg.to_csv(dwh_path, index=False)
+
+        # 4. Hourly Actuals
+        for df_act, name in [(actual_entries, 'Entries'), (actual_exits, 'Exits')]:
+            act = df_act.copy()
+            col_name = 'CheckInEnded' if 'Entries' in name else 'ActualCheckedOutDate'
+            act['date'] = act[col_name].dt.date
+            act['hour'] = act[col_name].dt.strftime('%H:00')
+            piv = act.pivot_table(index='date', columns='hour', values='BookingReference', aggfunc='nunique', fill_value=0)
+            # Ensure 00:00-23:00 columns
+            full_cols = [f"{str(h).zfill(2)}:00" for h in range(24)]
+            piv = piv.reindex(columns=full_cols, fill_value=0)
+            piv['Total'] = piv.sum(axis=1)
+            piv.to_csv(base_path / f"FastPark {name} Actuals Hourly.csv")
+
+        # 5. Workforce Daily
+        if config["toggle_workforce"]:
+            wf_path = Path(f"C:/Users/{user}/Edinburgh Airport Limited/Workforce Management - FastPark Forecast")
+            flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output.csv")
+            # 6. Weekly Logic
+            if is_weekly_run:
+                flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output Weekly.csv")
+                flat_leg.to_csv("FastPark Hourly Forecast Output Weekly.csv")
+
+        # 7. Accuracy Tracker
+        if config["toggle_accuracy"]:
+            tracker_path = base_path / "FastPark Forecast Accuracy Tracker NEW.xlsx"
+            wb = load_workbook(tracker_path)
+            # Forecast Tabs
+            for tab, col in [("Entries Forecast", "entry_forecast_hourly"), ("Exits Forecast", "exit_forecast_hourly")]:
+                ws = wb[tab]
+                startrow = next((r for r in range(2, ws.max_row+1) if pd.to_datetime(ws.cell(r,1).value).date() == comb['date'].min()), ws.max_row+1)
+                for i, (date, grp) in enumerate(comb.groupby('date')):
+                    ws.cell(row=startrow+i, column=1, value=date)
+                    hourly_values = grp[col].tolist()
+                    for j, val in enumerate(hourly_values):
+                        ws.cell(row=startrow+i, column=j+2, value=val)
+
+                    ws.cell(
+                        row=startrow+i,
+                        column=26,   # Date=1, Hours=2-25, Total=26
+                        value=sum(hourly_values)
+                    )
+            # Actuals Tabs
+            for tab, df in [("Entries Actuals", ent_piv := actual_entries.pivot_table(index=actual_entries['CheckInEnded'].dt.date, columns=actual_entries['CheckInEnded'].dt.strftime('%H:00'), values='BookingReference', aggfunc='nunique', fill_value=0)),
+                            ("Exits Actuals", ex_piv := actual_exits.pivot_table(index=actual_exits['ActualCheckedOutDate'].dt.date, columns=actual_exits['ActualCheckedOutDate'].dt.strftime('%H:00'), values='BookingReference', aggfunc='nunique', fill_value=0))]:
+
+                # Only keep the most recent 5 weeks of actuals
+                cutoff_date = pd.Timestamp.today().date() - pd.Timedelta(weeks=5)
+                df = df[df.index >= cutoff_date]
+                
+                ws = wb[tab]
+
+                startrow = next(
+                    (r for r in range(2, ws.max_row+1)
+                    if pd.to_datetime(ws.cell(r,1).value).date() == df.index.min()),
+                    ws.max_row+1
+                )
+
+                for i, (date, row) in enumerate(df.iterrows()):
+
+                    ws.cell(row=startrow+i, column=1, value=date)
+
+                    values = row.tolist()
+
+                    for j, val in enumerate(values):
+                        ws.cell(row=startrow+i, column=j+2, value=val)
+
+                    ws.cell(
+                        row=startrow+i,
+                        column=26,
+                        value=sum(values)
+                    )
+
+            
+            update_rolling_transactions(bookings, config)
+            if is_weekly_run: wb.save(tracker_path)
+
 
 # =============================================================================
 # 7. MAIN EXECUTION PIPELINE
@@ -2825,9 +3012,17 @@ def run_production_forecast(config: dict, save_outputs=False) -> Tuple[pd.DataFr
 
     # --- 7. Export Results ---
     if save_outputs:
-        daily_forecasts.to_csv(config["daily_forecast_output_file"], index=False)
-        hourly_forecasts.to_csv(config["hourly_forecast_output_file"], index=False)
-        t6 = step(t5, f"Exported forecasts to {config['daily_forecast_output_file']} and {config['hourly_forecast_output_file']}")
+        export_all_outputs(
+            daily_forecasts, 
+            hourly_forecasts, 
+            config,
+            data_for_forecast.bookings_clean,
+            raw_data_dict['fastpark_actual_entries_df'], # Note: ensure these are returned from your loader
+            raw_data_dict['fastpark_actual_exits_df']
+        )
+        t6 = step(t5, "Exported both New and Legacy outputs successfully.")
+    else:
+        t6 = step(t5, "Forecasts generated but save_outputs=False; no files written.")
 
     total_runtime = time.perf_counter() - t0
     print(f"\nFastPark Production Forecast completed in {total_runtime:.2f} seconds.")
