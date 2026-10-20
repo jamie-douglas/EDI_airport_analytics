@@ -13,8 +13,9 @@ __pycache__/
 data/staged/
 *.parquet
 
-# Forecast outputs
-FastPark Short Term Model/outputs/*.xlsx
+# Generated outputs
+**/outputs/**/*.xlsx
+**/outputs/**/*.csv
 
-# Forecast inputs
+# FastPark inputs
 FastPark Short Term Model/05 Production Forecast/inputs/*.xlsx

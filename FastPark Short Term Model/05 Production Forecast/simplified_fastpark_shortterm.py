@@ -2821,6 +2821,7 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
     base_path = Path(f"C:/Users/{user}") / config["legacy_base_path"]
     is_monday = (today.weekday() == 0)
     is_weekly_run = (config["toggle_weekly"] or is_monday)
+    is_accuracy_run = (config["toggle_accuracy"] or is_monday)
     
     # 1. NEW SCRIPT NATIVE OUTPUTS
     if config.get("save_new_outputs"):
@@ -2902,7 +2903,7 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
                 flat_leg.to_csv("FastPark Hourly Forecast Output Weekly.csv")
 
         # 7. Accuracy Tracker
-        if config["toggle_accuracy"]:
+        if is_accuracy_run:
             tracker_path = base_path / "FastPark Forecast Accuracy Tracker NEW.xlsx"
             wb = load_workbook(tracker_path)
             # Forecast Tabs
@@ -2953,7 +2954,7 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
 
             
             update_rolling_transactions(bookings, config)
-            if is_weekly_run: wb.save(tracker_path)
+            if is_accuracy_run: wb.save(tracker_path)
 
 
 # =============================================================================
