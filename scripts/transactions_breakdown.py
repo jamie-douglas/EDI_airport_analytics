@@ -286,7 +286,7 @@ def build_month_from_profile(
     return output_rows
 
 
-output_file = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\transaction_breakdown.xlsx"
+output_file = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\transaction_breakdown_oct26.xlsx"
 
 summary_rows = []
 
@@ -308,7 +308,7 @@ kiosk_capacity_15 = (
     * 0.25
 )
 
-ROOM_AREA = 56
+ROOM_AREA = 42
 SPACE_PER_PERSON = 1.3
 
 room_capacity_people = (

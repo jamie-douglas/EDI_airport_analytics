@@ -1004,7 +1004,7 @@ if __name__ == "__main__":
             avg_hall_pop = np.mean([r['max_hall_pop'] for r in mc_results])
 
             print(f"Photobooth Jam Probability (Queue >= 10): {jam_count}/{ITERATIONS} ({jam_count / ITERATIONS * 100:.1f}%)")
-            print(f"Hall Capacity Breach Probability (Pop > 60): {breach_count}/{ITERATIONS} ({breach_count / ITERATIONS * 100:.1f}%)")
+            print(f"Hall Capacity Breach Probability (Pop > 30): {breach_count}/{ITERATIONS} ({breach_count / ITERATIONS * 100:.1f}%)")
             print(f"Mean Max Photobooth Queue: {avg_pb_q:.2f} vehicles")
             print(f"Mean Max Reception Hall Population: {avg_hall_pop:.2f} people")
             print(f"Monthly breach table built from the same {ITERATIONS} Monte Carlo iterations (no rerun).")
@@ -1020,7 +1020,7 @@ if __name__ == "__main__":
                 pb_capacity=2,
                 mean_kiosk_sec=mean_kiosk_sec,
                 num_kiosks=5,
-                hall_capacity=60,
+                hall_capacity=30,
                 pb_queue_limit=10,
                 locker_capacity=297
             )

@@ -2782,37 +2782,72 @@ def generate_hourly_forecasts(
     hourly_forecast_df = pd.DataFrame(hourly_forecast_results)
     return hourly_forecast_df
 
-def update_rolling_transactions(bookings, config):
+def update_rolling_transactions(daily_df, wb):
     today = pd.Timestamp.today().normalize()
+
     # Define range: 4 weeks prior to 8 weeks after
     start_date = today - pd.Timedelta(weeks=4)
     end_date = today + pd.Timedelta(weeks=8)
-    
-    # Calculate daily entries/exits from bookings_clean
-    entries = bookings[bookings['entryDate'].between(start_date, end_date)]\
-              .groupby(bookings['entryDate'].dt.date)['bookingId'].nunique()
-    exits = bookings[bookings['exitDate'].between(start_date, end_date)]\
-            .groupby(bookings['exitDate'].dt.date)['bookingId'].nunique()
-    
-    # Combine into a summary dataframe
-    summary = pd.DataFrame({'Entries': entries, 'Exits': exits}).fillna(0)
-    
-    # Update Excel
-    tracker_path = Path(f"C:/Users/{config['db_username']}") / config["legacy_base_path"] / "FastPark Forecast Accuracy Tracker NEW.xlsx"
-    wb = load_workbook(tracker_path)
+
+    # Use the daily forecast output booking counts.
+    # These values are produced by the forecast model using the
+    # booking visibility ("known bookings") logic and therefore
+    # match the Daily Forecast Output exactly.
+    summary = (
+        daily_df[
+            [
+                "target_date",
+                "entry_bookings",
+                "exit_bookings",
+            ]
+        ]
+        .copy()
+        .rename(
+            columns={
+                "target_date": "Date",
+                "entry_bookings": "Entries",
+                "exit_bookings": "Exits",
+            }
+        )
+    )
+
+    # Convert to date-only values for matching against the tracker.
+    summary["Date"] = pd.to_datetime(
+        summary["Date"]
+    ).dt.date
+
+    # Calculate total movements.
+    summary["Total"] = (
+        summary["Entries"]
+        + summary["Exits"]
+    )
+
+    # Use Date as the lookup index.
+    summary = summary.set_index("Date")
+
     ws = wb["Rolling Weekly Transactions"]
-    
+
+
+
     # Match dates in column A
     for r in range(2, ws.max_row + 1):
         cell_date = pd.to_datetime(ws.cell(r, 1).value)
+
         if start_date <= cell_date <= end_date:
             date_key = cell_date.date()
-            if date_key in summary.index:
-                ws.cell(r, 4, value=summary.loc[date_key, 'Entries']) # Col D
-                ws.cell(r, 5, value=summary.loc[date_key, 'Exits'])   # Col E
-                ws.cell(r, 6, value=summary.loc[date_key, 'Entries'] + summary.loc[date_key, 'Exits']) # Col F
-    wb.save(tracker_path)
 
+            if date_key in summary.index:
+
+                print(
+                    f"Row {r} | {date_key} | "
+                    f"Entries={summary.loc[date_key, 'Entries']} | "
+                    f"Exits={summary.loc[date_key, 'Exits']} | "
+                    f"Total={summary.loc[date_key, 'Total']}"
+                )
+
+                ws.cell(r, 4, value=summary.loc[date_key, "Entries"])
+                ws.cell(r, 5, value=summary.loc[date_key, "Exits"])
+                ws.cell(r, 6, value=summary.loc[date_key, "Total"])
 
 
 def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, actual_exits):
@@ -2896,11 +2931,11 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
         # 5. Workforce Daily
         if config["toggle_workforce"]:
             wf_path = Path(f"C:/Users/{user}/Edinburgh Airport Limited/Workforce Management - FastPark Forecast")
-            flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output.csv")
+            flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output.csv", index=False)
             # 6. Weekly Logic
             if is_weekly_run:
-                flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output Weekly.csv")
-                flat_leg.to_csv("FastPark Hourly Forecast Output Weekly.csv")
+                flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output Weekly.csv", index=False)
+                flat_leg.to_csv("FastPark Hourly Forecast Output Weekly.csv", index=False)
 
         # 7. Accuracy Tracker
         if is_accuracy_run:
@@ -2953,8 +2988,8 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
                     )
 
             
-            update_rolling_transactions(bookings, config)
-            if is_accuracy_run: wb.save(tracker_path)
+            update_rolling_transactions(daily_df, wb)
+            wb.save(tracker_path)
 
 
 # =============================================================================
