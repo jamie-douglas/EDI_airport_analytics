@@ -21,6 +21,8 @@ The script produces daily and hourly forecast tables for entries and exits acros
 import sys
 import pathlib
 import time
+import os
+import getpass
 
 # Standard library imports
 from datetime import datetime, timedelta
@@ -59,12 +61,18 @@ if str(PROJECT_ROOT) not in sys.path:
 PRODUCTION_OUTPUT_DIR = PROJECT_ROOT / "config"
 PRODUCTION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+DEFAULT_DB_USERNAME = (
+    os.environ.get("USERNAME")
+    or getpass.getuser()
+    or ""
+).split("@")[0]
+
 
 PRODUCTION_CONFIG = {
     # --- Database connection ---
     # The DSN must exist in the environment where this script runs.
     "db_dsn": "AzureConnection",
-    "db_username": "jamie_douglas",
+    "db_username": DEFAULT_DB_USERNAME,
 
     # --- Forecast run settings ---
     # `current_run_date` is the date the forecast is being produced from.
