@@ -18,4 +18,4 @@ data/staged/
 **/outputs/**/*.csv
 
 # FastPark inputs
-FastPark Short Term Model/05 Production Forecast/inputs/*.xlsx
+FastPark Short Term Model - Oct 2026 Update/05 Production Forecast/inputs/*.xlsx

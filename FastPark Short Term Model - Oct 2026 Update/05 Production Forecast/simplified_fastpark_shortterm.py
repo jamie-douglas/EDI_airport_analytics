@@ -37,29 +37,36 @@ import openpyxl
 from openpyxl import load_workbook
 
 MODULE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+UTILS_DIR = pathlib.Path(__file__).resolve().parents[1] / "00 Utils"
 
 
 if str(MODULE_ROOT) not in sys.path:
     sys.path.append(str(MODULE_ROOT))
+if str(UTILS_DIR) not in sys.path:
+    sys.path.append(str(UTILS_DIR))
 
-# Allowed utility imports (must be available in modules/utils)
-# Ensure these files (db.py, query.py, progress.py) are accessible in sys.path
-from modules.utils.db import get_engine
-from modules.utils.query import query
-from modules.utils.progress import step
+# Allowed utility imports from local workspace utilities.
+from fastpark_local_utils import get_engine, query, step
 
 # =============================================================================
 # 1. GLOBAL CONFIGURATION FOR PRODUCTION
 # =============================================================================
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[0]
+WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-PRODUCTION_OUTPUT_DIR = PROJECT_ROOT / "config"
-PRODUCTION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PRODUCTION_CONFIG_DIR = PROJECT_ROOT / "config"
+PRODUCTION_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+PRODUCTION_STANDARD_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+PRODUCTION_STANDARD_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+PRODUCTION_LEGACY_OUTPUT_DIR = WORKSPACE_ROOT / "Outputs"
+PRODUCTION_LEGACY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_DB_USERNAME = (
     os.environ.get("USERNAME")
@@ -84,7 +91,7 @@ PRODUCTION_CONFIG = {
     # --- Learned model files ---
     # These CSV files are the outputs from the earlier simulation work and are used
     # to apply the optimised weights and parameters for the forecast.
-    "forecast_weights_path": PRODUCTION_OUTPUT_DIR / "forecast_weights.csv",
+    "forecast_weights_path": PRODUCTION_CONFIG_DIR / "forecast_weights.csv",
 
     # --- Historical lookback ---
     # Use enough history to make the booking curves, trend components, and weekly
@@ -128,11 +135,11 @@ PRODUCTION_CONFIG = {
     "toggle_accuracy": False,
     "toggle_weekly": False,
     "user_home": str(Path.home()), # Dynamically resolve user path
-    "legacy_base_path": r"Edinburgh Airport Limited\Business Planning - Documents\02. Capacity Areas\09. Car Parking\01. FastPark\FastPark Model Rebuild 2025\FastPark Short-Term Model Rebuild",
 
     # These are the final daily and hourly outputs created by the production run.
-    "daily_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_daily_forecast.csv",
-    "hourly_forecast_output_file": PRODUCTION_OUTPUT_DIR / "fastpark_hourly_forecast.csv",
+    "daily_forecast_output_file": PRODUCTION_STANDARD_OUTPUT_DIR / "fastpark_daily_forecast.csv",
+    "hourly_forecast_output_file": PRODUCTION_STANDARD_OUTPUT_DIR / "fastpark_hourly_forecast.csv",
+    "output_base_path": PRODUCTION_LEGACY_OUTPUT_DIR,
 }
 
 # =============================================================================
@@ -419,7 +426,7 @@ def clean_bookings(bookings: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     # Add calendar features (weekday, month, year, week number) for seasonality.
     df["entry_weekday"] = df["entryDate"].dt.day_name()
-    df["entry_weekday_num"] = df["entryDate"].dt.weekday
+    df["entry_weekday_num"] = df["entryDate"].dt.day_of_week
     df["entry_month"] = df["entryDate"].dt.month
     df["entry_year"] = df["entryDate"].dt.year
     df["entry_week"] = df["entryDate"].dt.isocalendar().week
@@ -631,7 +638,7 @@ def create_hourly_fastpark_actuals(master: pd.DataFrame) -> pd.DataFrame:
     hourly["date"] = hourly["datetime_hour"].dt.normalize()
     hourly["hour"] = hourly["datetime_hour"].dt.hour
     hourly["weekday"] = hourly["datetime_hour"].dt.day_name()
-    hourly["weekday_num"] = hourly["datetime_hour"].dt.weekday
+    hourly["weekday_num"] = hourly["datetime_hour"].dt.day_of_week
     hourly["month"] = hourly["datetime_hour"].dt.month
 
     return hourly
@@ -1556,7 +1563,7 @@ def previous_same_weekdays(
     result = df[
         (df["date"] < target_date)
         & (df["date"] < cutoff_date)
-        & (df["date"].dt.weekday == target_date.weekday())
+        & (df["date"].dt.day_of_week == target_date.day_of_week)
     ].sort_values("date")
 
     # Return the last 'n' occurrences.
@@ -1716,7 +1723,7 @@ def get_weekday_month_history(
     history = df[
         (df["date"] < target_date_norm)
         & (df["date"] < cutoff_date_norm)
-        & (df["date"].dt.weekday == weekday)
+        & (df["date"].dt.day_of_week == weekday)
         & (df["date"].dt.month == month)
     ].sort_values("date").tail(max_n) # Take up to max_n most recent occurrences.
 
@@ -2551,7 +2558,7 @@ def build_hourly_profile(
     target_date = pd.to_datetime(target_date).normalize()
     cutoff_date = pd.to_datetime(cutoff_timestamp).normalize()
 
-    weekday = target_date.weekday()
+    weekday = target_date.day_of_week
 
     df = hourly_actuals
 
@@ -2861,7 +2868,11 @@ def update_rolling_transactions(daily_df, wb):
 def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, actual_exits):
     today = datetime.now()
     user = config["db_username"]
-    base_path = Path(f"C:/Users/{user}") / config["legacy_base_path"]
+    base_path = Path(config["output_base_path"])
+    daily_output_path = base_path / "Daily Forecast Output"
+    dwh_local_daily_output_path = daily_output_path
+    base_path.mkdir(parents=True, exist_ok=True)
+    daily_output_path.mkdir(parents=True, exist_ok=True)
     is_monday = (today.weekday() == 0)
     is_weekly_run = (config["toggle_weekly"] or is_monday)
     is_accuracy_run = (config["toggle_accuracy"] or is_monday)
@@ -2890,17 +2901,16 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
             ]
         ].copy()
 
-        legacy_daily.rename(
+        legacy_daily = legacy_daily.rename(
             columns={
                 "target_date": "",
                 "entry_bookings": "booking_entries",
                 "exit_bookings": "booking_exits",
-            },
-            inplace=True,
+            }
         )
 
         legacy_daily.set_index("").to_csv(
-            base_path / "Daily Forecast Output" / f"{today_str}_daily_forecast.csv"
+            daily_output_path / f"{today_str}_daily_forecast.csv"
         )
 
 
@@ -2918,7 +2928,7 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
             "Entries": comb["entry_forecast_hourly"],
             "Exits": comb["exit_forecast_hourly"],
         })
-        flat_leg.to_csv(base_path / "Daily Forecast Output" / f"{today_str}_daily_forecast_DWH.csv", index=False)
+        flat_leg.to_csv(dwh_local_daily_output_path / f"{today_str}_daily_forecast_DWH.csv", index=False)
         if config["toggle_dwh"]:
             dwh_path = rf"\\BIPOEVSAPP01\FilesForUpload\BusinessAnalytics\FastParkForecast\FP_Forecast_output_{today.strftime('%Y%m%d')}.csv"
             flat_leg.to_csv(dwh_path, index=False)
@@ -2943,7 +2953,7 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
             # 6. Weekly Logic
             if is_weekly_run:
                 flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output Weekly.csv", index=False)
-                flat_leg.to_csv("FastPark Hourly Forecast Output Weekly.csv", index=False)
+                flat_leg.to_csv(base_path / "FastPark Hourly Forecast Output Weekly.csv", index=False)
 
         # 7. Accuracy Tracker
         if is_accuracy_run:

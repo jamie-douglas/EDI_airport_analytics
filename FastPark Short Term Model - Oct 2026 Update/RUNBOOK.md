@@ -13,26 +13,45 @@ Primary audience:
 
 - 05 Production Forecast/run_simplified_fastpark_shortterm.ps1
 - 05 Production Forecast/simplified_fastpark_shortterm.py
+- FastPark Short-Term Model Rebuild 2025/FP_short_term_model.py
+- 06 Comparison Framework/compare_live_forecasts.py
+- 06 Comparison Framework/update_weekly_powerpoint.py
+- 06 Comparison Framework/Forecast accuracy/forecast accuracy.ipynb
 - 05 Production Forecast/create_forecast_weights.py
-- 05 Production Forecast/compare_live_forecasts.py
 
 ## How to run (normal daily process)
 
 Run this command from the repo root:
 
-    powershell -ExecutionPolicy Bypass -File "FastPark Short Term Model/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
+       powershell -ExecutionPolicy Bypass -File "FastPark Short Term Model Oct 2026/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
+
+Optional launcher switches:
+
+- -ForceMondayTasks: run Monday-only steps even when today is not Monday
+- -NoPause: do not pause before exit when run outside VS Code
+- extra arguments after switches are passed through to simplified_fastpark_shortterm.py
 
 What the launcher does automatically:
 
 1. checks for a local venv
 2. creates or rebuilds it if missing/broken
-3. installs required Python packages
-4. runs the production forecast script
+3. upgrades pip and installs required Python packages
+4. validates pywin32 availability for PowerPoint automation
+5. runs new forecast model script
+6. runs old forecast model script
+7. runs live forecast comparison script
+8. on Monday (or with -ForceMondayTasks), runs the forecast accuracy notebook and updates/archives the weekly PowerPoint deck
 
 Venv location logic:
 
 1. Primary: %USERPROFILE%\Documents\Venv FastPark ST model\highs
 2. Fallback: 05 Production Forecast\highs (beside the launcher script)
+
+Launcher outputs:
+
+- prints a final run summary line in this format:
+
+         timestamp,duration_seconds,is_monday,force_monday_tasks,monday_tasks_status,pywin32_status
 
 ## Required configuration before running
 
@@ -61,6 +80,14 @@ Update these values in PRODUCTION_CONFIG in:
 Testing tip:
 
 - turn off toggle_dwh, toggle_workforce, and other unneeded toggles for test runs
+
+### Monday-only automation dependencies
+
+- Monday tasks require both of the following paths to be valid and accessible:
+- 06 Comparison Framework/Forecast accuracy/forecast accuracy.ipynb
+- 06 Comparison Framework/update_weekly_powerpoint.py
+
+If you are testing forecast generation only, run on a non-Monday or avoid -ForceMondayTasks.
 
 ### Output paths
 
@@ -130,7 +157,7 @@ Fix:
 1. verify forecast_weights_path in PRODUCTION_CONFIG
 2. if weights need refresh, run:
 
-       python "FastPark Short Term Model/05 Production Forecast/create_forecast_weights.py"
+       python "FastPark Short Term Model Oct 2026/05 Production Forecast/create_forecast_weights.py"
 
 ### 6) output path/file permission errors
 
@@ -142,10 +169,34 @@ Fix:
 
 1. Ensure files are not currently open
 2. verify output folders exist
-2. verify write access to configured paths
-3. turn off unneeded output toggles for testing
+3. verify write access to configured paths
+4. turn off unneeded output toggles for testing
 
-### 7) script works in one location but not another
+### 7) old model script not found
+
+Symptom:
+
+- launcher fails on "Old forecast model" step with script not found
+
+Fix:
+
+1. confirm sibling folder exists: FastPark Short-Term Model Rebuild 2025
+2. confirm file exists: FP_short_term_model.py
+3. keep FastPark Short Term Model Oct 2026 and FastPark Short-Term Model Rebuild 2025 under the same parent folder
+
+### 8) forecast accuracy notebook step fails
+
+Symptom:
+
+- Monday-only notebook step fails during execution
+
+Fix:
+
+1. rerun launcher to allow notebook packages install (jupyter/nbconvert/nbclient/nbformat/ipykernel)
+2. verify notebook path exists under 06 Comparison Framework/Forecast accuracy
+3. for daily operations, rerun without forcing Monday tasks
+
+### 9) script works in one location but not another
 
 Symptom:
 
@@ -154,7 +205,7 @@ Symptom:
 Fix:
 
 1. update output paths and forecast_weights_path for new location
-2. verify all four active production files moved together
+2. verify launcher-linked scripts and notebook paths moved together
 3. verify external utilities are available if still importing from shared modules
 
 ## Detailed process map (forecast pipeline)
@@ -203,22 +254,26 @@ This map describes the production forecast execution inside:
 2. Save legacy-format outputs if save_legacy_outputs is enabled.
 3. Run optional output packs using toggle_workforce, toggle_dwh, toggle_accuracy, toggle_weekly.
 
-### Phase G: Post-run validation
+### Phase G: Comparison and governance steps
+
+1. Run old model baseline script for side-by-side comparability.
+2. Run live forecast comparison script in 06 Comparison Framework.
+3. On Monday (or forced), execute forecast accuracy notebook and PowerPoint archive/update workflow.
+
+### Phase H: Post-run validation
 
 1. Confirm output files exist in configured destinations.
 2. Review high-level totals and spot-check first rows.
-3. Optionally run live comparison script:
-
-       python "FastPark Short Term Model/05 Production Forecast/compare_live_forecasts.py"
+3. Review launcher run summary fields for Monday and pywin32 status.
 
 ## Refresh workflow (when re-training/re-calibrating)
 
 Use this path when upstream behavior changed and you want updated production weights.
 
-1. python "FastPark Short Term Model/01 Historical Analysis/fastpark_forecast_analysis.py"
-2. python "FastPark Short Term Model/02 Simulation Gen 1/fastpark_forecast_simulation.py"
-3. python "FastPark Short Term Model/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
-4. python "FastPark Short Term Model/05 Production Forecast/create_forecast_weights.py"
+1. python "FastPark Short Term Model Oct 2026/01 Historical Analysis/fastpark_forecast_analysis.py"
+2. python "FastPark Short Term Model Oct 2026/02 Simulation Gen 1/fastpark_forecast_simulation.py"
+3. python "FastPark Short Term Model Oct 2026/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
+4. python "FastPark Short Term Model Oct 2026/05 Production Forecast/create_forecast_weights.py"
 5. rerun launcher for production outputs
 
 ## Change control recommendation
