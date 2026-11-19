@@ -1,21 +1,36 @@
-#Environment variables
-
+# --- Secrets & environments -------------------------------------------------
 .env
+.venv/
+venv/
+*.egg-info/
+build/
 
-#Python cache
+# --- Python / Jupyter / editor ----------------------------------------------
 __pycache__/
 *.pyc
-
-#VS Code settings
+.ipynb_checkpoints/
 .vscode/
 
-#Optional: ignore cached data
-data/staged/
+# --- Inputs and outputs are never committed ---------------------------------
+# (the empty folders are kept with a .gitkeep file)
+**/inputs/**
+**/outputs/**
+**/Outputs/**
+!**/inputs/.gitkeep
+!**/outputs/.gitkeep
+!**/Outputs/.gitkeep
+
+# --- Caches, logs, Office temp files, autosaves -----------------------------
+*.pkl
+**/.forecast_cache/
+*.log
+~$*
+*__bak_*
+
+# --- Safety net: no data files anywhere... ----------------------------------
+*.xlsx
+*.xls
+*.csv
 *.parquet
-
-# Generated outputs
-**/outputs/**/*.xlsx
-**/outputs/**/*.csv
-
-# FastPark inputs
-FastPark Short Term Model - Oct 2026 Update/05 Production Forecast/inputs/*.xlsx
+# ...except small model config the code needs (e.g. forecast_weights.csv)
+!**/config/*.csv
