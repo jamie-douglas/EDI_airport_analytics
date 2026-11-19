@@ -76,6 +76,24 @@ DEFAULT_DB_USERNAME = (
 
 
 PRODUCTION_CONFIG = {
+    # --- Christmas adjustment ---
+    # True = after the daily forecast is built, replace the Christmas / New Year
+    # window (Friday before Christmas to Sunday after New Year) with the
+    # Christmas-adjusted figures from 07 Christmas Adjustment, BEFORE the hourly
+    # forecast and all outputs are created. The workings are saved to
+    # "07 Christmas Adjustment/outputs/christmas_daily_forecast_<date>.*".
+    # Has no effect when the forecast window doesn't reach Christmas.
+    "toggle_christmas_adjustment": True,
+    "christmas_adjustment_dir": PROJECT_ROOT.parent / "07 Christmas Adjustment",
+
+    # --- Manual uplifts ---
+    # True = after the daily forecast (and Christmas adjustment) is built, apply
+    # the active rows in config/manual_adjustments.xlsx (sheet "Adjustments")
+    # BEFORE the hourly split. See the "Guide" sheet in that workbook for the
+    # options. The model figures are kept in *_forecast_pre_manual columns.
+    "toggle_manual_adjustments": False,
+    "manual_adjustments_path": PRODUCTION_CONFIG_DIR / "manual_adjustments.xlsx",
+
     # --- Database connection ---
     # The DSN must exist in the environment where this script runs.
     "db_dsn": "AzureConnection",
@@ -141,6 +159,37 @@ PRODUCTION_CONFIG = {
     "hourly_forecast_output_file": PRODUCTION_STANDARD_OUTPUT_DIR / "fastpark_hourly_forecast.csv",
     "output_base_path": PRODUCTION_LEGACY_OUTPUT_DIR,
 }
+
+
+def _build_corporate_path_candidates(path: Path) -> List[Path]:
+    """Return Edinburgh/OneDrive variants for paths under a corporate root."""
+    corp_names = [
+        "Edinburgh Airport Limited",
+        "OneDrive - Edinburgh Airport Limited",
+    ]
+
+    parts = list(path.parts)
+    corp_idx = next((idx for idx, part in enumerate(parts) if part in corp_names), None)
+
+    if corp_idx is None or corp_idx < 3:
+        return [path]
+
+    user_root = Path(parts[0], parts[1], parts[2])
+    suffix = Path(*parts[corp_idx + 1:])
+
+    return [
+        user_root / "Edinburgh Airport Limited" / suffix,
+        user_root / "OneDrive - Edinburgh Airport Limited" / suffix,
+    ]
+
+
+def resolve_corporate_output_path(path: Path) -> Path:
+    """Pick Edinburgh path first, then OneDrive, preferring the first existing path."""
+    candidates = _build_corporate_path_candidates(path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 # =============================================================================
 # 2. UTILITY FUNCTIONS
@@ -2868,7 +2917,8 @@ def update_rolling_transactions(daily_df, wb):
 def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, actual_exits):
     today = datetime.now()
     user = config["db_username"]
-    base_path = Path(config["output_base_path"])
+
+    base_path = resolve_corporate_output_path(Path(config["output_base_path"]))
     daily_output_path = base_path / "Daily Forecast Output"
     dwh_local_daily_output_path = daily_output_path
     base_path.mkdir(parents=True, exist_ok=True)
@@ -2879,8 +2929,13 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
     
     # 1. NEW SCRIPT NATIVE OUTPUTS
     if config.get("save_new_outputs"):
-        hourly_df.to_csv(config["hourly_forecast_output_file"], index=False)
-        daily_df.to_csv(config["daily_forecast_output_file"], index=False)
+        hourly_output_path = resolve_corporate_output_path(Path(config["hourly_forecast_output_file"]))
+        daily_output_file = resolve_corporate_output_path(Path(config["daily_forecast_output_file"]))
+        hourly_output_path.parent.mkdir(parents=True, exist_ok=True)
+        daily_output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        hourly_df.to_csv(hourly_output_path, index=False)
+        daily_df.to_csv(daily_output_file, index=False)
 
     # 2. LEGACY OUTPUTS
     if config.get("save_legacy_outputs"):
@@ -2948,7 +3003,44 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
 
         # 5. Workforce Daily
         if config["toggle_workforce"]:
-            wf_path = Path(f"C:/Users/{user}/Edinburgh Airport Limited/Workforce Management - FastPark Forecast")
+            corp_names = [
+                "Edinburgh Airport Limited",
+                "OneDrive - Edinburgh Airport Limited",
+            ]
+            base_parts = list(base_path.parts)
+            corp_idx = next((idx for idx, part in enumerate(base_parts) if part in corp_names), None)
+
+            if corp_idx is not None and corp_idx >= 3:
+                user_root = Path(base_parts[0], base_parts[1], base_parts[2])
+                corp_roots = [
+                    user_root / "Edinburgh Airport Limited",
+                    user_root / "OneDrive - Edinburgh Airport Limited",
+                ]
+            else:
+                corp_roots = [
+                    Path(f"C:/Users/{user}/Edinburgh Airport Limited"),
+                    Path(f"C:/Users/{user}/OneDrive - Edinburgh Airport Limited"),
+                ]
+
+            wf_suffixes = [
+                Path("Workforce Management - FastPark Forecast"),
+                Path("Workforce Management - Documents/EASL/FastPark"),
+            ]
+
+            wf_candidates = [
+                root / suffix
+                for root in corp_roots
+                for suffix in wf_suffixes
+            ]
+
+            wf_path = next((path for path in wf_candidates if path.exists()), None)
+            if wf_path is None:
+                checked_paths = "\n - ".join(str(path) for path in wf_candidates)
+                raise FileNotFoundError(
+                    "Workforce folder not found. Checked:\n"
+                    f" - {checked_paths}"
+                )
+
             flat_leg.to_csv(wf_path / "FastPark Hourly Forecast Output.csv", index=False)
             # 6. Weekly Logic
             if is_weekly_run:
@@ -3011,6 +3103,234 @@ def export_all_outputs(daily_df, hourly_df, config, bookings, actual_entries, ac
 
 
 # =============================================================================
+# 6b. CHRISTMAS ADJUSTMENT (optional, see toggle_christmas_adjustment)
+# =============================================================================
+
+def apply_christmas_adjustment(daily_df: pd.DataFrame, config: dict, save_workings: bool = True) -> pd.DataFrame:
+    """
+    Replace the Christmas-window daily forecasts with the Christmas-adjusted
+    figures from 07 Christmas Adjustment/christmas_forecast_adjustment.py.
+
+    Returns the daily table with the same columns; only entry_forecast and
+    exit_forecast change, and only on the Christmas window days. If the
+    adjustment fails for any reason the model forecast is kept and a warning
+    is printed, so the rest of the daily run (hourly, DWH, workforce) still
+    completes.
+    """
+    adjust_dir = Path(config["christmas_adjustment_dir"])
+    try:
+        if str(adjust_dir) not in sys.path:
+            sys.path.insert(0, str(adjust_dir))
+        import christmas_forecast_adjustment as xmas
+
+        adjusted, _, _ = xmas.adjust_daily_forecast(
+            daily_df,
+            run_date=config["current_run_date"],
+            output_dir=adjust_dir / "outputs",
+            # Pass this module in so the adjustment uses the same loaders and
+            # config without importing the production script a second time.
+            production_module=sys.modules[__name__],
+            source_label=f"production run {pd.Timestamp(config['current_run_date']):%Y-%m-%d}",
+            save=save_workings,
+        )
+        return adjusted
+    except Exception as ex:
+        print("\n" + "!" * 80)
+        print("WARNING: CHRISTMAS ADJUSTMENT FAILED - USING THE UNADJUSTED MODEL FORECAST")
+        print(f"Reason: {ex.__class__.__name__}: {ex}")
+        print(f"Adjustment folder: {adjust_dir}")
+        print("!" * 80 + "\n")
+        if os.environ.get("FASTPARK_DEBUG_TRACEBACK") == "1":
+            import traceback
+            traceback.print_exc()
+        return daily_df
+
+
+# --- Manual uplifts ---
+
+_WEEKDAY_LOOKUP = {
+    "mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+    "wed": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3, "thursday": 3,
+    "fri": 4, "friday": 4, "sat": 5, "saturday": 5, "sun": 6, "sunday": 6,
+}
+
+
+def _parse_weekdays(text) -> List[int] | None:
+    """'Fri|Sat' or 'fri, saturday' -> [4, 5]. Blank -> None (every day)."""
+    if text is None or pd.isna(text) or str(text).strip() == "":
+        return None
+    days = []
+    for part in str(text).replace(",", "|").replace(";", "|").split("|"):
+        key = part.strip().lower()
+        if not key:
+            continue
+        if key not in _WEEKDAY_LOOKUP:
+            raise ValueError(f"unknown weekday '{part.strip()}'")
+        days.append(_WEEKDAY_LOOKUP[key])
+    return sorted(set(days)) or None
+
+
+def _to_date(value) -> pd.Timestamp:
+    """Excel date cells pass straight through; text is read as UK dd/mm/yyyy
+    unless it is ISO yyyy-mm-dd."""
+    if isinstance(value, str):
+        text = value.strip()
+        iso = len(text) >= 4 and text[:4].isdigit()
+        return pd.to_datetime(text, dayfirst=not iso).normalize()
+    return pd.to_datetime(value).normalize()
+
+
+def _yes(value, default: bool = False) -> bool:
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return default
+    return str(value).strip().lower() in {"1", "1.0", "y", "yes", "true"}
+
+
+def apply_manual_adjustments(
+    daily_df: pd.DataFrame,
+    daily_actuals_df: pd.DataFrame,
+    config: dict,
+    protected_dates: set | None = None,
+) -> pd.DataFrame:
+    """
+    Apply the manual uplifts in config["manual_adjustments_path"] to the daily
+    forecast, before the hourly split.
+
+    Each active row on the "Adjustments" sheet picks a flow (entry / exit /
+    both), a date range and optional weekdays, then either:
+      - pct:    multiplies each matching forecast day by (1 + value / 100);
+      - target: scales the matching forecast days by one factor so that
+                actuals already recorded + fixed days + adjusted forecast
+                = value. The weekday shape is kept; only the level moves.
+
+    Rows are applied top to bottom, so a later row works on the result of the
+    earlier ones. Days changed by the Christmas adjustment (`protected_dates`)
+    are left alone unless the row says include_christmas = Y; for a target
+    they still count towards the total at their Christmas-adjusted value.
+
+    A bad row is skipped with a warning; it never stops the run.
+    """
+    path = Path(config["manual_adjustments_path"])
+    run_date = pd.to_datetime(config["current_run_date"]).normalize()
+    protected = {pd.Timestamp(d).normalize() for d in (protected_dates or set())}
+
+    try:
+        rows = pd.read_excel(path, sheet_name="Adjustments")
+    except Exception as ex:
+        print(f"WARNING: manual adjustments not applied - could not read {path}: "
+              f"{ex.__class__.__name__}: {ex}")
+        return daily_df
+
+    rows.columns = [str(c).strip().lower() for c in rows.columns]
+    if "active" not in rows.columns:
+        print(f"WARNING: manual adjustments not applied - no 'active' column in {path}")
+        return daily_df
+    rows = rows[rows["active"].apply(_yes)]
+
+    df = daily_df.copy()
+    df["target_date"] = pd.to_datetime(df["target_date"]).dt.normalize()
+    for flow in ("entry", "exit"):
+        df[f"{flow}_forecast_pre_manual"] = df[f"{flow}_forecast"]
+        df[f"{flow}_manual_adjustment"] = ""
+
+    if rows.empty:
+        print("Manual adjustments: no active rows.")
+        return df
+
+    actuals = daily_actuals_df.copy()
+    actuals["date"] = pd.to_datetime(actuals["date"]).dt.normalize()
+    actuals = actuals.set_index("date")
+    horizon_end = df["target_date"].max()
+
+    print("\nManual adjustments:")
+    for excel_row, row in rows.iterrows():
+        label = f"row {excel_row + 2}"  # +2 = header row + 1-based Excel rows
+        try:
+            flow_in = str(row.get("flow", "")).strip().lower()
+            method = str(row.get("method", "")).strip().lower()
+            value = pd.to_numeric(row.get("value"), errors="coerce")
+            start = _to_date(row.get("start_date"))
+            end = _to_date(row.get("end_date"))
+            weekdays = _parse_weekdays(row.get("weekdays"))
+            include_xmas = _yes(row.get("include_christmas"))
+            note = "" if pd.isna(row.get("note")) else str(row.get("note")).strip()
+
+            if flow_in not in {"entry", "exit", "both"}:
+                raise ValueError(f"flow must be entry, exit or both (got '{flow_in}')")
+            if method not in {"pct", "target"}:
+                raise ValueError(f"method must be pct or target (got '{method}')")
+            if method == "target" and flow_in == "both":
+                raise ValueError("a target needs flow = entry or exit, not both")
+            if pd.isna(value) or pd.isna(start) or pd.isna(end) or end < start:
+                raise ValueError("value, start_date and end_date are required and end must be on/after start")
+            if method == "pct" and value <= -100:
+                raise ValueError("pct must be above -100")
+
+            label = f"{label} ({note})" if note else label
+            tag = f"{method} {value:g}{'%' if method == 'pct' else ''}" + (f" [{note}]" if note else "")
+
+            all_days = pd.date_range(start, end, freq="D")
+            if weekdays is not None:
+                all_days = all_days[all_days.dayofweek.isin(weekdays)]
+            if len(all_days) == 0:
+                raise ValueError("no days match the date range / weekdays")
+
+            in_forecast = df["target_date"].isin(all_days)
+            locked = df["target_date"].isin(protected) & (not include_xmas)
+            adjust_mask = in_forecast & ~locked
+
+            for flow in (["entry", "exit"] if flow_in == "both" else [flow_in]):
+                col = f"{flow}_forecast"
+
+                if method == "pct":
+                    factor = 1 + value / 100
+                    if not adjust_mask.any():
+                        print(f"  {label}: {flow} - no forecast days in range, nothing changed")
+                        continue
+                else:
+                    past_days = all_days[all_days < run_date]
+                    beyond = all_days[all_days > horizon_end]
+                    if len(beyond):
+                        raise ValueError(
+                            f"{len(beyond)} day(s) fall after the forecast horizon "
+                            f"({horizon_end:%d-%b-%Y}) - target can't be hit; "
+                            "run nearer the period or use pct"
+                        )
+                    actual_col = "entries" if flow == "entry" else "exits"
+                    actual_sum = float(actuals.reindex(past_days)[actual_col].fillna(0).sum())
+                    fixed_sum = float(df.loc[in_forecast & locked, col].sum())
+                    adjustable_sum = float(df.loc[adjust_mask, col].sum())
+                    needed = value - actual_sum - fixed_sum
+                    if adjustable_sum <= 0:
+                        raise ValueError("no adjustable forecast days left in range")
+                    if needed < 0:
+                        raise ValueError(
+                            f"actuals ({actual_sum:,.0f}) + fixed days ({fixed_sum:,.0f}) "
+                            f"already exceed the target {value:,.0f}"
+                        )
+                    factor = needed / adjustable_sum
+
+                before = float(df.loc[adjust_mask, col].sum())
+                df.loc[adjust_mask, col] = (df.loc[adjust_mask, col] * factor).clip(lower=0)
+                after = float(df.loc[adjust_mask, col].sum())
+                notes = df.loc[adjust_mask, f"{flow}_manual_adjustment"]
+                df.loc[adjust_mask, f"{flow}_manual_adjustment"] = np.where(
+                    notes.eq(""), tag, notes + "; " + tag
+                )
+                extra = ""
+                if method == "target":
+                    extra = (f" | actuals {actual_sum:,.0f} + fixed {fixed_sum:,.0f}"
+                             f" + adjusted {after:,.0f} = {actual_sum + fixed_sum + after:,.0f}")
+                print(f"  {label}: {flow} x{factor:.4f} on {int(adjust_mask.sum())} day(s), "
+                      f"{before:,.0f} -> {after:,.0f}{extra}")
+
+        except Exception as ex:
+            print(f"  WARNING {label} skipped: {ex}")
+
+    return df
+
+
+# =============================================================================
 # 7. MAIN EXECUTION PIPELINE
 # =============================================================================
 
@@ -3060,6 +3380,36 @@ def run_production_forecast(config: dict, save_outputs=False) -> Tuple[pd.DataFr
     daily_forecasts = generate_daily_forecasts(data_for_forecast)
     t4 = step(t3, f"Generated daily forecasts ({len(daily_forecasts)} records)")
 
+    # --- 5b. Christmas Adjustment (optional) ---
+    # Replaces the Christmas-window daily figures before the hourly split, so
+    # every output below (daily, hourly, DWH, workforce, tracker) carries them.
+    pre_christmas = daily_forecasts[["target_date", "entry_forecast", "exit_forecast"]].copy()
+    if config.get("toggle_christmas_adjustment"):
+        daily_forecasts = apply_christmas_adjustment(
+            daily_forecasts, config, save_workings=save_outputs
+        )
+        t4 = step(t4, "Applied Christmas adjustment")
+
+    # --- 5c. Manual uplifts (optional) ---
+    # Rows from config/manual_adjustments.xlsx. Days the Christmas step changed
+    # are protected unless a row opts in with include_christmas = Y.
+    if config.get("toggle_manual_adjustments"):
+        compare = pre_christmas.merge(
+            daily_forecasts[["target_date", "entry_forecast", "exit_forecast"]],
+            on="target_date", suffixes=("_before", "_after"),
+        )
+        changed = (
+            ~np.isclose(compare["entry_forecast_before"], compare["entry_forecast_after"], equal_nan=True)
+            | ~np.isclose(compare["exit_forecast_before"], compare["exit_forecast_after"], equal_nan=True)
+        )
+        daily_forecasts = apply_manual_adjustments(
+            daily_forecasts,
+            data_for_forecast.daily_actuals_df,
+            config,
+            protected_dates=set(compare.loc[changed, "target_date"]),
+        )
+        t4 = step(t4, "Applied manual adjustments")
+
     # --- 6. Generate Hourly Forecasts ---
     hourly_forecasts = generate_hourly_forecasts(daily_forecasts, data_for_forecast)
     t5 = step(t4, f"Generated hourly forecasts ({len(hourly_forecasts)} records)")
@@ -3085,6 +3435,31 @@ def run_production_forecast(config: dict, save_outputs=False) -> Tuple[pd.DataFr
     return daily_forecasts, hourly_forecasts
 
 
+def _build_user_friendly_error(ex: Exception) -> str:
+    """Return a concise, actionable error message for common runtime failures."""
+    msg = str(ex)
+    flattened = " ".join(msg.split())
+
+    if (
+        "FA004" in flattened
+        or "ActiveDirectoryIntegrated" in flattened
+        or "WindowsIntegratedAuthExchange" in flattened
+    ):
+        return (
+            "Database authentication failed via Entra ID ActiveDirectoryIntegrated. "
+            "This account appears to require interactive or different auth settings "
+            "(common with managed/non-federated accounts)."
+        )
+
+    if "pyodbc" in flattened.lower() or "dbapi" in flattened.lower():
+        return (
+            "Database connection/query failed (ODBC/SQL). "
+            "Check DSN, auth mode, network/VPN, and SQL permissions."
+        )
+
+    return flattened or ex.__class__.__name__
+
+
 # =============================================================================
 # 8. SCRIPT ENTRY POINT
 # =============================================================================
@@ -3101,10 +3476,26 @@ if __name__ == "__main__":
     # exit,0,0,0.8,0.0,...
     #
 
-    # Execute the production forecast pipeline.
-    daily_forecast_output, hourly_forecast_output = run_production_forecast(PRODUCTION_CONFIG, save_outputs=True)
+    try:
+        # Execute the production forecast pipeline.
+        daily_forecast_output, hourly_forecast_output = run_production_forecast(PRODUCTION_CONFIG, save_outputs=True)
 
-    print("\nDaily Forecast Output (first 5 rows):")
-    print(daily_forecast_output.head())
-    print("\nHourly Forecast Output (first 5 rows):")
-    print(hourly_forecast_output.head())
+        print("\nDaily Forecast Output (first 5 rows):")
+        print(daily_forecast_output.head())
+        print("\nHourly Forecast Output (first 5 rows):")
+        print(hourly_forecast_output.head())
+    except KeyboardInterrupt:
+        print("\nRun cancelled by user.")
+        sys.exit(130)
+    except Exception as ex:
+        print("\n" + "=" * 80)
+        print("FASTPARK PRODUCTION FORECAST FAILED")
+        print("=" * 80)
+        print(f"Reason: {_build_user_friendly_error(ex)}")
+        print(f"Error type: {ex.__class__.__name__}")
+        print("\nSet FASTPARK_DEBUG_TRACEBACK=1 to print the full traceback for debugging.")
+        if os.environ.get("FASTPARK_DEBUG_TRACEBACK") == "1":
+            import traceback
+
+            traceback.print_exc()
+        sys.exit(1)

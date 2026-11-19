@@ -30,7 +30,17 @@ function Exit-Script {
 
     if ($pauseOnExit) {
         Write-Output ""
-        Read-Host "Press Enter to close this window" | Out-Null
+        try {
+            if ([Environment]::UserInteractive) {
+                Read-Host "Press Enter to close this window" | Out-Null
+            }
+            else {
+                Write-Output "No interactive console detected; skipping pause."
+            }
+        }
+        catch {
+            Write-Output "Pause prompt unavailable in this host; closing now."
+        }
     }
 
     exit $Code
@@ -40,6 +50,163 @@ function Fail {
     param([string]$Message)
     Write-Output "ERROR: $Message"
     Exit-Script -Code 1
+}
+
+function Test-PythonRuntime {
+    param([string]$PythonExecutable)
+
+    if (-not $PythonExecutable -or -not (Test-Path $PythonExecutable)) {
+        return $false
+    }
+
+    try {
+        & $PythonExecutable -c "import encodings, site" 2>$null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Resolve-BasePython {
+    $candidates = @()
+
+    # 1) Explicit override for locked-down machines.
+    if ($env:FASTPARK_BASE_PYTHON) {
+        $candidates += $env:FASTPARK_BASE_PYTHON
+    }
+
+    # 2) If launched from an activated venv, try that interpreter first.
+    if ($env:VIRTUAL_ENV) {
+        $activeVenvPython = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+        $candidates += $activeVenvPython
+    }
+
+    # 2b) uv-managed Python (if uv is installed).
+    $uvCommand = Get-Command uv.exe -ErrorAction SilentlyContinue
+    if ($uvCommand) {
+        try {
+            $uvResolved = & $uvCommand.Source python find 2>$null
+            if ($LASTEXITCODE -eq 0 -and $uvResolved) {
+                $uvCandidate = ($uvResolved | Select-Object -Last 1).Trim()
+                if ($uvCandidate) {
+                    $candidates += $uvCandidate
+                }
+            }
+        }
+        catch {
+            # Continue with other sources.
+        }
+    }
+
+    # 3) Python launcher (usually most reliable on Windows).
+    $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        try {
+            $resolved = & $pyLauncher.Source -3 -c "import sys, encodings; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $resolved) {
+                $candidate = ($resolved | Select-Object -Last 1).Trim()
+                if ($candidate) {
+                    $candidates += $candidate
+                }
+            }
+        }
+        catch {
+            # Fall through to PATH-based discovery.
+        }
+    }
+
+    # 4) PATH python(s).
+    $pathPythons = Get-Command python.exe -All -ErrorAction SilentlyContinue
+    if ($pathPythons) {
+        $candidates += ($pathPythons | Select-Object -ExpandProperty Source)
+    }
+
+    # 5) Python installs registered in Windows registry (PEP 514).
+    $registryRoots = @(
+        "HKCU:\Software\Python\PythonCore",
+        "HKLM:\Software\Python\PythonCore",
+        "HKLM:\Software\Wow6432Node\Python\PythonCore"
+    )
+
+    foreach ($root in $registryRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+
+        $versions = Get-ChildItem -Path $root -ErrorAction SilentlyContinue
+        foreach ($version in $versions) {
+            $installPathKey = Join-Path $version.PSPath "InstallPath"
+            if (-not (Test-Path $installPathKey)) {
+                continue
+            }
+
+            try {
+                $installInfo = Get-ItemProperty -Path $installPathKey -ErrorAction SilentlyContinue
+                if ($installInfo.'(default)') {
+                    $candidates += (Join-Path $installInfo.'(default)' "python.exe")
+                }
+                if ($installInfo.ExecutablePath) {
+                    $candidates += $installInfo.ExecutablePath
+                }
+            }
+            catch {
+                # Keep searching other keys.
+            }
+        }
+    }
+
+    # 6) Common per-user install location if nothing is on PATH.
+    $userPythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
+    if (Test-Path $userPythonRoot) {
+        $installedPythons = Get-ChildItem -Path $userPythonRoot -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+
+        foreach ($pythonDir in $installedPythons) {
+            $candidates += (Join-Path $pythonDir.FullName "python.exe")
+        }
+    }
+
+    # 7) Common machine-wide install locations.
+    $machinePythonRoots = @(
+        (Join-Path $env:ProgramFiles "Python"),
+        (Join-Path ${env:ProgramFiles(x86)} "Python")
+    )
+
+    foreach ($root in $machinePythonRoots) {
+        if (-not $root -or -not (Test-Path $root)) {
+            continue
+        }
+
+        $installedPythons = Get-ChildItem -Path $root -Directory -Filter "Python*" -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+
+        foreach ($pythonDir in $installedPythons) {
+            $candidates += (Join-Path $pythonDir.FullName "python.exe")
+        }
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if (Test-PythonRuntime -PythonExecutable $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Install-UvPython {
+    param([string]$Version = "3.11")
+
+    $uvCommand = Get-Command uv.exe -ErrorAction SilentlyContinue
+    if (-not $uvCommand) {
+        return $false
+    }
+
+    Write-Output "No healthy Python found. Attempting uv-managed install for Python $Version..."
+    & $uvCommand.Source python install $Version
+
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Invoke-PythonScript {
@@ -119,6 +286,34 @@ function Install-PowerPointAutomationPackages {
     $script:pywin32Status = "installed"
 }
 
+function Install-ChristmasAdjustmentPackages {
+    # The Christmas adjustment (07 Christmas Adjustment) draws a chart with
+    # matplotlib. Without it the adjustment fails and the model forecast is
+    # saved unadjusted, so make sure existing venvs have it too.
+    Write-Output "Checking Christmas adjustment packages..."
+
+    $matplotlibAvailable = $false
+    try {
+        & $venvPython -c "import matplotlib" 2>$null
+        $matplotlibAvailable = ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        $matplotlibAvailable = $false
+    }
+
+    if ($matplotlibAvailable) {
+        Write-Output "Christmas adjustment packages already available."
+        return
+    }
+
+    Write-Output "Installing matplotlib for the Christmas adjustment..."
+    & $venvPython -m pip install matplotlib
+
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Failed to install matplotlib for the Christmas adjustment."
+    }
+}
+
 function Invoke-ForecastAccuracyNotebook {
     param([string]$NotebookPath)
 
@@ -184,12 +379,18 @@ try {
     Write-Output "Venv path:    $venvPath"
     Write-Output ""
 
-    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) {
-        Fail "python.exe was not found on PATH. Install Python first."
+    $systemPython = Resolve-BasePython
+    if (-not $systemPython) {
+        if (Install-UvPython -Version "3.11") {
+            $systemPython = Resolve-BasePython
+        }
     }
 
-    $systemPython = $pythonCommand.Source
+    if (-not $systemPython) {
+        Fail "No healthy base Python interpreter was found. The launcher attempted uv install automatically. If using uv, run 'uv python install 3.11' manually and rerun, or set FASTPARK_BASE_PYTHON to a known good interpreter path. Otherwise install/repair Python so 'py -3' or 'python.exe' can import encodings."
+    }
+
+    Write-Output "Base Python: $systemPython"
     $recreateVenv = $false
 
     if (-not (Test-Path $venvPath)) {
@@ -205,9 +406,8 @@ try {
         $recreateVenv = $true
     }
     else {
-        & $venvPython --version | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Output "Virtual environment exists but failed validation."
+        if (-not (Test-PythonRuntime -PythonExecutable $venvPython)) {
+            Write-Output "Virtual environment exists but failed runtime validation (often due to missing encodings)."
             $recreateVenv = $true
         }
         else {
@@ -236,13 +436,14 @@ try {
         }
 
         Write-Output "Installing required packages..."
-        & $venvPython -m pip install numpy pandas openpyxl sqlalchemy pyodbc python-dotenv pywin32
+        & $venvPython -m pip install numpy pandas openpyxl sqlalchemy pyodbc python-dotenv pywin32 matplotlib
         if ($LASTEXITCODE -ne 0) {
             Fail "Failed to install required packages."
         }
     }
 
     Install-PowerPointAutomationPackages
+    Install-ChristmasAdjustmentPackages
 
     Invoke-PythonScript -StepName "New forecast model" -ScriptPath $modelScript -StepArguments $ForwardedPythonArguments
     Invoke-PythonScript -StepName "Old forecast model" -ScriptPath $oldModelScript

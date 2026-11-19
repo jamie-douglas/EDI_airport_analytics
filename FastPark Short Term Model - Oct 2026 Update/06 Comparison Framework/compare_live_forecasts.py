@@ -153,11 +153,10 @@ def load_forecasts(folder, model_name):
 
             if "Date" not in df.columns:
 
-                df.rename(
+                df = df.rename(
                     columns={
                         df.columns[0]: "Date"
-                    },
-                    inplace=True
+                    }
                 )
 
             entry_col = None

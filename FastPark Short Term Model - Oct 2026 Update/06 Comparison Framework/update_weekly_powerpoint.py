@@ -108,8 +108,27 @@ def write_accuracy_tab(target_ws, rows: list[tuple]) -> None:
             target_ws.cell(row=idx, column=col_idx).value = value
 
 
+def ensure_accuracy_tab(workbook, sheet_name: str):
+    """Ensure an accuracy tab exists with standard headers."""
+    if sheet_name in workbook.sheetnames:
+        return workbook[sheet_name]
+
+    ws = workbook.create_sheet(title=sheet_name)
+    headers = ["Date", "Actual", "21", "14", "7", "3", "1"]
+    for col_idx, header in enumerate(headers, start=1):
+        ws.cell(row=1, column=col_idx).value = header
+    return ws
+
+
+def sum_nullable(left, right):
+    """Sum numeric values while tolerating missing values."""
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
 def refresh_slide_data_workbook(source_accuracy_file: Path, slide_data_file: Path) -> None:
-    """Refresh Entries/Exits tabs from latest forecast accuracy output."""
+    """Refresh Entries/Exits/Total tabs from latest forecast accuracy output."""
     source_wb = load_workbook(source_accuracy_file, data_only=False)
     if "Forecast Accuracy" not in source_wb.sheetnames:
         raise ValueError(
@@ -131,6 +150,8 @@ def refresh_slide_data_workbook(source_accuracy_file: Path, slide_data_file: Pat
     if "Exits Accuracy" not in target_wb.sheetnames:
         raise ValueError(f"'Exits Accuracy' sheet not found in {slide_data_file}")
 
+    total_ws = ensure_accuracy_tab(target_wb, "Total Accuracy")
+
     entry_rows = []
     for date_val in entry_dates:
         key = to_date_key(date_val)
@@ -149,14 +170,44 @@ def refresh_slide_data_workbook(source_accuracy_file: Path, slide_data_file: Pat
             *exit_forecast.get(key, [None] * 5),
         ))
 
+    total_rows = []
+    all_dates = list(entry_dates)
+    seen_keys = {to_date_key(d) for d in entry_dates}
+    for date_val in exit_dates:
+        key = to_date_key(date_val)
+        if key not in seen_keys:
+            all_dates.append(date_val)
+            seen_keys.add(key)
+
+    for date_val in all_dates:
+        key = to_date_key(date_val)
+        entry_actual_val = entry_actual.get(key, [None] * 5)[0]
+        exit_actual_val = exit_actual.get(key, [None] * 5)[0]
+
+        entry_fc = entry_forecast.get(key, [None] * 5)
+        exit_fc = exit_forecast.get(key, [None] * 5)
+
+        total_forecast = [
+            sum_nullable(entry_fc[idx], exit_fc[idx])
+            for idx in range(5)
+        ]
+
+        total_rows.append((
+            date_val,
+            sum_nullable(entry_actual_val, exit_actual_val),
+            *total_forecast,
+        ))
+
     write_accuracy_tab(target_wb["Entries Accuracy"], entry_rows)
     write_accuracy_tab(target_wb["Exits Accuracy"], exit_rows)
+    write_accuracy_tab(total_ws, total_rows)
 
     target_wb.save(slide_data_file)
 
     print(f"Updated slide data workbook: {slide_data_file}")
     print(f"Entries rows written: {len(entry_rows)}")
     print(f"Exits rows written: {len(exit_rows)}")
+    print(f"Total rows written: {len(total_rows)}")
 
 
 def choose_deck(slides_dir: Path) -> Path:
@@ -181,13 +232,12 @@ def build_archive_path(archive_dir: Path, source_deck: Path) -> Path:
     return archive_dir / f"{source_deck.stem}_{date_stamp}{source_deck.suffix}"
 
 
-def refresh_powerpoint_links(deck_path: Path) -> None:
+def refresh_powerpoint_links(deck_path: Path) -> int:
     """Refresh linked content in a PowerPoint file via COM automation."""
     try:
         import win32com.client  # type: ignore
     except ImportError:
-        print("pywin32 is not installed. Skipping PowerPoint link refresh.")
-        return
+        raise RuntimeError("pywin32 is not installed. PowerPoint link refresh cannot run.")
 
     app = None
     pres = None
@@ -244,9 +294,10 @@ def refresh_powerpoint_links(deck_path: Path) -> None:
             print(f"Per-slide refresh counts: {per_slide}")
         else:
             print("Per-slide refresh counts: none")
+        return refreshed_shapes
 
     except Exception as exc:
-        print(f"PowerPoint auto-refresh warning: {exc}")
+        raise RuntimeError(f"PowerPoint auto-refresh failed for {deck_path}: {exc}") from exc
 
     finally:
         if pres is not None:
@@ -279,17 +330,18 @@ def main() -> int:
     refresh_slide_data_workbook(source_accuracy_file, slide_data_file)
 
     source_deck = choose_deck(slides_dir)
-    refresh_powerpoint_links(source_deck)
     archive_path = build_archive_path(archive_dir, source_deck)
-
     shutil.copy2(source_deck, archive_path)
+    refreshed_shapes = refresh_powerpoint_links(source_deck)
+
 
     print("Weekly PowerPoint step complete")
     print(f"Source accuracy: {source_accuracy_file}")
     print(f"Slide data file: {slide_data_file}")
     print(f"Source deck:  {source_deck}")
     print(f"Archive copy: {archive_path}")
-    print("Note: this updates the Excel data source and archives the deck.")
+    print(f"Linked/chart shapes refreshed in source deck: {refreshed_shapes}")
+    print("Note: this archives the old deck first, then updates and saves the source deck.")
 
     return 0
 
