@@ -1,0 +1,35 @@
+# Python packages used across EDI_airport_analytics.
+# Install with:  python -m pip install -r requirements.txt
+# Minimum versions are ones the code has run on. The FastPark production
+# launcher builds its own venv with a smaller set (see
+# FastPark/01 Short Term Model/05 Production Forecast/run_simplified_fastpark_shortterm.ps1).
+
+# --- Data and database ---
+pandas>=2.2
+numpy>=2.0
+SQLAlchemy>=2.0
+pyodbc>=5.0
+python-dotenv>=1.0
+python-dateutil>=2.9
+openpyxl>=3.1
+tabulate>=0.9
+
+# --- Charts ---
+matplotlib>=3.10
+seaborn>=0.13
+plotly>=6.0
+
+# --- Modelling ---
+scipy>=1.13
+scikit-learn>=1.5
+simpy>=4.1          # FastPark/04 Capacity simulation
+pyomo>=6.7          # prm_opt fleet optimisation
+highspy>=1.7        # HiGHS solver used by pyomo (appsi_highs)
+
+# --- Notebooks ---
+jupyter>=1.1
+ipykernel>=7.0
+nbconvert>=7.16
+
+# --- Windows only: PowerPoint automation in 06 Comparison Framework ---
+pywin32>=306; sys_platform == "win32"

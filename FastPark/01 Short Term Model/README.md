@@ -17,7 +17,7 @@ Only these production files are in the active runbook:
 1. 05 Production Forecast/run_simplified_fastpark_shortterm.ps1
 2. 05 Production Forecast/simplified_fastpark_shortterm.py
 3. 05 Production Forecast/create_forecast_weights.py
-4. 05 Production Forecast/compare_live_forecasts.py
+4. 06 Comparison Framework/compare_live_forecasts.py
 
 Note: 05 Production Forecast/create_forecast_parameters.py is currently not part of the active runbook.
 
@@ -88,7 +88,7 @@ Installed packages:
 
 Recommended command:
 
-powershell -ExecutionPolicy Bypass -File "FastPark Short Term Model/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
+powershell -ExecutionPolicy Bypass -File "FastPark/01 Short Term Model/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
 
 This is the primary operational command for day-to-day forecasting.
 
@@ -97,33 +97,35 @@ This is the primary operational command for day-to-day forecasting.
 Use this 4-step refresh path.
 
 1. Re-run historical analysis
-	 - python "FastPark Short Term Model/01 Historical Analysis/fastpark_forecast_analysis.py"
+	 - python "FastPark/01 Short Term Model/01 Historical Analysis/fastpark_forecast_analysis.py"
 
 2. Re-run Generation 1 simulation
-	 - python "FastPark Short Term Model/02 Simulation Gen 1/fastpark_forecast_simulation.py"
+	 - python "FastPark/01 Short Term Model/02 Simulation Gen 1/fastpark_forecast_simulation.py"
 
 3. Re-run Generation 2 simulation
-	 - python "FastPark Short Term Model/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
+	 - python "FastPark/01 Short Term Model/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
 
 4. Rebuild production weights
-	 - python "FastPark Short Term Model/05 Production Forecast/create_forecast_weights.py"
+	 - python "FastPark/01 Short Term Model/05 Production Forecast/create_forecast_weights.py"
 
 After step 4, run the production launcher again.
 
 Optional validation:
 
-- python "FastPark Short Term Model/05 Production Forecast/compare_live_forecasts.py"
+- python "FastPark/01 Short Term Model/06 Comparison Framework/compare_live_forecasts.py"
 
 ## Folder Structure
 
-FastPark Short Term Model/
+FastPark/01 Short Term Model/
+- 00 Utils/                 local database helpers used by the production model
 - 01 Historical Analysis/
 - 02 Simulation Gen 1/
 - 03 Simulation Gen 2/
 - 04 Simulation Gen 2.1/
 - 05 Production Forecast/
 - 06 Comparison Framework/
+- 07 Christmas Adjustment/
 - Archive/
-- config/
-- data/
-- outputs/
+- outputs/                  Gen 2.1 workbook and checkpoints
+
+Published forecast files are written to FastPark/Outputs/ (one level up).

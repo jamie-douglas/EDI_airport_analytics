@@ -23,7 +23,7 @@ Primary audience:
 
 Run this command from the repo root:
 
-       powershell -ExecutionPolicy Bypass -File "FastPark Short Term Model Oct 2026/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
+       powershell -ExecutionPolicy Bypass -File "FastPark/01 Short Term Model/05 Production Forecast/run_simplified_fastpark_shortterm.ps1"
 
 Optional launcher switches:
 
@@ -157,7 +157,7 @@ Fix:
 1. verify forecast_weights_path in PRODUCTION_CONFIG
 2. if weights need refresh, run:
 
-       python "FastPark Short Term Model Oct 2026/05 Production Forecast/create_forecast_weights.py"
+       python "FastPark/01 Short Term Model/05 Production Forecast/create_forecast_weights.py"
 
 ### 6) output path/file permission errors
 
@@ -270,10 +270,10 @@ This map describes the production forecast execution inside:
 
 Use this path when upstream behavior changed and you want updated production weights.
 
-1. python "FastPark Short Term Model Oct 2026/01 Historical Analysis/fastpark_forecast_analysis.py"
-2. python "FastPark Short Term Model Oct 2026/02 Simulation Gen 1/fastpark_forecast_simulation.py"
-3. python "FastPark Short Term Model Oct 2026/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
-4. python "FastPark Short Term Model Oct 2026/05 Production Forecast/create_forecast_weights.py"
+1. python "FastPark/01 Short Term Model/01 Historical Analysis/fastpark_forecast_analysis.py"
+2. python "FastPark/01 Short Term Model/02 Simulation Gen 1/fastpark_forecast_simulation.py"
+3. python "FastPark/01 Short Term Model/03 Simulation Gen 2/fastpark_forecast_simulation_refined.py"
+4. python "FastPark/01 Short Term Model/05 Production Forecast/create_forecast_weights.py"
 5. rerun launcher for production outputs
 
 ## Change control recommendation
