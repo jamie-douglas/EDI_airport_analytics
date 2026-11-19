@@ -1,5 +1,8 @@
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root, so `modules` imports
 import os
 import re
+from modules.paths import FASTPARK_MOVEMENTS_DIR
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -63,17 +66,9 @@ import matplotlib.pyplot as plt
 #
 # ============================================================
 
-INPUT_FILE = (
-    r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited"
-    r"\Documents\GitHub\EDI_airport_analytics\inputs"
-    r"\movements_sep 25_to_26.csv"
-)
+INPUT_FILE = str(FASTPARK_MOVEMENTS_DIR / "movements_sep 25_to_26.csv")
 
-OUTPUT_EXCEL = (
-    r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited"
-    r"\Documents\GitHub\EDI_airport_analytics\outputs"
-    r"\block_area_analysis.xlsx"
-)
+OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "block_area_analysis.xlsx")
 
 OUTPUT_FOLDER = os.path.dirname(OUTPUT_EXCEL)
 

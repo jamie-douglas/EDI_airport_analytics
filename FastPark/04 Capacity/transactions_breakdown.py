@@ -4,7 +4,7 @@ import pandas as pd
 import sys
 import pathlib
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.db import get_engine
 
@@ -286,7 +286,8 @@ def build_month_from_profile(
     return output_rows
 
 
-output_file = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\transaction_breakdown_oct26.xlsx"
+from modules.paths import TRANSACTION_BREAKDOWN
+output_file = str(TRANSACTION_BREAKDOWN)
 
 summary_rows = []
 

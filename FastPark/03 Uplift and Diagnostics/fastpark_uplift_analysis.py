@@ -72,7 +72,7 @@ from openpyxl.utils import get_column_letter
 # ---------------------------------------------------------------------
 # Path setup
 # ---------------------------------------------------------------------
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.query import query
 
@@ -80,7 +80,7 @@ from modules.utils.query import query
 # ---------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------
-OUTPUT_DIR = Path("outputs/fastpark_uplift_analysis")
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs" / "fastpark_uplift_analysis"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 RUN_DATE_STR = datetime.now().strftime("%Y-%m-%d")

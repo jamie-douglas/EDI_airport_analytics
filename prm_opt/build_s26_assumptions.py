@@ -314,7 +314,7 @@ def build_stand_inputs(
     3) Fallback distributions from ALL S25 flights
     """
 
-    stands_dir = repo_root / "data" / "stands"
+    stands_dir = repo_root / "PRM" / "03 Fleet Optimisation" / "inputs" / "stands"
     
     if stand_plan_files is not None:
 
@@ -426,7 +426,7 @@ def build_s26_assumptions(
 
     print("[5/5] Stand inputs…")
     stand_actuals, stand_dist, stand_meta = build_stand_inputs(
-        repo_root=Path(__file__).resolve().parents[2],
+        repo_root=Path(__file__).resolve().parents[1],
         df_flights_s25=df_flights_s25,
     )
     t = step(t, "stand inputs built")

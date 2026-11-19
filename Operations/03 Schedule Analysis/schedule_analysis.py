@@ -9,7 +9,7 @@ import numpy as np
 # -----------------------------
 # Project imports (repo root)
 # -----------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]  # repo root
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -222,7 +222,7 @@ print("\n---- Missing flights summary (A/D × Airline × Airport) ----")
 print(summary_missing.to_string(index=False))
 
 
-output_path = Path("outputs") / "schedule_analysis.xlsx"
+output_path = Path(__file__).resolve().parent / "outputs" / "schedule_analysis.xlsx"
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
 with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:

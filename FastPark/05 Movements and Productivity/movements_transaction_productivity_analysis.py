@@ -1,10 +1,13 @@
+import sys
 import pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root, so `modules` imports
+from modules.paths import FASTPARK_MOVEMENTS_DIR
 import numpy as np
 import pandas as pd
 
 
-INPUT_CSV = pathlib.Path("inputs/movements_YTD_26.csv")
-OUTPUT_DIR = pathlib.Path("outputs/movement_transaction_analysis")
+INPUT_CSV = FASTPARK_MOVEMENTS_DIR / "movements_YTD_26.csv"
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent / "outputs" / "movement_transaction_analysis"
 OUTPUT_XLSX = OUTPUT_DIR / "movement_transaction_productivity_summary.xlsx"
 
 

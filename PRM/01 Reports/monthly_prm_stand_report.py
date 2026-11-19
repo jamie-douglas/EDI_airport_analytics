@@ -13,7 +13,7 @@ import numpy as np
 # Project imports
 # =====================================================================
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.query import query
 from modules.utils.dates import to_datetime
@@ -1171,14 +1171,14 @@ def main():
     parser.add_argument(
         "--out",
         required=False,
-        default="outputs/monthly_prm_stand_report.xlsx",
+        default=str(pathlib.Path(__file__).resolve().parent / "outputs" / "monthly_prm_stand_report.xlsx"),
         help="Output Excel path. Default: outputs/monthly_prm_stand_report.xlsx",
     )
 
     parser.add_argument(
         "--csv-dir",
         required=False,
-        default="outputs/monthly_prm_stand_report_csv",
+        default=str(pathlib.Path(__file__).resolve().parent / "outputs" / "monthly_prm_stand_report_csv"),
         help=(
             "CSV output directory. "
             "Default: outputs/monthly_prm_stand_report_csv. "

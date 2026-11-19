@@ -81,7 +81,7 @@ from modules.utils.progress import step
 # Define the root directory for the project. This is assumed to be two levels
 # up from where this script is located (e.g., if script is in `project/scripts/`,
 # PROJECT_ROOT is `project/`).
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]  # repo root
 
 # Add PROJECT_ROOT to sys.path to ensure modules.utils can be found.
 if str(PROJECT_ROOT) not in sys.path:
@@ -89,7 +89,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Define the directory for storing learned parameters and output forecasts.
 # This should be consistent with where your simulation outputs were saved.
-PRODUCTION_OUTPUT_DIR = PROJECT_ROOT / "outputs"
+PRODUCTION_OUTPUT_DIR = pathlib.Path(__file__).resolve().parents[2] / "Outputs"  # FastPark/Outputs
 PRODUCTION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

@@ -4,7 +4,7 @@ import pathlib
 from pathlib import Path
 
 # Add parent directory to path so custom modules can be imported
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.query import query
 import pandas as pd

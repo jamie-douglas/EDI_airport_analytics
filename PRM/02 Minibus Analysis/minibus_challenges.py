@@ -2,7 +2,8 @@ import sys
 import pathlib
 from pathlib import Path
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
+from modules.paths import PRM_ECAC_DIR
 
 import time
 import pandas as pd
@@ -148,14 +149,14 @@ def load_future_flight_data(start: str, end: str) -> pd.DataFrame:
 
 def load_avtech_data(start: str, end: str):
     ecac_arrivals = pd.read_excel(
-        io="inputs/ECAC Arrivals 2025.xlsx", 
+        io=PRM_ECAC_DIR / "ECAC Arrivals 2025.xlsx", 
         sheet_name="AvTech ECAC Arrivals", 
         header=0, 
         usecols=["Source.Name", "Date", "PassengerID", "Primary PRM", "PRM Secondary String", "Airline Code", "Flt Number"]
      )
     
     ecac_departures = pd.read_excel(
-        io="inputs/ECAC Departures 2025.xlsx", 
+        io=PRM_ECAC_DIR / "ECAC Departures 2025.xlsx", 
         sheet_name="AvTech ECAC Departures", 
         header=0, 
         usecols=["Source.Name", "Date", "PassengerID", "Primary PRM", "PRM Secondary String", "Airline Code", "Flt Number"]

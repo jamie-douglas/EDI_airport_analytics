@@ -134,7 +134,7 @@ EXIT_INC = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 SEPTEMBER_MULTIPLIER = 1.28
 
 BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = BASE_DIR / "fastpark_peak_cap_outputs"
+OUTPUT_DIR = BASE_DIR / "outputs"
 ANALYSIS_DIR = OUTPUT_DIR / "analysis"
 FORECAST_DIR = OUTPUT_DIR / "forecast"
 

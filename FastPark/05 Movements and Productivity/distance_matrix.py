@@ -144,7 +144,8 @@ locations_df = pd.DataFrame.from_dict(
     locations, orient="index", columns=["latitude", "longitude"]
 ).reset_index().rename(columns={"index": "location"})
 
-output_file = "carpark_distance_matrix.xlsx"
+from pathlib import Path
+output_file = str(Path(__file__).resolve().parent / "outputs" / "carpark_distance_matrix.xlsx")
 
 with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
     locations_df.to_excel(writer, sheet_name="locations", index=False)

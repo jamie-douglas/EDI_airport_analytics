@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.append(
-    str(pathlib.Path(__file__).resolve().parents[1])
+    str(pathlib.Path(__file__).resolve().parents[2])  # repo root
 )
 import pandas as pd
 
@@ -701,7 +701,7 @@ if __name__ == "__main__":
 
     start = ANALYSIS_START
 
-    output_folder = Path("outputs/PRM/minibus_trial")
+    output_folder = Path(__file__).resolve().parent / "outputs"
     output_folder.mkdir(parents=True, exist_ok=True)    
 
     # The SQL end date is exclusive, so use tomorrow to include

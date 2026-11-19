@@ -1,5 +1,8 @@
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root, so `modules` imports
 import os
 import re
+from modules.paths import FASTPARK_MOVEMENTS_DIR
 import pandas as pd
 import numpy as np
 
@@ -7,9 +10,9 @@ import numpy as np
 # CONFIG
 # ============================================================
 
-INPUT_FILE = "inputs/movements_july25_26.csv"
+INPUT_FILE = str(FASTPARK_MOVEMENTS_DIR / "movements_july25_26.csv")
 
-OUTPUT_EXCEL = "inputs/driving_time_matrices_v2.xlsx"
+OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "driving_time_matrices_v2.xlsx")
 
 MAX_DRIVING_TIME_MINUTES = 90
 

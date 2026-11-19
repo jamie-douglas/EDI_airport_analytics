@@ -4,7 +4,7 @@
 
 import sys
 import pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 import time
 import pandas as pd
@@ -340,7 +340,7 @@ if __name__ == "__main__":
     print(minibus_travel_pivot)
 
 
-    output_path = "output/PRM/travel_time_summary.xlsx"
+    output_path = str(pathlib.Path(__file__).resolve().parent / "outputs" / "travel_time_summary.xlsx")
 
     # Optional: round for presentation
     ambulift_travel_pivot = ambulift_travel_pivot.round(2)

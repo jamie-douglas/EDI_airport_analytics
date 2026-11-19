@@ -49,9 +49,7 @@ MIN_PAX_GROUP = 500
 MIN_PRM_GROUP = 1
 
 # Output folder
-output_dir = Path(
-    r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\GitHub\EDI_airport_analytics\output\PRM"
-)
+output_dir = Path(__file__).resolve().parent / "outputs"
 
 output_dir.mkdir(parents=True, exist_ok=True)
 

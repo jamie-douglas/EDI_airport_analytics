@@ -4,7 +4,7 @@ import pathlib
 from pathlib import Path
 
 # Add parent directory to path so custom modules can be imported
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.query import query
 import pandas as pd
@@ -459,7 +459,8 @@ flights_2026_df = pd.concat([
 # ==========================================================
 # LANE MODEL (REAL DATA)
 # ==========================================================
-lane_movements_path = Path(__file__).resolve().parents[1] / "inputs" / "lane_movements_week.xlsx"
+from modules.paths import FASTPARK_MOVEMENTS_DIR
+lane_movements_path = FASTPARK_MOVEMENTS_DIR / "lane_movements_week.xlsx"
 
 lane_events_df = load_lane_movements(lane_movements_path)
 
@@ -676,7 +677,7 @@ lane_hourly_clean = drop_source_columns(lane_hourly_df)
 current_system_clean = drop_source_columns(current_system)
 
 
-clean_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol3.xlsx"
+clean_output_path = Path(__file__).resolve().parent / "outputs" / "fastpark_msc_vol3.xlsx"
 
 with pd.ExcelWriter(clean_output_path, engine="openpyxl", mode="w") as writer:
     sep_2025_fp_merged_clean.to_excel(writer, sheet_name="Pseudo Sep2025 actuals+book", index=False)
@@ -691,7 +692,7 @@ with pd.ExcelWriter(clean_output_path, engine="openpyxl", mode="w") as writer:
     drop_source_columns(flights_2025_df).to_excel(writer, sheet_name="Pseudo Sep2025 flights", index=False)
     drop_source_columns(flights_2026_df).to_excel(writer, sheet_name="Pseudo Sep2026 flights", index=False)
 
-debug_output_path = Path(__file__).resolve().parents[1] / "outputs" / "fastpark_msc_vol3.xlsx"
+debug_output_path = Path(__file__).resolve().parent / "outputs" / "fastpark_msc_vol3.xlsx"
 
 with pd.ExcelWriter(debug_output_path, engine="openpyxl", mode="w") as writer:
     sep_2025_fp_merged.to_excel(writer, sheet_name="Pseudo Sep2025 actuals+book", index=False)

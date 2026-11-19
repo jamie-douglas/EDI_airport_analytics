@@ -16,9 +16,10 @@ PROJECT_ROOT = SCRIPT_DIR.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-PHOTOBOOTH_PATH = SCRIPT_DIR / "Photobooth Inputs"
+from modules.paths import FASTPARK_ANPR_PHOTOBOOTH_DIR, TRANSACTION_FORECAST
+PHOTOBOOTH_PATH = FASTPARK_ANPR_PHOTOBOOTH_DIR
 FORECAST_CACHE_DIR = SCRIPT_DIR / ".forecast_cache"
-FORECAST_B_CSV_PATH = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\transaction_forecast.xlsx"
+FORECAST_B_CSV_PATH = str(TRANSACTION_FORECAST)
 
 from modules.utils.db import get_engine
 

@@ -1,7 +1,8 @@
 
 import sys
 import pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent / "outputs"  # this stage's outputs/ folder
 
 import argparse
 import time
@@ -208,7 +209,8 @@ def main(start: str, end: str, excel_out: str | None, overlap: bool, plots: bool
         import os  # ensure available for folder creation
 
         # Define where plots should be saved (inside your repo output folder)
-        plot_folder = "output/fastpark/plots/"
+        plot_folder = str(OUTPUT_DIR / "plots") + "/"
+        (OUTPUT_DIR / "plots").mkdir(exist_ok=True)
         os.makedirs(plot_folder, exist_ok=True)  # create if missing
 
         # Save PNGs into output folder

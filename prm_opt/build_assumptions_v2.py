@@ -261,7 +261,9 @@ def build_stand_inputs(
 
     stands_dir = (
         repo_root
-        / "data"
+        / "PRM"
+        / "03 Fleet Optimisation"
+        / "inputs"
         / "stands"
     )
 
@@ -399,7 +401,7 @@ def build_assumptions_v2(
 
     stand_actuals, stand_dist = (
         build_stand_inputs(
-            repo_root=Path(__file__).resolve().parents[2],
+            repo_root=Path(__file__).resolve().parents[1],
             df_flights_s25=df_flights,
             stand_plan_files=stand_plan_files,
         )

@@ -1,5 +1,8 @@
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root, so `modules` imports
 import pandas as pd
 from pathlib import Path
+from modules.paths import FASTPARK_ONSITE_DUE_IN_DIR
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import re
@@ -17,11 +20,11 @@ import re
 #   071426.xlsx
 #
 INPUT_FILES = [
-    "scripts/071326.xlsx",
-    "scripts/071426.xlsx",
+    str(FASTPARK_ONSITE_DUE_IN_DIR / "071326.xlsx"),
+    str(FASTPARK_ONSITE_DUE_IN_DIR / "071426.xlsx"),
 ]
 
-OUTPUT_FILE = "combined_anonymised_parking_data.xlsx"
+OUTPUT_FILE = str(Path(__file__).resolve().parent / "outputs" / "combined_anonymised_parking_data.xlsx")
 
 REQUIRED_SHEETS = ["Onsite", "Due In"]
 

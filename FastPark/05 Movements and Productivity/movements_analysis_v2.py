@@ -4,7 +4,8 @@ import numpy as np
 import pathlib
 import sys
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
+from modules.paths import FASTPARK_MOVEMENTS_DIR
 
 from modules.utils.query import query
 
@@ -56,11 +57,11 @@ from modules.utils.query import query
 # =========================
 
 INPUT_FILES = {
-    "2024": "inputs/movements_W24.csv",
-    "2025": "inputs/movements_W25.csv"
+    "2024": str(FASTPARK_MOVEMENTS_DIR / "movements_W24.csv"),
+    "2025": str(FASTPARK_MOVEMENTS_DIR / "movements_W25.csv")
 }
 
-OUTPUT_EXCEL = "inputs/winter_productivity_comparison_v2_todelete.xlsx"
+OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "winter_productivity_comparison_v2.xlsx")
 
 HOUR_COLUMNS = [f"{h:02d}:00" for h in range(24)]
 

@@ -73,7 +73,7 @@ from openpyxl.formatting.rule import ColorScaleRule  # noqa: E402
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # noqa: E402
 from openpyxl.utils import get_column_letter  # noqa: E402
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 
 # =====================================================================
@@ -107,7 +107,7 @@ THIS_YEAR_MONTHLY_AVG = {
     "Jan": {"Entries": None, "Exits": None},
 }
 
-OUTPUT_DIR = Path("outputs/fastpark_christmas_analysis")
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 
 
 # =====================================================================

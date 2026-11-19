@@ -2,7 +2,7 @@
 # Scripts/prm_report_v2.py
 import sys
 import pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 import argparse
 import time
@@ -26,7 +26,8 @@ from modules.domain.prm.demand import group_prm_by_time, group_pax_by_time, merg
 from modules.domain.prm.ambulift import group_ambulift_by_effective_month, ambulift_breakdowns
 from modules.domain.prm.reception import landside_RC_breakdowns, airside_RC_breakdowns
 
-BUDGET_EXCEL_PATH = r"C:\Users\jamie_douglas\OneDrive - Edinburgh Airport Limited\Documents\PRM Report\PRM_Data.xlsx"
+from modules.paths import PRM_DATA_XLSX
+BUDGET_EXCEL_PATH = str(PRM_DATA_XLSX)
 
 
 # ---------------------------------------------------------------

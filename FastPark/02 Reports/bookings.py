@@ -3,7 +3,7 @@ import pathlib
 from pathlib import Path
 
 # Add parent directory to path so custom modules can be imported
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
 
 from modules.utils.query import query
 import pandas as pd
@@ -31,7 +31,7 @@ print(bookings_df.head(50))
 # EXPORT (SAFE - PRESERVES EXISTING SHEETS)
 # ==========================================================
 
-output_path = Path(__file__).resolve().parents[1] / "outputs" / "bookings.xlsx"
+output_path = Path(__file__).resolve().parent / "outputs" / "bookings.xlsx"
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
 writer_kwargs = {"engine": "openpyxl"}

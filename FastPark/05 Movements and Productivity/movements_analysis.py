@@ -1,12 +1,16 @@
 
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root, so `modules` imports
 import pandas as pd
+from modules.paths import FASTPARK_MOVEMENTS_DIR
+OUTPUT_DIR = pathlib.Path(__file__).resolve().parent / "outputs"  # this stage's outputs/ folder
 import numpy as np
 import matplotlib.pyplot as plt
 
 # =========================
 # LOAD DATA
 # =========================
-df = pd.read_csv("inputs/movements_YTD_26.csv")
+df = pd.read_csv(FASTPARK_MOVEMENTS_DIR / "movements_YTD_26.csv")
 
 # Standardise column names
 df.columns = df.columns.str.strip().str.lower()
@@ -149,7 +153,7 @@ output["adjusted_movements_per_hour"] = output["adjusted_movements_per_hour"].ro
 # =========================
 # SAVE
 # =========================
-output.to_csv("driver_shift_productivity_2026.csv", index=False)
+output.to_csv(OUTPUT_DIR / "driver_shift_productivity_2026.csv", index=False)
 
 print(output.head())
 
@@ -193,7 +197,7 @@ print(final[[
 ]].describe())
 
 # Optional: save separately
-summary_metrics.to_csv("summary_metrics.csv", index=False)
+summary_metrics.to_csv(OUTPUT_DIR / "summary_metrics.csv", index=False)
 
 # =========================
 # 8. HOURLY FEATURES (DATE AND WEEKDAY)
@@ -279,7 +283,7 @@ hourly_date = hourly_date.sort_values(["date_only", "hour"])
 print("\n=== HOURLY BY DATE ===")
 print(hourly_date.head())
 
-hourly_date.to_csv("hourly_by_date.csv", index=False)
+hourly_date.to_csv(OUTPUT_DIR / "hourly_by_date.csv", index=False)
 
 
 # 9B. BY WEEKDAY AND HOUR
@@ -296,7 +300,7 @@ hourly_weekday = hourly_weekday.sort_values(["weekday", "hour"])
 print("\n=== HOURLY BY WEEKDAY ===")
 print(hourly_weekday.head())
 
-hourly_weekday.to_csv("hourly_by_weekday.csv", index=False)
+hourly_weekday.to_csv(OUTPUT_DIR / "hourly_by_weekday.csv", index=False)
 
 
 # =========================
@@ -354,7 +358,7 @@ travel_summary[[
 print("\n=== TRAVEL TIME SUMMARY ===")
 print(travel_summary.head())
 
-travel_summary.to_csv("travel_time_summary.csv", index=False)
+travel_summary.to_csv(OUTPUT_DIR / "travel_time_summary.csv", index=False)
 
 
 # =========================
@@ -381,7 +385,7 @@ driver_hour_detail["adj_movements"] = driver_hour_detail["adj_movements"].fillna
 print("\n=== DRIVER HOURLY DETAIL ===")
 print(driver_hour_detail.head())
 
-driver_hour_detail.to_csv("driver_hourly_detail.csv", index=False)
+driver_hour_detail.to_csv(OUTPUT_DIR / "driver_hourly_detail.csv", index=False)
 
 
 print("\n=== DRIVER HOUR DETAIL CHECK ===")
@@ -407,7 +411,7 @@ driver_hour_avg = driver_hour_avg.sort_values(["weekday", "hour"])
 print("\n=== DRIVER-AVERAGED HOURLY PRODUCTIVITY ===")
 print(driver_hour_avg.head())
 
-driver_hour_avg.to_csv("driver_hourly_average.csv", index=False)
+driver_hour_avg.to_csv(OUTPUT_DIR / "driver_hourly_average.csv", index=False)
 
 comparison = hourly_weekday.merge(
     driver_hour_avg,
@@ -418,7 +422,7 @@ comparison = hourly_weekday.merge(
 print("\n=== SYSTEM vs DRIVER COMPARISON ===")
 print(comparison.head())
 
-comparison.to_csv("hourly_comparison_system_vs_driver.csv", index=False)
+comparison.to_csv(OUTPUT_DIR / "hourly_comparison_system_vs_driver.csv", index=False)
 
 
 # =========================

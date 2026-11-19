@@ -4,7 +4,8 @@ import numpy as np
 import pathlib
 import sys
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))  # repo root
+from modules.paths import FASTPARK_MOVEMENTS_DIR
 
 # ============================================================
 # AUGUST EVENT MOVEMENT ANALYSIS
@@ -57,20 +58,20 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 INPUT_FILES = {
     "Aug_22": {
-        "filepath": "inputs/Aug_22.csv",
+        "filepath": str(FASTPARK_MOVEMENTS_DIR / "Aug_22.csv"),
         "analysis_group": "event"
     },
     "Aug_2627": {
-        "filepath": "inputs/Aug_2627.csv",
+        "filepath": str(FASTPARK_MOVEMENTS_DIR / "Aug_2627.csv"),
         "analysis_group": "event"
     },
     "Aug2025": {
-        "filepath": "inputs/Aug2025.csv",
+        "filepath": str(FASTPARK_MOVEMENTS_DIR / "Aug2025.csv"),
         "analysis_group": "baseline"
     }
 }
 
-OUTPUT_EXCEL = "inputs/august_event_movement_hourly_comparison.xlsx"
+OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "august_event_movement_hourly_comparison.xlsx")
 
 EVENT_DATES = pd.to_datetime([
     "2025-08-22",
