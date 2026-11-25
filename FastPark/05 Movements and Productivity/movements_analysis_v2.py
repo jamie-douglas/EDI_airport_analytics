@@ -57,13 +57,16 @@ from modules.utils.query import query
 # =========================
 
 INPUT_FILES = {
-    "2024": str(FASTPARK_MOVEMENTS_DIR / "movements_W24.csv"),
-    "2025": str(FASTPARK_MOVEMENTS_DIR / "movements_W25.csv")
+    "2025": str(FASTPARK_MOVEMENTS_DIR / "movements_2025.csv"),
+    "2026": str(FASTPARK_MOVEMENTS_DIR / "movements_YTD_26.csv")
 }
 
-OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "winter_productivity_comparison_v2.xlsx")
+OUTPUT_EXCEL = str(pathlib.Path(__file__).resolve().parent / "outputs" / "25_26_movements_comparison.xlsx")
 
 HOUR_COLUMNS = [f"{h:02d}:00" for h in range(24)]
+
+MONTH_COLUMNS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 # =========================
@@ -228,16 +231,16 @@ def format_yoy(x):
     return f"{round(x * 100, 1)}%"
 
 
-def create_overall_row(metric_name, value_2024, value_2025):
+def create_overall_row(metric_name, value_2025, value_2026):
     """
     Creates one overall comparison row.
     """
-    yoy = safe_yoy(value_2025, value_2024)
+    yoy = safe_yoy(value_2026, value_2025)
 
     return {
         "metric": metric_name,
-        "2024": round(value_2024, 2) if pd.notna(value_2024) else np.nan,
         "2025": round(value_2025, 2) if pd.notna(value_2025) else np.nan,
+        "2026": round(value_2026, 2) if pd.notna(value_2026) else np.nan,
         "YoY Change": format_yoy(yoy)
     }
 
@@ -248,7 +251,8 @@ def create_hourly_comparison(hourly_source, value_col):
 
         M/Hr | 00:00 | 01:00 | ... | 23:00
         2025 | x.xx
-        2024 | x.xx
+        2026 | x.xx
+        Diff | x%
         Diff | x%
     """
 
@@ -265,29 +269,69 @@ def create_hourly_comparison(hourly_source, value_col):
 
     pivot = pivot[HOUR_COLUMNS]
 
-    if "2024" in pivot.index:
-        values_2024 = pivot.loc["2024"]
-    else:
-        values_2024 = pd.Series(index=HOUR_COLUMNS, dtype=float)
-
     if "2025" in pivot.index:
         values_2025 = pivot.loc["2025"]
     else:
         values_2025 = pd.Series(index=HOUR_COLUMNS, dtype=float)
 
-    diff = (values_2025 / values_2024) - 1
+    if "2026" in pivot.index:
+        values_2026 = pivot.loc["2026"]
+    else:
+        values_2026 = pd.Series(index=HOUR_COLUMNS, dtype=float)
+
+    diff = (values_2026 / values_2025) - 1
     diff = diff.replace([np.inf, -np.inf], np.nan)
 
     output = pd.DataFrame(
         [
+            ["2026"] + list(values_2026.round(2)),
             ["2025"] + list(values_2025.round(2)),
-            ["2024"] + list(values_2024.round(2)),
             ["Diff"] + list(diff.apply(format_yoy))
         ],
         columns=["M/Hr"] + HOUR_COLUMNS
     )
 
     return output
+
+
+def create_monthly_comparison(monthly_source, value_col, metric_name, decimals=2):
+    """
+    Creates a month-by-month comparison block for one metric:
+
+        Metric       | Year | Jan | Feb | ... | Dec
+        <metric>     | 2026 | x.xx
+        <metric>     | 2025 | x.xx
+        <metric>     | Diff | x%
+
+    Months with no data for a year (e.g. 2026 YTD) are left blank.
+    """
+
+    pivot = monthly_source.pivot(
+        index="comparison_year",
+        columns="month_label",
+        values=value_col
+    ).reindex(columns=MONTH_COLUMNS)
+
+    values_2025 = (
+        pivot.loc["2025"] if "2025" in pivot.index
+        else pd.Series(index=MONTH_COLUMNS, dtype=float)
+    )
+    values_2026 = (
+        pivot.loc["2026"] if "2026" in pivot.index
+        else pd.Series(index=MONTH_COLUMNS, dtype=float)
+    )
+
+    diff = (values_2026 / values_2025) - 1
+    diff = diff.replace([np.inf, -np.inf], np.nan)
+
+    return pd.DataFrame(
+        [
+            [metric_name, "2026"] + list(values_2026.round(decimals)),
+            [metric_name, "2025"] + list(values_2025.round(decimals)),
+            [metric_name, "Diff"] + list(diff.apply(format_yoy))
+        ],
+        columns=["Metric", "Year"] + MONTH_COLUMNS
+    )
 
 
 def add_excel_formatting(writer, sheet_name, df):
@@ -986,30 +1030,30 @@ def get_metric_value(source_df, year, metric_col):
     return values.iloc[0]
 
 
-driver_2024 = get_metric_value(driver_overall, "2024", "driver_level_metric")
 driver_2025 = get_metric_value(driver_overall, "2025", "driver_level_metric")
+driver_2026 = get_metric_value(driver_overall, "2026", "driver_level_metric")
 
-adj_driver_2024 = get_metric_value(driver_overall, "2024", "adjusted_driver_level_metric")
 adj_driver_2025 = get_metric_value(driver_overall, "2025", "adjusted_driver_level_metric")
+adj_driver_2026 = get_metric_value(driver_overall, "2026", "adjusted_driver_level_metric")
 
-system_2024 = get_metric_value(system_overall, "2024", "system_level_metric")
 system_2025 = get_metric_value(system_overall, "2025", "system_level_metric")
+system_2026 = get_metric_value(system_overall, "2026", "system_level_metric")
 
 overall_comparison = pd.DataFrame([
     create_overall_row(
         "Driver Level",
-        driver_2024,
-        driver_2025
+        driver_2025,
+        driver_2026
     ),
     create_overall_row(
         "Adjusted Driver Level",
-        adj_driver_2024,
-        adj_driver_2025
+        adj_driver_2025,
+        adj_driver_2026
     ),
     create_overall_row(
         "System Level",
-        system_2024,
-        system_2025
+        system_2025,
+        system_2026
     )
 ])
 
@@ -1032,6 +1076,53 @@ hourly_system_level = create_hourly_comparison(
     hourly_source=system_hourly,
     value_col="system_level_metric"
 )
+
+
+# =========================
+# 9b. MONTHLY COMPARISON
+# =========================
+#
+# Same metric definitions as the overall/hourly views,
+# but grouped by calendar month so each month can be
+# compared year-on-year (e.g. Mar 2026 vs Mar 2025).
+# =========================
+
+def add_month_label(source_df):
+    out = source_df.copy()
+    out["month_label"] = pd.to_datetime(out["date_only"]).dt.month.map(
+        lambda m: MONTH_COLUMNS[m - 1]
+    )
+    return out
+
+
+driver_monthly = add_month_label(driver_hour_detail).groupby(
+    ["comparison_year", "month_label"]
+).agg(
+    driver_level_metric=("raw_movements", "mean"),
+    adjusted_driver_level_metric=("adjusted_movements", "mean")
+).reset_index()
+
+system_monthly = add_month_label(system_hourly_by_date).groupby(
+    ["comparison_year", "month_label"]
+).agg(
+    raw_movements=("raw_movements", "sum"),
+    adjusted_movements=("adjusted_movements", "sum"),
+    active_driver_hours=("active_drivers", "sum")
+).reset_index()
+
+system_monthly["system_level_metric"] = (
+    system_monthly["adjusted_movements"] /
+    system_monthly["active_driver_hours"]
+)
+
+monthly_comparison = pd.concat([
+    create_monthly_comparison(system_monthly, "system_level_metric", "System Level"),
+    create_monthly_comparison(driver_monthly, "driver_level_metric", "Driver Level"),
+    create_monthly_comparison(driver_monthly, "adjusted_driver_level_metric", "Adjusted Driver Level"),
+    create_monthly_comparison(system_monthly, "raw_movements", "Raw Movements", decimals=0),
+    create_monthly_comparison(system_monthly, "adjusted_movements", "Adjusted Movements", decimals=0),
+    create_monthly_comparison(system_monthly, "active_driver_hours", "Active Driver-Hours", decimals=0),
+], ignore_index=True)
 
 
 # =========================
@@ -1094,9 +1185,16 @@ with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
         index=False
     )
 
+    monthly_comparison.to_excel(
+        writer,
+        sheet_name="Monthly Comparison",
+        index=False
+    )
+
     sheets_to_format = {
         "Notes": notes,
         "Overall Comparison": overall_comparison,
+        "Monthly Comparison": monthly_comparison,
         "Hourly - Driver Level": hourly_driver_level,
         "Hourly - Adj Driver": hourly_adjusted_driver_level,
         "Hourly - System Level": hourly_system_level
@@ -1122,6 +1220,7 @@ print("- Overall Comparison")
 print("- Hourly - Driver Level")
 print("- Hourly - Adj Driver")
 print("- Hourly - System Level")
+print("- Monthly Comparison")
 print("============================================================")
 
 print("\n=== OVERALL COMPARISON ===")
@@ -1135,3 +1234,7 @@ print(hourly_adjusted_driver_level)
 
 print("\n=== HOURLY - SYSTEM LEVEL ===")
 print(hourly_system_level)
+
+print("\n=== MONTHLY COMPARISON ===")
+with pd.option_context("display.max_columns", None, "display.width", 250):
+    print(monthly_comparison)
